@@ -1,0 +1,56 @@
+{
+  "name": "pdf-zipper",
+  "version": "2.0.0",
+  "description": "Async PDF/mp4 conversion system for bookmarked URLs",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch --env-file=.env src/index.ts",
+    "build": "tsc",
+    "start": "node --env-file=.env dist/index.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "pdf",
+    "conversion",
+    "bullmq",
+    "job-queue"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@bull-board/api": "^6.16.4",
+    "@bull-board/express": "^6.16.4",
+    "archiver": "^7.0.1",
+    "bullmq": "^5.66.7",
+    "express": "^4.22.1",
+    "ioredis": "^5.9.2",
+    "metascraper": "^5.49.17",
+    "metascraper-author": "^5.49.17",
+    "metascraper-date": "^5.49.17",
+    "metascraper-description": "^5.49.17",
+    "metascraper-image": "^5.49.17",
+    "metascraper-publisher": "^5.49.17",
+    "metascraper-title": "^5.49.17",
+    "metascraper-url": "^5.49.17",
+    "normalize-url": "^8.1.1",
+    "ollama": "^0.6.3",
+    "pdf-img-convert": "^2.0.0",
+    "pdf-lib": "^1.17.1",
+    "pdf-parse": "^2.4.5",
+    "playwright": "^1.58.0",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "rss-parser": "^3.13.0",
+    "sanitize-filename": "^1.6.3"
+  },
+  "devDependencies": {
+    "@types/archiver": "^7.0.0",
+    "@types/express": "^4.17.25",
+    "@types/node": "^25.0.10",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

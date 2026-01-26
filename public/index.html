@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PDF Zipper - File Browser</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>PDF Zipper</h1>
+      <p class="subtitle">Browse and download your converted files</p>
+    </header>
+
+    <main>
+      <!-- Week list view -->
+      <div id="weeks-view" class="view">
+        <h2>Weekly Archives</h2>
+        <div id="weeks-list" class="weeks-list">
+          <p class="loading">Loading weeks...</p>
+        </div>
+      </div>
+
+      <!-- File browser view -->
+      <div id="files-view" class="view hidden">
+        <div class="toolbar">
+          <button id="back-button" class="btn btn-secondary">
+            &larr; Back to Weeks
+          </button>
+          <h2 id="week-title">Week Files</h2>
+          <div class="toolbar-actions">
+            <button id="rerun-button" class="btn btn-warning" title="Re-capture all URLs from this week">
+              Rerun All
+            </button>
+            <button id="rerun-selected-button" class="btn btn-warning" disabled title="Re-capture selected PDFs">
+              Rerun Selected
+            </button>
+            <button id="delete-button" class="btn btn-danger" disabled title="Delete selected files">
+              Delete Selected
+            </button>
+            <button id="download-button" class="btn btn-primary" disabled>
+              Download Selected
+            </button>
+          </div>
+        </div>
+
+        <div id="status-message" class="status-message hidden"></div>
+
+        <div class="table-container">
+          <table id="files-table">
+            <thead>
+              <tr>
+                <th class="col-checkbox">
+                  <input type="checkbox" id="select-all">
+                </th>
+                <th class="col-name">Name</th>
+                <th class="col-type">Type</th>
+                <th class="col-size">Size</th>
+                <th class="col-date">Date</th>
+              </tr>
+            </thead>
+            <tbody id="files-tbody">
+              <tr>
+                <td colspan="5" class="loading">Loading files...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </main>
+
+    <footer>
+      <div class="footer-content">
+        <p>PDF Zipper v2 - URL to PDF conversion with media collection</p>
+        <div class="settings-section">
+          <button id="cookies-btn" class="btn btn-small" title="Upload cookies.txt for paywall bypass">
+            🍪 Cookies
+          </button>
+        </div>
+      </div>
+    </footer>
+
+    <!-- Cookies upload modal -->
+    <div id="cookies-modal" class="modal hidden">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Upload Cookies</h3>
+          <button class="modal-close" onclick="closeCookiesModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p>Upload a Netscape cookies.txt file to enable access to paywalled content.</p>
+          <p class="hint">Export cookies from your browser using extensions like "cookies.txt" or "Get cookies.txt LOCALLY".</p>
+          <div id="cookies-status" class="cookies-status"></div>
+          <div class="upload-area">
+            <input type="file" id="cookies-file" accept=".txt" />
+            <label for="cookies-file" class="upload-label">
+              Choose cookies.txt file or drag & drop
+            </label>
+          </div>
+          <div id="upload-result" class="upload-result hidden"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="closeCookiesModal()">Close</button>
+          <button id="upload-btn" class="btn btn-primary" onclick="uploadCookies()" disabled>Upload</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
