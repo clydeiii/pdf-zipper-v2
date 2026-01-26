@@ -7,7 +7,10 @@
 
 import { Router, Request, Response } from 'express';
 import { conversionQueue, getJobStatus } from '../../queues/conversion.queue.js';
+import { podcastQueue } from '../../podcasts/podcast.queue.js';
+import { isApplePodcastsUrl } from '../../podcasts/apple.js';
 import type { ConversionJobData } from '../../jobs/types.js';
+import type { PodcastJobData } from '../../podcasts/types.js';
 
 export const jobsRouter = Router();
 
@@ -54,7 +57,26 @@ jobsRouter.post('/', async (req: Request, res: Response): Promise<void> => {
   }
 
   try {
-    // Add job to queue
+    // Check if this is an Apple Podcasts URL - route to podcast transcription
+    if (isApplePodcastsUrl(url)) {
+      const podcastJobData: PodcastJobData = {
+        url,
+        originalUrl: url,
+        source: 'karakeep',  // Default source for API submissions
+      };
+
+      const job = await podcastQueue.add('transcribe-podcast', podcastJobData);
+
+      res.status(202).json({
+        jobId: job.id,
+        status: 'queued',
+        message: 'Podcast submitted for transcription',
+        queue: 'podcast-transcription',
+      });
+      return;
+    }
+
+    // Add job to conversion queue
     // For direct API submissions, url is not normalized so originalUrl = url
     const job = await conversionQueue.add(
       'convert-url',

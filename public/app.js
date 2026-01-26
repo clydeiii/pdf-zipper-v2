@@ -154,6 +154,22 @@ function renderFileRow(file, index) {
     ? ` (<a href="${escapeHtml(file.sourceUrl)}" target="_blank" class="source-link">source</a>)`
     : '';
 
+  // Related files link (e.g., audio for podcast transcript)
+  let relatedLink = '';
+  if (file.relatedFiles && file.relatedFiles.length > 0) {
+    const relatedPath = file.relatedFiles[0];
+    const relatedUrl = `/api/file/${encodeURIComponent(relatedPath).replace(/%2F/g, '/')}`;
+    const relatedName = relatedPath.split('/').pop();
+    const isAudio = relatedName.match(/\.(mp3|m4a|wav|ogg)$/i);
+    const linkText = isAudio ? '🎧 audio' : '📄 transcript';
+    relatedLink = ` (<a href="${escapeHtml(relatedUrl)}" target="_blank" class="related-link" title="${escapeHtml(relatedName)}">${linkText}</a>)`;
+  }
+
+  // Type badge styling
+  const typeBadge = file.type === 'audio'
+    ? '<span class="badge-audio">🎧 audio</span>'
+    : file.type;
+
   return `
     <tr>
       <td class="col-checkbox">
@@ -165,9 +181,9 @@ function renderFileRow(file, index) {
         >
       </td>
       <td class="col-name">
-        <a href="${escapeHtml(fileUrl)}" target="_blank" class="file-link">${escapeHtml(file.name)}</a>${sourceLink}
+        <a href="${escapeHtml(fileUrl)}" target="_blank" class="file-link">${escapeHtml(file.name)}</a>${sourceLink}${relatedLink}
       </td>
-      <td class="col-type">${file.type}</td>
+      <td class="col-type">${typeBadge}</td>
       <td class="col-size">${formatFileSize(file.size)}</td>
       <td class="col-date">${formatDate(file.modified)}</td>
     </tr>

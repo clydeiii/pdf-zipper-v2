@@ -34,6 +34,9 @@ import { metadataWorker } from './feeds/metadata-worker.js';
 // Import media collection
 import { startMediaWorker, stopMediaWorker } from './media/collection-worker.js';
 
+// Import podcast transcription
+import { startPodcastWorker, stopPodcastWorker } from './podcasts/podcast-worker.js';
+
 console.log(`Environment: ${env.NODE_ENV}`);
 console.log(`Server port configured: ${env.PORT}`);
 
@@ -51,6 +54,10 @@ async function gracefulShutdown(signal: string): Promise<void> {
 
   try {
     // Close workers in reverse order of startup
+    console.log('Closing podcast worker...');
+    await stopPodcastWorker();
+    console.log('Podcast worker closed');
+
     console.log('Closing media worker...');
     await stopMediaWorker();
     console.log('Media worker closed');
@@ -82,6 +89,10 @@ async function gracefulShutdown(signal: string): Promise<void> {
   await startMediaWorker();
   console.log('Media collection worker initialized');
 
+  // Start podcast transcription worker
+  await startPodcastWorker();
+  console.log('Podcast transcription worker initialized');
+
   // Register additional shutdown handlers for feed workers
   // Note: conversion worker registers its own handlers in startWorker()
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
@@ -91,4 +102,5 @@ async function gracefulShutdown(signal: string): Promise<void> {
   console.log(`Queue '${QUEUE_NAME}' accepting jobs`);
   console.log('Feed monitoring active');
   console.log('Media collection active');
+  console.log('Podcast transcription active');
 })();

@@ -1,0 +1,10 @@
+node_modules
+dist
+data
+.env
+.git
+.claude
+*.log
+*.pdf
+*.mp3
+*.m4a

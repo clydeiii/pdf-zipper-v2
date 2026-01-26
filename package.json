@@ -26,6 +26,7 @@
     "archiver": "^7.0.1",
     "bullmq": "^5.66.7",
     "express": "^4.22.1",
+    "fast-xml-parser": "^5.3.3",
     "ioredis": "^5.9.2",
     "metascraper": "^5.49.17",
     "metascraper-author": "^5.49.17",

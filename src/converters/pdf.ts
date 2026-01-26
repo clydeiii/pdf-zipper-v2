@@ -1,12 +1,7 @@
 import { initBrowser } from '../browsers/manager.js';
 import { loadCookies } from '../browsers/cookies.js';
+import { env } from '../config/env.js';
 import type { PDFOptions, PDFResult } from './types.js';
-
-/**
- * Nitter server for Twitter/X URL conversion
- * Provides cleaner renders with full thread context
- */
-const NITTER_HOST = 'http://localhost:8080';
 
 /**
  * Check if a URL is a Twitter/X URL
@@ -36,7 +31,7 @@ function rewriteTwitterUrl(url: string): string {
     // Check if it's a Twitter/X URL
     if (host === 'x.com' || host === 'twitter.com' || host === 'www.x.com' || host === 'www.twitter.com') {
       // Rewrite to Nitter: keep the path (e.g., /user/status/123)
-      const nitterUrl = `${NITTER_HOST}${parsed.pathname}`;
+      const nitterUrl = `${env.NITTER_HOST}${parsed.pathname}`;
       console.log(`Rewriting Twitter URL: ${url} → ${nitterUrl}`);
       return nitterUrl;
     }

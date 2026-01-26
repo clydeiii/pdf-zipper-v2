@@ -1,0 +1,75 @@
+services:
+  pdfzipper-v2:
+    build: .
+    container_name: pdfzipper-v2
+    restart: unless-stopped
+    # Run as host user to avoid root-owned files in ./data
+    user: "1000:1000"
+    # Uses external pdf-zipper-redis container (has processing history)
+    # depends_on:
+    #   - redis
+    environment:
+      - NODE_ENV=production
+      - PORT=3002
+
+      # Redis (external container with processing history)
+      - REDIS_HOST=pdfzipper-redis
+      - REDIS_PORT=6379
+
+      # Data directory
+      - DATA_DIR=/data
+
+      # Ollama (on mac.mini)
+      - OLLAMA_HOST=http://mac.mini:11434
+      - OLLAMA_MODEL=gemma3:4b
+      # Use larger model for transcript formatting (better quality)
+      - TRANSCRIPT_FORMAT_MODEL=gemma3:12b
+
+      # Whisper ASR (on 10.0.0.81, faster_whisper engine)
+      - WHISPER_HOST=http://10.0.0.81:9002
+
+      # Karakeep feed (container name on proxy-network)
+      - KARAKEEP_FEED_URL=http://karakeep-web-1:3000/api/v1/feed/rss?token=ak2_a0ca73a396596dbfe3fb_b560f844af1c94953390051b57bd84f6
+      - FEED_POLL_INTERVAL_MINUTES=5
+
+      # Nitter for Twitter URLs (container name on proxy-network)
+      - NITTER_HOST=http://nitter:8080
+
+      # Quality threshold (0-100)
+      - QUALITY_THRESHOLD=50
+
+      # Playwright tuning
+      - CONCURRENCY=2
+      - NAV_TIMEOUT_MS=60000
+      - PDF_TIMEOUT_MS=90000
+
+      # Discord notifications
+      - DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/1465378270278057994/TQ25XzBXFYfSJOUeqMaaeRQ_GgzjPHYCEHJU0NqXOjyOGsh4DeTWHjrtPH-NLk0aHYR-
+
+      # Cookies file for paywalls
+      - COOKIES_FILE=/data/cookies.txt
+
+    ports:
+      - "3002:3002"
+    volumes:
+      - ./data:/data
+    shm_size: "1gb"
+    networks:
+      - proxy-network
+      - default
+
+  redis:
+    image: redis:7-alpine
+    container_name: pdfzipper-v2-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    networks:
+      - default
+
+networks:
+  proxy-network:
+    external: true
+
+volumes:
+  redis-data:

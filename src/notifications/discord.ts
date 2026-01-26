@@ -208,3 +208,30 @@ export async function notifyWeekRerun(data: {
     }],
   });
 }
+
+/**
+ * Generic notification for custom events (e.g., podcast transcription)
+ */
+export async function sendDiscordNotification(data: {
+  type: 'success' | 'failure' | 'warning' | 'info';
+  title: string;
+  description?: string;
+  url?: string;
+  fields?: EmbedField[];
+}): Promise<void> {
+  const fields: EmbedField[] = data.fields || [];
+
+  if (data.url) {
+    fields.unshift({ name: 'URL', value: truncate(data.url, 1024), inline: false });
+  }
+
+  await sendToDiscord({
+    embeds: [{
+      title: data.title,
+      description: data.description,
+      color: COLORS[data.type],
+      fields: fields.length > 0 ? fields : undefined,
+      timestamp: new Date().toISOString(),
+    }],
+  });
+}

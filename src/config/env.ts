@@ -26,6 +26,12 @@ interface EnvConfig {
   COOKIES_FILE: string;
   /** Discord webhook URL for job notifications (optional) */
   DISCORD_WEBHOOK_URL?: string;
+  /** Whisper ASR server URL for podcast transcription (default: http://10.0.0.81:9002) */
+  WHISPER_HOST: string;
+  /** Nitter server URL for Twitter/X conversion (default: http://localhost:8080) */
+  NITTER_HOST: string;
+  /** Ollama model for transcript formatting - use larger model for better results (default: same as OLLAMA_MODEL) */
+  TRANSCRIPT_FORMAT_MODEL: string;
 }
 
 const requiredEnvVars = ['REDIS_HOST', 'REDIS_PORT', 'PORT'] as const;
@@ -74,4 +80,10 @@ export const env: EnvConfig = {
   COOKIES_FILE: process.env.COOKIES_FILE || `${process.env.DATA_DIR || './data'}/cookies.txt`,
   // Discord webhook for job notifications (optional)
   DISCORD_WEBHOOK_URL: process.env.DISCORD_WEBHOOK_URL,
+  // Whisper ASR server for podcast transcription
+  WHISPER_HOST: process.env.WHISPER_HOST || 'http://10.0.0.81:9002',
+  // Nitter server for Twitter/X conversion
+  NITTER_HOST: process.env.NITTER_HOST || 'http://localhost:8080',
+  // Ollama model for transcript formatting (larger = better quality, slower)
+  TRANSCRIPT_FORMAT_MODEL: process.env.TRANSCRIPT_FORMAT_MODEL || process.env.OLLAMA_MODEL || 'gemma3',
 };

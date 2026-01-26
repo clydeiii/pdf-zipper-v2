@@ -3,8 +3,11 @@ import { workerConnection } from '../config/redis.js';
 import { METADATA_QUEUE_NAME, mediaCollectionQueue } from './monitor.js';
 import { extractUrlMetadata } from '../urls/metadata.js';
 import { conversionQueue } from '../queues/conversion.queue.js';
+import { podcastQueue } from '../podcasts/podcast.queue.js';
+import { isApplePodcastsUrl } from '../podcasts/apple.js';
 import type { MetadataJobData } from './monitor.js';
 import type { ConversionJobData } from '../jobs/types.js';
+import type { PodcastJobData } from '../podcasts/types.js';
 import type { BookmarkItem } from './types.js';
 import type { MediaItem } from '../media/types.js';
 
@@ -71,6 +74,35 @@ export const metadataWorker = new Worker<MetadataJobData>(
       }));
 
       await job.log(`Queued for media collection: ${enrichedItem.mediaType}`);
+    }
+
+    // Check if this is an Apple Podcasts URL - route to podcast transcription
+    if (isApplePodcastsUrl(url)) {
+      const podcastJobData: PodcastJobData = {
+        url: url,
+        originalUrl: url,
+        bookmarkedAt: enrichedItem.bookmarkedAt,
+        source,
+      };
+
+      const podcastJob = await podcastQueue.add('transcribe-podcast', podcastJobData);
+
+      await job.log(`Apple Podcasts URL detected - queued for transcription: job ${podcastJob.id}`);
+
+      console.log(JSON.stringify({
+        event: 'podcast_queued',
+        url: url,
+        source,
+        title: enrichedItem.title,
+        podcastJobId: podcastJob.id,
+        timestamp: new Date().toISOString(),
+      }));
+
+      return {
+        url: canonicalUrl,
+        metadata: enrichedItem,
+        podcastJobId: podcastJob.id,
+      };
     }
 
     // Queue for PDF conversion with metadata for file organization

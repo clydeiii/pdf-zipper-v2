@@ -12,8 +12,11 @@ import * as path from 'node:path';
 import { PDFDocument } from 'pdf-lib';
 import { env } from '../../config/env.js';
 import { conversionQueue } from '../../queues/conversion.queue.js';
+import { podcastQueue } from '../../podcasts/podcast.queue.js';
+import { isApplePodcastsUrl } from '../../podcasts/apple.js';
 import { getISOWeekNumber } from '../../media/organization.js';
 import { notifyWeekRerun } from '../../notifications/discord.js';
+import type { PodcastJobData } from '../../podcasts/types.js';
 
 export const filesRouter = Router();
 
@@ -35,8 +38,9 @@ interface FileInfo {
   path: string; // relative to DATA_DIR
   size: number;
   modified: string; // ISO date string
-  type: 'video' | 'transcript' | 'pdf';
+  type: 'video' | 'transcript' | 'pdf' | 'audio';
   sourceUrl?: string; // Original URL (for PDFs, extracted from metadata)
+  relatedFiles?: string[]; // Paths to related files (e.g., audio file for podcast transcript)
 }
 
 /**
@@ -77,7 +81,7 @@ async function countFilesInWeek(weekPath: string): Promise<number> {
   let count = 0;
 
   try {
-    const subdirs = ['videos', 'transcripts', 'pdfs'];
+    const subdirs = ['videos', 'transcripts', 'pdfs', 'podcasts'];
 
     for (const subdir of subdirs) {
       const subdirPath = path.join(weekPath, subdir);
@@ -222,11 +226,15 @@ filesRouter.get('/weeks/:weekId', async (req: Request, res: Response): Promise<v
     const files: FileInfo[] = [];
 
     // Scan subdirectories for files
-    const subdirs: Array<{ name: string; type: 'video' | 'transcript' | 'pdf' }> = [
-      { name: 'videos', type: 'video' },
-      { name: 'transcripts', type: 'transcript' },
-      { name: 'pdfs', type: 'pdf' },
+    const subdirs: Array<{ name: string; defaultType: 'video' | 'transcript' | 'pdf' | 'audio' }> = [
+      { name: 'videos', defaultType: 'video' },
+      { name: 'transcripts', defaultType: 'transcript' },
+      { name: 'pdfs', defaultType: 'pdf' },
+      { name: 'podcasts', defaultType: 'pdf' },  // Podcasts folder has PDFs and audio
     ];
+
+    // Track files by base name for linking related files (podcast PDF ↔ audio)
+    const filesByBaseName = new Map<string, FileInfo[]>();
 
     for (const subdir of subdirs) {
       const subdirPath = path.join(weekPath, subdir.name);
@@ -242,26 +250,63 @@ filesRouter.get('/weeks/:weekId', async (req: Request, res: Response): Promise<v
             // Path relative to DATA_DIR
             const relativePath = path.relative(env.DATA_DIR, filePath);
 
+            // Determine file type by extension
+            const ext = path.extname(entry).toLowerCase();
+            let fileType: 'video' | 'transcript' | 'pdf' | 'audio' = subdir.defaultType;
+            if (ext === '.mp3' || ext === '.m4a' || ext === '.wav' || ext === '.ogg') {
+              fileType = 'audio';
+            } else if (ext === '.pdf') {
+              fileType = 'pdf';
+            } else if (ext === '.mp4' || ext === '.webm') {
+              fileType = 'video';
+            }
+
             // Extract source URL from PDF metadata
             let sourceUrl: string | undefined;
-            if (subdir.type === 'pdf') {
+            if (fileType === 'pdf') {
               sourceUrl = await extractUrlFromPdf(filePath) || undefined;
             }
 
-            files.push({
+            const fileInfo: FileInfo = {
               name: entry,
               path: relativePath,
               size: stats.size,
               modified: stats.mtime.toISOString(),
-              type: subdir.type,
+              type: fileType,
               sourceUrl,
-            });
+            };
+
+            files.push(fileInfo);
+
+            // Track by base name for podcasts folder (to link PDF ↔ audio)
+            if (subdir.name === 'podcasts') {
+              const baseName = path.basename(entry, ext);
+              if (!filesByBaseName.has(baseName)) {
+                filesByBaseName.set(baseName, []);
+              }
+              filesByBaseName.get(baseName)!.push(fileInfo);
+            }
           }
         }
       } catch (error) {
         // Subdirectory doesn't exist, skip
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
           throw error;
+        }
+      }
+    }
+
+    // Link related files in podcasts folder (PDF ↔ audio)
+    for (const [_baseName, relatedFiles] of filesByBaseName) {
+      if (relatedFiles.length > 1) {
+        // Find the PDF and audio files
+        const pdfFile = relatedFiles.find(f => f.type === 'pdf');
+        const audioFile = relatedFiles.find(f => f.type === 'audio');
+
+        if (pdfFile && audioFile) {
+          // Link them to each other
+          pdfFile.relatedFiles = [audioFile.path];
+          audioFile.relatedFiles = [pdfFile.path];
         }
       }
     }
@@ -479,11 +524,22 @@ filesRouter.post('/weeks/:weekId/rerun', async (req: Request, res: Response): Pr
     const jobs = [];
 
     for (const url of urls) {
-      const job = await conversionQueue.add('convert-url', {
-        url,
-        originalUrl: url, // Preserve original for archive.is links
-      });
-      jobs.push({ jobId: job.id, url });
+      // Route podcast URLs to podcast queue, others to conversion queue
+      if (isApplePodcastsUrl(url)) {
+        const podcastJobData: PodcastJobData = {
+          url,
+          originalUrl: url,
+          source: 'rerun',
+        };
+        const job = await podcastQueue.add('transcribe-podcast', podcastJobData);
+        jobs.push({ jobId: job.id, url, type: 'podcast' });
+      } else {
+        const job = await conversionQueue.add('convert-url', {
+          url,
+          originalUrl: url, // Preserve original for archive.is links
+        });
+        jobs.push({ jobId: job.id, url, type: 'pdf' });
+      }
     }
 
     console.log(JSON.stringify({
@@ -681,11 +737,22 @@ filesRouter.post('/rerun-selected', async (req: Request, res: Response): Promise
     // Submit URLs for reprocessing
     const jobs = [];
     for (const url of urlsToRerun) {
-      const job = await conversionQueue.add('convert-url', {
-        url,
-        originalUrl: url,
-      });
-      jobs.push({ jobId: job.id, url });
+      // Route podcast URLs to podcast queue, others to conversion queue
+      if (isApplePodcastsUrl(url)) {
+        const podcastJobData: PodcastJobData = {
+          url,
+          originalUrl: url,
+          source: 'rerun',
+        };
+        const job = await podcastQueue.add('transcribe-podcast', podcastJobData);
+        jobs.push({ jobId: job.id, url, type: 'podcast' });
+      } else {
+        const job = await conversionQueue.add('convert-url', {
+          url,
+          originalUrl: url,
+        });
+        jobs.push({ jobId: job.id, url, type: 'pdf' });
+      }
     }
 
     console.log(JSON.stringify({
