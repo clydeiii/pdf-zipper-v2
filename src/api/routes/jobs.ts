@@ -27,6 +27,27 @@ function isValidUrl(urlString: string): boolean {
 }
 
 /**
+ * Check if a URL is a YouTube/video URL that should not be PDF-captured
+ * These URLs should only be processed via Karakeep's media collection (yt-dlp)
+ */
+function isVideoOnlyUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    return (
+      host === 'youtube.com' ||
+      host === 'www.youtube.com' ||
+      host === 'youtu.be' ||
+      host === 'm.youtube.com' ||
+      host === 'vimeo.com' ||
+      host === 'www.vimeo.com'
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * POST / - Submit a URL for conversion
  *
  * Request body: { url: string, userId?: string, priority?: number }
@@ -72,6 +93,16 @@ jobsRouter.post('/', async (req: Request, res: Response): Promise<void> => {
         status: 'queued',
         message: 'Podcast submitted for transcription',
         queue: 'podcast-transcription',
+      });
+      return;
+    }
+
+    // Reject YouTube/video URLs - these should be bookmarked in Karakeep
+    // where yt-dlp will download the video and provide it via media collection
+    if (isVideoOnlyUrl(url)) {
+      res.status(400).json({
+        error: 'Video URLs (YouTube, Vimeo) cannot be PDF-captured. Bookmark in Karakeep to download via yt-dlp.',
+        url,
       });
       return;
     }

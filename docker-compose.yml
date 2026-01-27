@@ -29,7 +29,7 @@ services:
       - WHISPER_HOST=http://10.0.0.81:9002
 
       # Karakeep feed (container name on proxy-network)
-      - KARAKEEP_FEED_URL=http://karakeep-web-1:3000/api/v1/feed/rss?token=ak2_a0ca73a396596dbfe3fb_b560f844af1c94953390051b57bd84f6
+      - KARAKEEP_FEED_URL=http://karakeep-web-1:3000?token=ak2_c86c813aaabfe6d954a2_130ae1bf7f60523a6717aba6a6165bea
       - FEED_POLL_INTERVAL_MINUTES=5
 
       # Nitter for Twitter URLs (container name on proxy-network)

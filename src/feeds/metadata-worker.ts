@@ -29,6 +29,27 @@ function hasMediaEnclosure(item: BookmarkItem): item is MediaItem {
 }
 
 /**
+ * Check if a URL is a YouTube/video URL that should only be processed via media collection
+ * These URLs should not be PDF-captured - they need to come through with a video enclosure
+ */
+function isVideoOnlyUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    return (
+      host === 'youtube.com' ||
+      host === 'www.youtube.com' ||
+      host === 'youtu.be' ||
+      host === 'm.youtube.com' ||
+      host === 'vimeo.com' ||
+      host === 'www.vimeo.com'
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Metadata extraction worker
  *
  * Extracts rich metadata from URLs and queues for PDF conversion.
@@ -112,6 +133,26 @@ export const metadataWorker = new Worker<MetadataJobData>(
         url: canonicalUrl,
         metadata: enrichedItem,
         podcastJobId: podcastJob.id,
+      };
+    }
+
+    // Skip PDF conversion for video-only URLs (YouTube, Vimeo, etc.)
+    // These should only be processed via media collection with a video enclosure from Karakeep
+    if (isVideoOnlyUrl(url)) {
+      console.log(JSON.stringify({
+        event: 'video_url_skipped',
+        url: url,
+        reason: 'Video URLs are processed via media collection, not PDF conversion',
+        timestamp: new Date().toISOString(),
+      }));
+
+      await job.log(`Skipped video URL (no enclosure): ${url}`);
+
+      return {
+        url: canonicalUrl,
+        metadata: enrichedItem,
+        skipped: true,
+        reason: 'video_url_without_enclosure',
       };
     }
 
