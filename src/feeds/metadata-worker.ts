@@ -12,6 +12,16 @@ import type { BookmarkItem } from './types.js';
 import type { MediaItem } from '../media/types.js';
 
 /**
+ * Sanitize a URL for use as a BullMQ job ID
+ * BullMQ doesn't allow colons in job IDs
+ */
+function sanitizeJobId(prefix: string, url: string): string {
+  // Replace problematic characters with underscores
+  const sanitized = url.replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `${prefix}-${sanitized}`;
+}
+
+/**
  * Type guard to check if a BookmarkItem has media enclosure
  */
 function hasMediaEnclosure(item: BookmarkItem): item is MediaItem {
@@ -62,7 +72,7 @@ export const metadataWorker = new Worker<MetadataJobData>(
       await mediaCollectionQueue.add(
         `media-${enrichedItem.guid}`,
         { item: enrichedItem },
-        { jobId: `media-${enrichedItem.canonicalUrl}` }  // Dedupe by canonical URL
+        { jobId: sanitizeJobId('media', enrichedItem.canonicalUrl) }  // Dedupe by canonical URL
       );
 
       console.log(JSON.stringify({
