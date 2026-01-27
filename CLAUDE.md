@@ -319,6 +319,17 @@ Also added CSS to hide Substack modals/popups as backup.
 **Result:** `news.ycombinator.com-github-often-actively-doesnt-act-in-situations-whe.pdf`
 **Files:** `src/converters/pdf.ts`, `src/converters/types.ts`, `src/workers/conversion.worker.ts`
 
+**33. PDF Pass-Through for Direct PDF URLs**
+**Problem:** URLs pointing directly to PDFs (e.g., arxiv.org/pdf/2506.06299) fail with "Download is starting" error
+**Cause:** Playwright tries to navigate to the URL, which triggers a download instead of rendering a page
+**Solution:**
+1. Detect PDF URLs by extension (`.pdf`) or known patterns (arxiv.org/pdf/*)
+2. Download directly via fetch instead of using Playwright
+3. Verify Content-Type is `application/pdf`
+4. Extract filename from Content-Disposition header if available
+5. Skip quality checks (existing PDFs don't need validation)
+**Files:** `src/converters/pdf.ts` (isPdfUrl, downloadPdfDirect), `src/converters/types.ts` (PDFPassthroughResult), `src/workers/conversion.worker.ts`
+
 ## Common Commands (Development)
 
 ```bash
