@@ -469,6 +469,23 @@ export async function convertUrlToPDF(
       console.warn(`Style injection failed for ${url}: ${styleError instanceof Error ? styleError.message : styleError}`);
     }
 
+    // Extract page title for filename generation (useful for non-descriptive URLs like HN)
+    let pageTitle: string | undefined;
+    try {
+      pageTitle = await page.title();
+      // Clean up common suffixes
+      if (pageTitle) {
+        pageTitle = pageTitle
+          .replace(/\s*\|\s*Hacker News$/, '')
+          .replace(/\s*[-–—]\s*YouTube$/, '')
+          .replace(/\s*on X$/, '')
+          .replace(/\s*\/ X$/, '')
+          .trim();
+      }
+    } catch {
+      // Title extraction failed, continue without it
+    }
+
     // Generate PDF with scale to fit wide content on A4
     // 1280px viewport → 595pt A4 width requires ~0.8 scale
     const pdfBuffer = await page.pdf({
@@ -484,7 +501,8 @@ export async function convertUrlToPDF(
       pdfBuffer: Buffer.from(pdfBuffer),
       screenshotBuffer: Buffer.from(screenshotBuffer),
       url,
-      size: pdfBuffer.length
+      size: pdfBuffer.length,
+      pageTitle
     };
 
   } finally {

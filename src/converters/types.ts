@@ -26,6 +26,7 @@ export interface PDFSuccessResult {
   screenshotBuffer: Buffer; // For quality verification
   url: string;
   size: number; // buffer length in bytes
+  pageTitle?: string; // Extracted page title for filename generation
 }
 
 /**

@@ -132,7 +132,7 @@ async function savePdfToWeeklyBin(
   // Ensure directory exists
   await mkdir(pdfDir, { recursive: true });
 
-  // Generate filename from URL, with title fallback for bare domains
+  // Generate filename from URL, with title fallback for non-descriptive paths
   let baseName: string;
   try {
     const parsed = new URL(url);
@@ -151,13 +151,18 @@ async function savePdfToWeeklyBin(
       pathname = pathname.substring(1);
     }
 
-    // If pathname is empty or too short, use slugified title as suffix
-    if (!pathname && title) {
+    // Check if pathname is non-descriptive (needs title fallback)
+    // Examples: HN "item", Reddit "comments", etc.
+    const nonDescriptivePaths = ['item', 'comments', 'post', 'p', 'a', 'article', 'story', 's'];
+    const isNonDescriptive = !pathname || nonDescriptivePaths.includes(pathname.toLowerCase());
+
+    // Use title for non-descriptive paths or empty paths
+    if (isNonDescriptive && title) {
       const titleSlug = slugifyTitle(title);
       if (titleSlug) {
         baseName = `${hostname}-${titleSlug}`;
       } else {
-        baseName = hostname;
+        baseName = pathname ? `${hostname}-${pathname}` : hostname;
       }
     } else {
       baseName = pathname ? `${hostname}-${pathname}` : hostname;
@@ -186,7 +191,7 @@ async function savePdfToWeeklyBin(
  */
 async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Promise<ConversionJobResult> {
   console.log(`[DEBUG] processJob called for job ${job.id}`);
-  const { url, originalUrl, userId, title, bookmarkedAt } = job.data;
+  const { url, originalUrl, userId, title: jobTitle, bookmarkedAt } = job.data;
 
   console.log(`Processing job ${job.id} for URL: ${url}${userId ? ` (user: ${userId})` : ''}`);
 
@@ -195,6 +200,9 @@ async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Pro
 
   // Convert URL to PDF
   const result = await convertUrlToPDF(url);
+
+  // Use job title if provided, otherwise use extracted page title
+  const title = jobTitle || (result.success ? result.pageTitle : undefined);
 
   // Update progress
   await job.updateProgress(50);

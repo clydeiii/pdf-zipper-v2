@@ -309,6 +309,16 @@ Also added CSS to hide Substack modals/popups as backup.
 **Solution:** Increase limit: `express.json({ limit: '10mb' })`
 **File:** `src/api/server.ts`
 
+**32. Non-Descriptive URL Paths Need Title-Based Filenames**
+**Problem:** HN URLs like `/item?id=123` generate useless filenames `news.ycombinator.com-item.pdf`
+**Cause:** Filename generated from pathname which is just "item" for HN (and similar for Reddit, etc.)
+**Solution:**
+1. Extract page title during PDF conversion via `page.title()`
+2. Clean up common suffixes (| Hacker News, - YouTube, on X, etc.)
+3. Use title for non-descriptive paths: item, comments, post, p, a, article, story, s
+**Result:** `news.ycombinator.com-github-often-actively-doesnt-act-in-situations-whe.pdf`
+**Files:** `src/converters/pdf.ts`, `src/converters/types.ts`, `src/workers/conversion.worker.ts`
+
 ## Common Commands (Development)
 
 ```bash
