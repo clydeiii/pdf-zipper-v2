@@ -43,3 +43,30 @@ export interface PDFFailureResult {
  * PDF conversion result (discriminated union)
  */
 export type PDFResult = PDFSuccessResult | PDFFailureResult;
+
+/**
+ * Successful PDF pass-through (direct download) result
+ */
+export interface PDFPassthroughSuccessResult {
+  success: true;
+  pdfBuffer: Buffer;
+  url: string;
+  size: number;
+  suggestedFilename?: string; // From Content-Disposition header
+  isPassthrough: true; // Marker to distinguish from converted PDFs
+}
+
+/**
+ * Failed PDF pass-through result
+ */
+export interface PDFPassthroughFailureResult {
+  success: false;
+  url: string;
+  error: string;
+  reason: 'download_failed' | 'not_pdf';
+}
+
+/**
+ * PDF pass-through result (discriminated union)
+ */
+export type PDFPassthroughResult = PDFPassthroughSuccessResult | PDFPassthroughFailureResult;

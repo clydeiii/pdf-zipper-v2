@@ -17,7 +17,7 @@ import { QUEUE_NAME } from '../queues/conversion.queue.js';
 import { env } from '../config/env.js';
 import type { ConversionJobData, ConversionJobResult } from '../jobs/types.js';
 import { initBrowser, closeBrowser } from '../browsers/manager.js';
-import { convertUrlToPDF } from '../converters/pdf.js';
+import { convertUrlToPDF, isPdfUrl, downloadPdfDirect } from '../converters/pdf.js';
 import { checkOllamaHealth } from '../quality/ollama.js';
 import { scoreScreenshotQuality } from '../quality/scorer.js';
 import { analyzePdfContent } from '../quality/pdf-content.js';
@@ -198,7 +198,43 @@ async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Pro
   // Initial progress
   await job.updateProgress(10);
 
-  // Convert URL to PDF
+  // Check if this is a direct PDF URL - use pass-through instead of conversion
+  if (isPdfUrl(url)) {
+    console.log(`PDF URL detected, using pass-through: ${url}`);
+    const passthroughResult = await downloadPdfDirect(url);
+
+    await job.updateProgress(50);
+
+    if (!passthroughResult.success) {
+      console.log(`PDF pass-through failed for ${url}: ${passthroughResult.reason} - ${passthroughResult.error}`);
+      throw new Error(`${passthroughResult.reason}: ${passthroughResult.error}`);
+    }
+
+    // Use suggested filename from Content-Disposition, or job title, or extract from URL
+    const title = jobTitle || passthroughResult.suggestedFilename?.replace(/\.pdf$/i, '');
+
+    // Save directly to weekly bin (skip quality checks - it's an existing PDF)
+    const filePath = await savePdfToWeeklyBin(
+      passthroughResult.pdfBuffer,
+      url,
+      title,
+      bookmarkedAt,
+      originalUrl
+    );
+
+    await job.updateProgress(100);
+
+    console.log(`PDF pass-through completed: ${filePath}`);
+
+    return {
+      pdfPath: filePath,
+      pdfSize: passthroughResult.size,
+      completedAt: new Date().toISOString(),
+      url,
+    };
+  }
+
+  // Convert URL to PDF (regular flow)
   const result = await convertUrlToPDF(url);
 
   // Use job title if provided, otherwise use extracted page title

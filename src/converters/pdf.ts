@@ -1,7 +1,107 @@
 import { initBrowser } from '../browsers/manager.js';
 import { loadCookies } from '../browsers/cookies.js';
 import { env } from '../config/env.js';
-import type { PDFOptions, PDFResult } from './types.js';
+import type { PDFOptions, PDFResult, PDFPassthroughResult } from './types.js';
+
+/**
+ * Check if a URL points directly to a PDF file
+ * Checks URL path extension and known PDF URL patterns
+ * Actual Content-Type check happens during fetch as verification
+ */
+export function isPdfUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const path = parsed.pathname.toLowerCase();
+    const host = parsed.hostname.toLowerCase();
+
+    // Direct .pdf extension
+    if (path.endsWith('.pdf')) {
+      return true;
+    }
+
+    // Known PDF URL patterns
+    // arxiv.org/pdf/XXXX.XXXXX (no .pdf extension)
+    if (host === 'arxiv.org' && path.startsWith('/pdf/')) {
+      return true;
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Download a PDF directly (pass-through mode)
+ * Used for URLs that point directly to PDF files (e.g., arxiv.org/pdf/...)
+ *
+ * @param url - Direct URL to PDF file
+ * @returns PDF buffer and metadata
+ */
+export async function downloadPdfDirect(url: string): Promise<PDFPassthroughResult> {
+  try {
+    console.log(`PDF pass-through: downloading ${url}`);
+
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      },
+    });
+
+    if (!response.ok) {
+      return {
+        success: false,
+        url,
+        error: `HTTP ${response.status}: ${response.statusText}`,
+        reason: 'download_failed',
+      };
+    }
+
+    // Verify it's actually a PDF
+    const contentType = response.headers.get('content-type') || '';
+    if (!contentType.includes('application/pdf') && !url.toLowerCase().endsWith('.pdf')) {
+      return {
+        success: false,
+        url,
+        error: `Not a PDF: Content-Type is ${contentType}`,
+        reason: 'not_pdf',
+      };
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const pdfBuffer = Buffer.from(arrayBuffer);
+
+    // Try to extract title from Content-Disposition header
+    let suggestedFilename: string | undefined;
+    const contentDisposition = response.headers.get('content-disposition');
+    if (contentDisposition) {
+      const filenameMatch = contentDisposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+      if (filenameMatch) {
+        suggestedFilename = filenameMatch[1].replace(/['"]/g, '');
+      }
+    }
+
+    console.log(`PDF pass-through complete: ${pdfBuffer.length} bytes`);
+
+    return {
+      success: true,
+      pdfBuffer,
+      url,
+      size: pdfBuffer.length,
+      suggestedFilename,
+      isPassthrough: true,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`PDF pass-through failed for ${url}: ${message}`);
+    return {
+      success: false,
+      url,
+      error: message,
+      reason: 'download_failed',
+    };
+  }
+}
 
 /**
  * Check if a URL is a Substack URL
@@ -392,6 +492,22 @@ export async function convertUrlToPDF(
         [class*="navbar"], [class*="header"], [class*="toolbar"],
         [role="banner"], [role="navigation"], [role="complementary"] {
           position: static !important;
+        }
+
+        /* Hide site mastheads/headers entirely for cleaner PDFs */
+        /* NYT masthead - appears on every page and obscures content */
+        [data-testid="masthead"], [data-testid="masthead-container"],
+        [class*="Masthead"], [class*="masthead"],
+        #masthead, .masthead,
+        /* Generic site headers that should be hidden in PDFs */
+        [data-testid="site-header"], [data-testid="nav-header"],
+        .site-header, .page-header, #site-header,
+        /* Audio player bars */
+        [data-testid="audio-player"], [class*="AudioPlayer"],
+        /* Share/social bars */
+        [data-testid="share-tools"], [class*="ShareTools"], [class*="social-share"] {
+          display: none !important;
+          visibility: hidden !important;
         }
 
         /* Prevent content overflow */
