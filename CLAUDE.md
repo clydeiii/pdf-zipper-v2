@@ -330,6 +330,26 @@ Also added CSS to hide Substack modals/popups as backup.
 5. Skip quality checks (existing PDFs don't need validation)
 **Files:** `src/converters/pdf.ts` (isPdfUrl, downloadPdfDirect), `src/converters/types.ts` (PDFPassthroughResult), `src/workers/conversion.worker.ts`
 
+**34. BullMQ Job IDs Cannot Contain Colons**
+**Problem:** Media collection jobs failed with "Custom Id cannot contain :" error
+**Cause:** Job IDs were using raw URLs which contain colons (https://, query params)
+**Solution:** Sanitize job IDs by replacing non-alphanumeric characters with underscores
+**File:** `src/feeds/metadata-worker.ts` (sanitizeJobId function)
+
+**35. Video URLs Should Not Be PDF-Captured**
+**Problem:** YouTube URLs were being PDF-captured, creating useless youtube.com-watch.pdf files
+**Cause:** Direct API submissions and feed items without video enclosures were going to PDF conversion
+**Solution:**
+1. Reject video URLs (YouTube, Vimeo) in direct API submissions with helpful error message
+2. Skip video URLs in feed metadata worker - they should only come via Karakeep with video enclosure
+3. Video URLs with enclosures from Karakeep go to media collection (yt-dlp downloads the mp4)
+**Files:** `src/api/routes/jobs.ts`, `src/feeds/metadata-worker.ts`
+
+**36. Karakeep API URL Format**
+**Discovery:** The Karakeep feed parser extracts the token from the URL and uses Bearer auth header
+**Format:** `http://karakeep-web-1:3000?token=<token>` (path is ignored, parser builds /api/v1/bookmarks)
+**Files:** `src/feeds/parsers/karakeep.ts`, `docker-compose.yml`
+
 ## Common Commands (Development)
 
 ```bash
