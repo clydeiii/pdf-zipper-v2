@@ -32,8 +32,9 @@ const __dirname = path.dirname(__filename);
 export const app = express();
 
 // Middleware
-app.use(express.json());
-app.use(express.urlencoded({ extended: true })); // For form submissions
+// Increase JSON body limit for large cookies.txt uploads (can be ~1-2MB)
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Static file serving from public/ directory
 const publicPath = path.join(__dirname, '..', '..', 'public');

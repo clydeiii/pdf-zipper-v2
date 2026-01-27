@@ -4,6 +4,57 @@ import { env } from '../config/env.js';
 import type { PDFOptions, PDFResult } from './types.js';
 
 /**
+ * Check if a URL is a Substack URL
+ */
+function isSubstackUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    // Substack uses both substack.com subdomains and custom domains with /p/ paths
+    return host.endsWith('.substack.com') || parsed.pathname.startsWith('/p/');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Clean Substack URLs by removing email tracking parameters
+ * These params (especially 'r') cause "I've Shared This With Myself" popups
+ */
+function cleanSubstackUrl(url: string): string {
+  if (!isSubstackUrl(url)) {
+    return url;
+  }
+
+  try {
+    const parsed = new URL(url);
+
+    // Parameters to remove (email tracking that causes popups)
+    const paramsToRemove = [
+      'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term',
+      'r',              // Referral code - causes "I've Shared This" popup
+      's',              // Share code
+      'publication_id', // Internal tracking
+      'post_id',        // Internal tracking
+      'isFreemail',     // Email tracking
+      'triedRedirect',  // Email tracking
+    ];
+
+    for (const param of paramsToRemove) {
+      parsed.searchParams.delete(param);
+    }
+
+    const cleanedUrl = parsed.toString();
+    if (cleanedUrl !== url) {
+      console.log(`Cleaned Substack URL: ${url} → ${cleanedUrl}`);
+    }
+    return cleanedUrl;
+  } catch {
+    return url;
+  }
+}
+
+/**
  * Check if a URL is a Twitter/X URL
  */
 function isTwitterUrl(url: string): boolean {
@@ -84,8 +135,10 @@ export async function convertUrlToPDF(
   try {
     const page = await context.newPage();
 
+    // Clean Substack URLs (remove tracking params that cause popups)
     // Rewrite Twitter/X URLs to Nitter for better capture
-    const targetUrl = rewriteTwitterUrl(url);
+    const cleanedUrl = cleanSubstackUrl(url);
+    const targetUrl = rewriteTwitterUrl(cleanedUrl);
 
     // Navigate with timeout
     // Try networkidle first for complete page load, fallback to domcontentloaded for heavy SPAs
@@ -396,6 +449,16 @@ export async function convertUrlToPDF(
         /* These can render incorrectly (vertically) in PDFs */
         .footnote-tooltip, [class*="tooltip"], [class*="popover"],
         [role="tooltip"], [data-tooltip], .tippy-box, .tippy-content {
+          display: none !important;
+          visibility: hidden !important;
+        }
+
+        /* Substack: hide modals, popups, and overlays */
+        /* These include "I've Shared This With Myself" and subscription prompts */
+        .modal, .modal-backdrop, [class*="modal"], [class*="overlay"],
+        [class*="popup"], [class*="dialog"], [role="dialog"],
+        .subscription-widget-wrap, .subscribe-widget,
+        .pencraft.pc-modal, [class*="pc-modal"] {
           display: none !important;
           visibility: hidden !important;
         }

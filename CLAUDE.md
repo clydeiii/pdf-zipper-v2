@@ -266,6 +266,49 @@ await fetch(url, { dispatcher: whisperAgent });
 **Note:** Whisper ASR webservice uses Uvicorn (not Gunicorn), so server-side timeout config is not needed - the fix is purely client-side.
 **File:** `src/podcasts/transcriber.ts`
 
+**26. Chars-per-KB Ratio False Positives on Image-Heavy Articles**
+**Problem:** Image-heavy articles (macstories.net, cybersecuritynews.com) failing with "low text density" despite having 10,000+ chars of real content
+**Cause:** The chars/KB ratio check was meant to catch truncated articles (hero image + no text), but image-heavy articles with many screenshots legitimately have low ratios
+**Solution:** Added `SUFFICIENT_CHARS_BYPASS_RATIO = 3000` - if a PDF has >3000 chars of text, bypass the ratio check entirely
+**Logic:** A PDF with substantial text content is clearly not truncated, regardless of how many images it contains
+**File:** `src/quality/pdf-content.ts`
+
+**27. Substack "I've Shared This With Myself" Popup**
+**Problem:** Substack URLs from email newsletters (with `?r=`, `?s=`, `?isFreemail=`, etc.) show a popup obscuring content
+**Cause:** The `r=` parameter is a referral code that triggers Substack's share tracking overlay
+**Solution:** Added `cleanSubstackUrl()` in PDF converter that strips email tracking params before navigation:
+- `r`, `s` - referral/share codes (main culprits)
+- `publication_id`, `post_id` - internal tracking
+- `isFreemail`, `triedRedirect` - email tracking
+- UTM params
+Also added CSS to hide Substack modals/popups as backup.
+**File:** `src/converters/pdf.ts`
+
+**28. Short Announcement Pages with Images Falsely Flagged as Truncated**
+**Problem:** ollama.com/blog/launch (1678 chars, 3 pages, 0.9 chars/KB) flagged as truncated despite being complete
+**Cause:** Low total chars (< 3000) + low ratio (< 5 chars/KB) triggered truncation check, but page is genuinely short with images
+**Solution:** Added `MIN_CHARS_PER_PAGE_BYPASS = 400` - if chars/page >= 400, bypass ratio check
+**Logic:** 1678 chars / 3 pages = 559 chars/page, which is reasonable content density for each page
+**File:** `src/quality/pdf-content.ts`
+
+**29. Error Page Detection False Positives on Content Mentioning "404"**
+**Problem:** Tweet thread (21,467 chars) flagged as "404 error page" because tweet content mentioned "404 error"
+**Cause:** Error page patterns like `/404\s*(error)?/i` matched text in user content, not actual error pages
+**Solution:** Only run error page detection when content is short (< 2000 chars) - real 404 pages don't have substantial content
+**File:** `src/quality/pdf-content.ts`
+
+**30. Cookie Domain Leading Dot for Subdomain Matching**
+**Problem:** NYT cookies not being applied - articles still showing paywall
+**Cause:** Cookie parser was stripping leading dot from domains (`.nytimes.com` → `nytimes.com`), but Playwright needs the dot for subdomain matching
+**Solution:** Preserve leading dot in cookie domains; Playwright's `addCookies()` respects the convention
+**File:** `src/browsers/cookies.ts`
+
+**31. Express JSON Body Size Limit for Cookie Upload**
+**Problem:** Cookie file upload via web UI failing with "Unexpected token '<'" (HTML error response)
+**Cause:** Default Express `express.json()` limit is 100KB; cookies.txt files are ~1MB
+**Solution:** Increase limit: `express.json({ limit: '10mb' })`
+**File:** `src/api/server.ts`
+
 ## Common Commands (Development)
 
 ```bash

@@ -31,9 +31,9 @@ function parseCookiesTxt(filePath: string): Cookie[] {
 
     const [domain, _includeSubdomains, path, secure, expiration, name, value] = parts;
 
-    // Playwright expects domain without leading dot for exact match
-    // Leading dot means include subdomains (browser standard)
-    const d = domain.startsWith('.') ? domain.slice(1) : domain;
+    // Keep leading dot for subdomain matching (e.g., .nytimes.com matches www.nytimes.com)
+    // Playwright's addCookies() respects the leading dot convention
+    const d = domain;
 
     const expires = Number(expiration);
     const expiresSeconds = Number.isFinite(expires) ? expires : -1;
@@ -115,7 +115,8 @@ export function getCookiesForUrl(targetUrl: string): Cookie[] {
     const hostname = url.hostname.toLowerCase();
 
     return allCookies.filter(cookie => {
-      const cookieDomain = cookie.domain.toLowerCase();
+      // Strip leading dot for comparison (cookie domain may be ".example.com" or "example.com")
+      const cookieDomain = cookie.domain.toLowerCase().replace(/^\./, '');
       // Exact match or subdomain match
       return hostname === cookieDomain || hostname.endsWith('.' + cookieDomain);
     });

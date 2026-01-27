@@ -62,6 +62,20 @@ const MIN_CHARS_FOR_LARGE_PDF = 1000;
 const MIN_CHARS_PER_KB = 5;
 
 /**
+ * Absolute character threshold that bypasses ratio check
+ * If a PDF has this much text, it's clearly not truncated regardless of ratio
+ * (e.g., image-heavy tech articles with lots of screenshots)
+ */
+const SUFFICIENT_CHARS_BYPASS_RATIO = 3000;
+
+/**
+ * Chars-per-page threshold that bypasses ratio check
+ * Short announcement pages with images may have low total chars but reasonable per-page content
+ * (e.g., ollama.com/blog/launch - 1678 chars / 3 pages = 559 chars/page)
+ */
+const MIN_CHARS_PER_PAGE_BYPASS = 400;
+
+/**
  * Error page patterns - if any of these appear, the page is likely a 404 or error
  * Case-insensitive matching
  */
@@ -116,13 +130,18 @@ export async function analyzePdfContent(pdfBuffer: Buffer): Promise<PdfContentRe
     };
 
     // Check 0: Error page detection (404, page not found, etc.)
-    for (const pattern of ERROR_PAGE_PATTERNS) {
-      if (pattern.test(normalizedText)) {
-        return {
-          ...baseResult,
-          passed: false,
-          reason: `Error page detected: "${normalizedText.match(pattern)?.[0]}". This appears to be a 404 or error page.`,
-        };
+    // Only flag if content is short - real error pages don't have much content
+    // This avoids false positives when "404" appears in article/tweet text
+    const MAX_CHARS_FOR_ERROR_PAGE = 2000;
+    if (charCount < MAX_CHARS_FOR_ERROR_PAGE) {
+      for (const pattern of ERROR_PAGE_PATTERNS) {
+        if (pattern.test(normalizedText)) {
+          return {
+            ...baseResult,
+            passed: false,
+            reason: `Error page detected: "${normalizedText.match(pattern)?.[0]}". This appears to be a 404 or error page.`,
+          };
+        }
       }
     }
 
@@ -147,7 +166,14 @@ export async function analyzePdfContent(pdfBuffer: Buffer): Promise<PdfContentRe
 
     // Check 3: Very low chars-per-KB ratio for multi-page PDFs
     // Single-page image-only docs might legitimately have low ratio
-    if (pageCount > 1 && charsPerKb < MIN_CHARS_PER_KB) {
+    // BUT: if there's substantial text, it's not truncated regardless of ratio
+    // (image-heavy articles with many screenshots will have low ratio but real content)
+    // ALSO: short announcement pages with images may have reasonable chars-per-page
+    const charsPerPage = pageCount > 0 ? charCount / pageCount : 0;
+    const hasSufficientChars = charCount >= SUFFICIENT_CHARS_BYPASS_RATIO;
+    const hasSufficientCharsPerPage = charsPerPage >= MIN_CHARS_PER_PAGE_BYPASS;
+
+    if (pageCount > 1 && charsPerKb < MIN_CHARS_PER_KB && !hasSufficientChars && !hasSufficientCharsPerPage) {
       return {
         ...baseResult,
         passed: false,
