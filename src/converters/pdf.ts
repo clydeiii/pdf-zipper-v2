@@ -168,6 +168,75 @@ function isTwitterUrl(url: string): boolean {
 }
 
 /**
+ * Get privacy filter terms from environment
+ * Returns array of lowercase terms to filter out
+ */
+function getPrivacyFilterTerms(): string[] {
+  const terms = env.PRIVACY_FILTER_TERMS;
+  if (!terms) return [];
+  return terms.split(',').map(t => t.trim().toLowerCase()).filter(t => t.length > 0);
+}
+
+/**
+ * Apply privacy filtering by hiding elements containing specified terms
+ * Runs in-page JS to find and hide matching elements
+ */
+async function applyPrivacyFilter(page: import('playwright').Page): Promise<void> {
+  const terms = getPrivacyFilterTerms();
+  if (terms.length === 0) return;
+
+  console.log(`Applying privacy filter for ${terms.length} terms`);
+
+  await page.evaluate((filterTerms: string[]) => {
+    // Find all text nodes and check for matches
+    const walker = document.createTreeWalker(
+      document.body,
+      NodeFilter.SHOW_TEXT,
+      null
+    );
+
+    const elementsToHide = new Set<Element>();
+
+    let node: Node | null;
+    while ((node = walker.nextNode())) {
+      const text = node.textContent?.toLowerCase() || '';
+      for (const term of filterTerms) {
+        if (text.includes(term)) {
+          // Find the closest meaningful parent element to hide
+          let parent = node.parentElement;
+          while (parent && parent !== document.body) {
+            // Stop at block-level elements or elements that seem like containers
+            const tag = parent.tagName.toLowerCase();
+            const display = window.getComputedStyle(parent).display;
+            if (
+              display === 'block' ||
+              display === 'flex' ||
+              display === 'grid' ||
+              ['div', 'span', 'p', 'li', 'a', 'section', 'article', 'aside'].includes(tag)
+            ) {
+              // Don't hide the main content containers
+              if (!parent.classList.contains('main-tweet') &&
+                  !parent.classList.contains('tweet-body') &&
+                  !parent.classList.contains('timeline-item')) {
+                elementsToHide.add(parent);
+              }
+              break;
+            }
+            parent = parent.parentElement;
+          }
+          break;
+        }
+      }
+    }
+
+    // Hide matching elements
+    for (const el of elementsToHide) {
+      (el as HTMLElement).style.display = 'none';
+    }
+  }, terms);
+}
+
+/**
  * Rewrite Twitter/X URLs to use Nitter for better PDF capture
  * Nitter provides cleaner rendering and includes reply threads
  *
@@ -338,6 +407,9 @@ export async function convertUrlToPDF(
     // Brief wait for lazy-loaded images
     await page.waitForTimeout(500);
 
+    // Apply privacy filtering (hides elements containing configured terms)
+    await applyPrivacyFilter(page);
+
     // For Twitter URLs via Nitter: check if this is an article stub
     // Nitter doesn't support X Articles and just shows a link like "x.com/i/article/..."
     if (isTwitterUrl(url) && targetUrl !== url) {
@@ -353,6 +425,8 @@ export async function convertUrlToPDF(
         });
         // Wait longer for X.com JS rendering
         await directPage.waitForTimeout(3000);
+        // Apply privacy filtering for direct X.com capture too
+        await applyPrivacyFilter(directPage);
         // Continue with directPage for PDF generation
         await directPage.emulateMedia({ media: 'screen' });
         // Use CSS-only approach to hide fixed/sticky elements (avoids expensive DOM traversal)
@@ -404,7 +478,8 @@ export async function convertUrlToPDF(
           pdfBuffer: Buffer.from(pdfBuffer),
           screenshotBuffer: Buffer.from(screenshotBuffer),
           url,
-          size: pdfBuffer.length
+          size: pdfBuffer.length,
+          isXArticle: true  // Mark as X Article (captured directly, not via Nitter)
         };
       }
     }
@@ -467,6 +542,11 @@ export async function convertUrlToPDF(
 
         /* Nitter-specific: hide overlay links that break PDF layout */
         .tweet-link {
+          display: none !important;
+        }
+
+        /* Nitter-specific: hide the top navigation banner */
+        nav.nav, .nav-bar, header nav, .navbar {
           display: none !important;
         }
 
@@ -612,13 +692,18 @@ export async function convertUrlToPDF(
       scale: 0.7
     });
 
+    // For Twitter URLs that went through Nitter, mark as NOT an X Article
+    // (X Articles are captured directly from X.com and have isXArticle: true)
+    const isNitterCapture = isTwitterUrl(url) && targetUrl !== url;
+
     return {
       success: true,
       pdfBuffer: Buffer.from(pdfBuffer),
       screenshotBuffer: Buffer.from(screenshotBuffer),
       url,
       size: pdfBuffer.length,
-      pageTitle
+      pageTitle,
+      isXArticle: isNitterCapture ? false : undefined  // false = Nitter tweet, undefined = not Twitter
     };
 
   } finally {

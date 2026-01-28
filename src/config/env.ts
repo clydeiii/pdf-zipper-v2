@@ -32,6 +32,8 @@ interface EnvConfig {
   NITTER_HOST: string;
   /** Ollama model for transcript formatting - use larger model for better results (default: same as OLLAMA_MODEL) */
   TRANSCRIPT_FORMAT_MODEL: string;
+  /** Comma-separated list of terms to filter from PDF captures for privacy (optional) */
+  PRIVACY_FILTER_TERMS?: string;
 }
 
 const requiredEnvVars = ['REDIS_HOST', 'REDIS_PORT', 'PORT'] as const;
@@ -86,4 +88,6 @@ export const env: EnvConfig = {
   NITTER_HOST: process.env.NITTER_HOST || 'http://localhost:8080',
   // Ollama model for transcript formatting (larger = better quality, slower)
   TRANSCRIPT_FORMAT_MODEL: process.env.TRANSCRIPT_FORMAT_MODEL || process.env.OLLAMA_MODEL || 'gemma3',
+  // Privacy filter terms (comma-separated list of names/handles to hide from captures)
+  PRIVACY_FILTER_TERMS: process.env.PRIVACY_FILTER_TERMS,
 };

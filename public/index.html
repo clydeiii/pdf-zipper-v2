@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>PDF Zipper - File Browser</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -46,6 +47,14 @@
         </div>
 
         <div id="status-message" class="status-message hidden"></div>
+
+        <div class="filter-bar">
+          <div class="filter-input-wrapper">
+            <input type="text" id="filter-input" placeholder="Filter by filename..." autocomplete="off">
+            <button id="filter-clear" class="filter-clear hidden">&times;</button>
+          </div>
+          <span id="filter-status" class="filter-status"></span>
+        </div>
 
         <div class="table-container">
           <table id="files-table">

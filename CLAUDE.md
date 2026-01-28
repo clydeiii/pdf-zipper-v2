@@ -350,6 +350,34 @@ Also added CSS to hide Substack modals/popups as backup.
 **Format:** `http://karakeep-web-1:3000?token=<token>` (path is ignored, parser builds /api/v1/bookmarks)
 **Files:** `src/feeds/parsers/karakeep.ts`, `docker-compose.yml`
 
+**37. Twitter/X Filename Conventions**
+**Problem:** All Twitter/X captures used "status" in filename (`x.com-user-status-123.pdf`)
+**Solution:** Differentiate between X Articles and regular tweets:
+- X Articles (captured directly from X.com): use "article" → `x.com-user-article-123.pdf`
+- Regular tweets (captured via Nitter): use "post" → `x.com-user-post-123.pdf`
+**Implementation:** `convertUrlToPDF()` returns `isXArticle` flag, `savePdfToWeeklyBin()` replaces "status"
+**Files:** `src/converters/types.ts`, `src/converters/pdf.ts`, `src/workers/conversion.worker.ts`
+
+**38. Privacy Filter for PDF Captures**
+**Problem:** User's name and Twitter handle appearing in PDF captures (sidebar, "who to follow", etc.)
+**Solution:** Added `PRIVACY_FILTER_TERMS` env var (comma-separated) that:
+1. Runs in-page JavaScript to find all text nodes containing filter terms
+2. Hides the parent element of matching text nodes
+3. Preserves main content containers (tweets, articles)
+**Usage:** `PRIVACY_FILTER_TERMS=John Doe,johndoe123` hides elements containing those strings
+**Files:** `src/config/env.ts`, `src/converters/pdf.ts`, `docker-compose.yml`
+
+**39. Nitter Banner Removal**
+**Problem:** Nitter navigation banner appearing at top of tweet captures
+**Solution:** Added CSS rules to hide Nitter nav elements: `nav.nav, .nav-bar, header nav, .navbar`
+**File:** `src/converters/pdf.ts` (in the addStyleTag CSS block)
+
+**40. Deferred Delete of Old PDFs on Rerun**
+**Problem:** Rerunning a capture that produces a different filename (e.g., `status` → `post`/`article`) left the old file on disk, causing duplicates in the week view
+**Solution:** Thread `oldFilePath` through `ConversionJobData` → worker. Rerun endpoints resolve the old file's absolute path and pass it in job data. After the worker successfully saves the new PDF, it compares paths: if different, deletes the old file; if same, `writeFile` already overwrote.
+**Safety:** Old file is only deleted after new file is saved. If the job fails at any earlier stage, old file is preserved. ENOENT and permission errors are logged but don't fail the job.
+**Files:** `src/jobs/types.ts` (oldFilePath field), `src/workers/conversion.worker.ts` (deleteOldFileIfDifferent helper), `src/api/routes/files.ts` (both rerun endpoints pass old paths)
+
 ## Common Commands (Development)
 
 ```bash
@@ -375,6 +403,7 @@ Key optional settings:
 - `OLLAMA_MODEL` - Vision model, default `gemma3`
 - `COOKIES_FILE` - Netscape cookies.txt for paywall bypass
 - `WHISPER_HOST` - Whisper ASR server URL, default `http://10.0.0.81:9000`
+- `PRIVACY_FILTER_TERMS` - Comma-separated terms to hide from PDF captures (names, handles)
 
 ## File Structure
 

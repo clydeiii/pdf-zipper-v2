@@ -469,6 +469,7 @@ filesRouter.post('/weeks/:weekId/rerun', async (req: Request, res: Response): Pr
     }
 
     const urlsToRerun = new Set<string>();
+    const urlToOldFile = new Map<string, string>();
 
     // 1. Get URLs from completed jobs in BullMQ
     const completedJobs = await conversionQueue.getCompleted();
@@ -480,11 +481,15 @@ filesRouter.post('/weeks/:weekId/rerun', async (req: Request, res: Response): Pr
         const urlToUse = job.data.originalUrl || job.data.url;
         if (urlToUse) {
           urlsToRerun.add(urlToUse);
+          // Track old file path from job result (may be overwritten by disk scan below)
+          if (job.returnvalue?.pdfPath) {
+            urlToOldFile.set(urlToUse, path.resolve(job.returnvalue.pdfPath));
+          }
         }
       }
     }
 
-    // 2. Get URLs from failed jobs in BullMQ
+    // 2. Get URLs from failed jobs in BullMQ (no old file to track)
     const failedJobs = await conversionQueue.getFailed();
     for (const job of failedJobs) {
       const jobDate = new Date(job.timestamp);
@@ -498,6 +503,7 @@ filesRouter.post('/weeks/:weekId/rerun', async (req: Request, res: Response): Pr
     }
 
     // 3. Get URLs from PDF metadata (for files outside BullMQ retention)
+    // Disk scan overwrites BullMQ paths — reflects actual current state
     const weekPath = path.join(env.DATA_DIR, 'media', weekId);
     const pdfDir = path.join(weekPath, 'pdfs');
 
@@ -505,10 +511,11 @@ filesRouter.post('/weeks/:weekId/rerun', async (req: Request, res: Response): Pr
       const pdfFiles = await readdir(pdfDir);
       for (const file of pdfFiles) {
         if (file.endsWith('.pdf')) {
-          const pdfPath = path.join(pdfDir, file);
-          const url = await extractUrlFromPdf(pdfPath);
+          const pdfFilePath = path.join(pdfDir, file);
+          const url = await extractUrlFromPdf(pdfFilePath);
           if (url) {
             urlsToRerun.add(url);
+            urlToOldFile.set(url, path.resolve(pdfFilePath));
           }
         }
       }
@@ -537,6 +544,7 @@ filesRouter.post('/weeks/:weekId/rerun', async (req: Request, res: Response): Pr
         const job = await conversionQueue.add('convert-url', {
           url,
           originalUrl: url, // Preserve original for archive.is links
+          oldFilePath: urlToOldFile.get(url),
         });
         jobs.push({ jobId: job.id, url, type: 'pdf' });
       }
@@ -703,6 +711,7 @@ filesRouter.post('/rerun-selected', async (req: Request, res: Response): Promise
   try {
     const dataDir = path.resolve(env.DATA_DIR);
     const urlsToRerun: string[] = [];
+    const urlToOldFile = new Map<string, string>();
 
     // Extract URLs from PDF files
     if (hasFiles) {
@@ -720,11 +729,12 @@ filesRouter.post('/rerun-selected', async (req: Request, res: Response): Promise
         const url = await extractUrlFromPdf(fullPath);
         if (url) {
           urlsToRerun.push(url);
+          urlToOldFile.set(url, fullPath);
         }
       }
     }
 
-    // Add direct URLs from failed items
+    // Add direct URLs from failed items (no old file to track)
     if (hasUrls) {
       for (const url of urls!) {
         // Basic validation - must look like a URL
@@ -750,6 +760,7 @@ filesRouter.post('/rerun-selected', async (req: Request, res: Response): Promise
         const job = await conversionQueue.add('convert-url', {
           url,
           originalUrl: url,
+          oldFilePath: urlToOldFile.get(url),
         });
         jobs.push({ jobId: job.id, url, type: 'pdf' });
       }

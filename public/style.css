@@ -163,6 +163,56 @@ header h1 {
   gap: 8px;
 }
 
+/* Filter bar */
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  margin-bottom: 15px;
+}
+
+.filter-input-wrapper {
+  position: relative;
+  display: inline-block;
+}
+
+.filter-input-wrapper input {
+  width: 300px;
+  padding: 8px 32px 8px 12px;
+  border: 1px solid #dee2e6;
+  border-radius: 5px;
+  font-size: 0.95rem;
+  transition: border-color 0.2s;
+}
+
+.filter-input-wrapper input:focus {
+  outline: none;
+  border-color: #007bff;
+}
+
+.filter-clear {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  font-size: 1.2rem;
+  color: #6c757d;
+  cursor: pointer;
+  padding: 0 6px;
+  line-height: 1;
+}
+
+.filter-clear:hover {
+  color: #333;
+}
+
+.filter-status {
+  color: #6c757d;
+  font-size: 0.9rem;
+}
+
 /* Table */
 .table-container {
   overflow-x: auto;

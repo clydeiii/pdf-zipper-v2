@@ -8,7 +8,7 @@
  */
 
 import { Worker, Job } from 'bullmq';
-import { writeFile, mkdir } from 'node:fs/promises';
+import { writeFile, mkdir, unlink } from 'node:fs/promises';
 import * as path from 'node:path';
 import { createRequire } from 'node:module';
 import { PDFDocument } from 'pdf-lib';
@@ -86,6 +86,27 @@ async function saveDebugPdf(jobId: string, pdfBuffer: Buffer): Promise<string | 
 }
 
 /**
+ * Delete the old PDF after a rerun if the new file has a different path.
+ * No-op when paths match (writeFile already overwrote).
+ * Best-effort: errors are logged but don't fail the job.
+ */
+async function deleteOldFileIfDifferent(oldFilePath: string, newFilePath: string): Promise<void> {
+  const oldNorm = path.resolve(oldFilePath);
+  const newNorm = path.resolve(newFilePath);
+  if (oldNorm === newNorm) return; // same file — writeFile already overwrote
+  try {
+    await unlink(oldNorm);
+    console.log(`Deleted old PDF (rerun): ${oldNorm}`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      console.log(`Old PDF already deleted: ${oldNorm}`);
+    } else {
+      console.error(`Failed to delete old PDF ${oldNorm}:`, error);
+    }
+  }
+}
+
+/**
  * Save PDF to weekly bin directory
  * Path: {DATA_DIR}/media/{year}-W{week}/pdfs/{filename}.pdf
  *
@@ -110,12 +131,26 @@ function slugifyTitle(title: string): string {
     .substring(0, 50);              // Limit length
 }
 
+/**
+ * Check if URL is a Twitter/X URL
+ */
+function isTwitterUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    return host === 'x.com' || host === 'twitter.com' || host === 'www.x.com' || host === 'www.twitter.com';
+  } catch {
+    return false;
+  }
+}
+
 async function savePdfToWeeklyBin(
   pdfBuffer: Buffer,
   url: string,
   title?: string,
   bookmarkedAt?: string,
-  originalUrl?: string
+  originalUrl?: string,
+  isXArticle?: boolean
 ): Promise<string> {
   // Embed source URL in PDF metadata for rerun feature
   const pdfWithMetadata = await embedPdfMetadata(pdfBuffer, url, originalUrl);
@@ -167,6 +202,18 @@ async function savePdfToWeeklyBin(
     } else {
       baseName = pathname ? `${hostname}-${pathname}` : hostname;
     }
+
+    // For Twitter/X URLs, replace "status" with more descriptive term
+    // isXArticle = true: X Article (captured directly from X.com)
+    // isXArticle = false: regular tweet (captured via Nitter)
+    if (isTwitterUrl(url) && baseName.includes('-status-')) {
+      if (isXArticle === true) {
+        baseName = baseName.replace('-status-', '-article-');
+      } else if (isXArticle === false) {
+        baseName = baseName.replace('-status-', '-post-');
+      }
+      // if isXArticle is undefined, leave as "status" (shouldn't happen for Twitter URLs)
+    }
   } catch {
     baseName = 'document';
   }
@@ -191,7 +238,7 @@ async function savePdfToWeeklyBin(
  */
 async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Promise<ConversionJobResult> {
   console.log(`[DEBUG] processJob called for job ${job.id}`);
-  const { url, originalUrl, userId, title: jobTitle, bookmarkedAt } = job.data;
+  const { url, originalUrl, userId, title: jobTitle, bookmarkedAt, oldFilePath } = job.data;
 
   console.log(`Processing job ${job.id} for URL: ${url}${userId ? ` (user: ${userId})` : ''}`);
 
@@ -226,6 +273,8 @@ async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Pro
 
     console.log(`PDF pass-through completed: ${filePath}`);
 
+    if (oldFilePath) await deleteOldFileIfDifferent(oldFilePath, filePath);
+
     return {
       pdfPath: filePath,
       pdfSize: passthroughResult.size,
@@ -239,6 +288,8 @@ async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Pro
 
   // Use job title if provided, otherwise use extracted page title
   const title = jobTitle || (result.success ? result.pageTitle : undefined);
+  // Track if this was an X Article capture (for filename generation)
+  const isXArticle = result.success ? result.isXArticle : undefined;
 
   // Update progress
   await job.updateProgress(50);
@@ -323,8 +374,10 @@ async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Pro
   await job.updateProgress(90);
 
   // Only save PDF after quality check passes
-  const pdfPath = await savePdfToWeeklyBin(result.pdfBuffer, url, title, bookmarkedAt, originalUrl);
+  const pdfPath = await savePdfToWeeklyBin(result.pdfBuffer, url, title, bookmarkedAt, originalUrl, isXArticle);
   console.log(`PDF saved to: ${pdfPath}`);
+
+  if (oldFilePath) await deleteOldFileIfDifferent(oldFilePath, pdfPath);
 
   // Final progress
   await job.updateProgress(100);

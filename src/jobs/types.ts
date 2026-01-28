@@ -26,6 +26,8 @@ export interface ConversionJobData {
   title?: string;
   /** ISO timestamp when bookmarked (for weekly bin organization) */
   bookmarkedAt?: string;
+  /** Absolute path to old PDF (set by rerun endpoints). Worker deletes if new filename differs. */
+  oldFilePath?: string;
 }
 
 /**

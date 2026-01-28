@@ -49,6 +49,9 @@ services:
       # Cookies file for paywalls
       - COOKIES_FILE=/data/cookies.txt
 
+      # Privacy filter - hide elements containing these terms (comma-separated)
+      - PRIVACY_FILTER_TERMS=Clyde Wright,clydeiii
+
     ports:
       - "3002:3002"
     volumes:

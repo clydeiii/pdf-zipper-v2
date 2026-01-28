@@ -6,6 +6,9 @@
 // State management
 let currentWeekId = null;
 let selectedFiles = new Set();
+let allItems = [];        // Store full dataset for filtering
+let currentFilter = '';   // Current filter string
+let filterDebounceTimer = null;
 
 // DOM elements
 const weeksView = document.getElementById('weeks-view');
@@ -20,6 +23,9 @@ const rerunSelectedButton = document.getElementById('rerun-selected-button');
 const deleteButton = document.getElementById('delete-button');
 const backButton = document.getElementById('back-button');
 const statusMessage = document.getElementById('status-message');
+const filterInput = document.getElementById('filter-input');
+const filterClear = document.getElementById('filter-clear');
+const filterStatus = document.getElementById('filter-status');
 
 // Initialize app on page load
 document.addEventListener('DOMContentLoaded', () => {
@@ -37,6 +43,8 @@ function setupEventListeners() {
   rerunButton.addEventListener('click', rerunAll);
   rerunSelectedButton.addEventListener('click', rerunSelected);
   deleteButton.addEventListener('click', deleteSelected);
+  filterInput.addEventListener('input', handleFilterInput);
+  filterClear.addEventListener('click', clearFilter);
 }
 
 /**
@@ -78,6 +86,12 @@ async function loadWeek(weekId) {
   currentWeekId = weekId;
   selectedFiles.clear();
 
+  // Reset filter state
+  currentFilter = '';
+  filterInput.value = '';
+  filterClear.classList.add('hidden');
+  filterStatus.textContent = '';
+
   // Update UI
   weekTitle.textContent = `${weekId}`;
   filesTbody.innerHTML = '<tr><td colspan="5" class="loading">Loading files...</td></tr>';
@@ -104,7 +118,7 @@ async function loadWeek(weekId) {
     }
 
     // Combine and sort all items by date descending
-    const allItems = [
+    allItems = [
       ...files.map(f => ({ ...f, isFailed: false })),
       ...failures.map(f => ({
         ...f,
@@ -117,23 +131,8 @@ async function loadWeek(weekId) {
       return new Date(b.modified).getTime() - new Date(a.modified).getTime();
     });
 
-    if (allItems.length === 0) {
-      filesTbody.innerHTML = '<tr><td colspan="5" class="loading">No files in this week.</td></tr>';
-      return;
-    }
-
-    // Render table rows
-    filesTbody.innerHTML = allItems.map((item, index) => {
-      if (item.isFailed) {
-        return renderFailedRow(item, index);
-      } else {
-        return renderFileRow(item, index);
-      }
-    }).join('');
-
-    // Update select-all checkbox state
-    updateSelectAllState();
-    updateDownloadButtonState();
+    // Render items (respects current filter)
+    renderFilteredItems();
 
   } catch (error) {
     console.error('Failed to load week:', error);
@@ -177,7 +176,7 @@ function renderFileRow(file, index) {
           type="checkbox"
           id="${checkboxId}"
           data-path="${file.path}"
-          onchange="handleFileCheckboxChange()"
+          onchange="handleFileCheckboxChange(this)"
         >
       </td>
       <td class="col-name">
@@ -228,7 +227,7 @@ function renderFailedRow(failure, index) {
           data-url="${escapeHtml(urlForRerun)}"
           data-failed="true"
           data-job-id="${escapeHtml(failure.jobId)}"
-          onchange="handleFileCheckboxChange()"
+          onchange="handleFileCheckboxChange(this)"
         >
       </td>
       <td class="col-name">
@@ -272,6 +271,13 @@ function handleSelectAll() {
 
   checkboxes.forEach(cb => {
     cb.checked = isChecked;
+    // Update persistent selection state
+    const key = getItemKey(cb);
+    if (isChecked) {
+      selectedFiles.add(key);
+    } else {
+      selectedFiles.delete(key);
+    }
   });
 
   updateDownloadButtonState();
@@ -280,9 +286,122 @@ function handleSelectAll() {
 /**
  * Handle individual file checkbox change
  */
-function handleFileCheckboxChange() {
+function handleFileCheckboxChange(checkbox) {
+  // Update persistent selection state
+  if (checkbox) {
+    const key = getItemKey(checkbox);
+    if (checkbox.checked) {
+      selectedFiles.add(key);
+    } else {
+      selectedFiles.delete(key);
+    }
+  }
   updateSelectAllState();
   updateDownloadButtonState();
+}
+
+/**
+ * Get unique key for an item (used for persistent selection)
+ */
+function getItemKey(checkbox) {
+  if (checkbox.dataset.failed === 'true') {
+    return `failed:${checkbox.dataset.url}`;
+  }
+  return `file:${checkbox.dataset.path}`;
+}
+
+/**
+ * Handle filter input with debounce
+ */
+function handleFilterInput() {
+  clearTimeout(filterDebounceTimer);
+  filterDebounceTimer = setTimeout(() => {
+    currentFilter = filterInput.value.toLowerCase();
+    filterClear.classList.toggle('hidden', !currentFilter);
+    renderFilteredItems();
+  }, 150);
+}
+
+/**
+ * Clear the filter
+ */
+function clearFilter() {
+  filterInput.value = '';
+  currentFilter = '';
+  filterClear.classList.add('hidden');
+  renderFilteredItems();
+  filterInput.focus();
+}
+
+/**
+ * Get items matching the current filter
+ */
+function getFilteredItems() {
+  if (!currentFilter) {
+    return allItems;
+  }
+  return allItems.filter(item => {
+    if (item.isFailed) {
+      // Match on URL for failed items
+      return item.url.toLowerCase().includes(currentFilter);
+    } else {
+      // Match on filename for files
+      return item.name.toLowerCase().includes(currentFilter);
+    }
+  });
+}
+
+/**
+ * Render filtered items and update status
+ */
+function renderFilteredItems() {
+  const filtered = getFilteredItems();
+
+  if (allItems.length === 0) {
+    filesTbody.innerHTML = '<tr><td colspan="5" class="loading">No files in this week.</td></tr>';
+    filterStatus.textContent = '';
+    return;
+  }
+
+  if (filtered.length === 0) {
+    filesTbody.innerHTML = '<tr><td colspan="5" class="loading">No items match the filter.</td></tr>';
+    filterStatus.textContent = `0 of ${allItems.length} items`;
+    return;
+  }
+
+  // Render table rows
+  filesTbody.innerHTML = filtered.map((item, index) => {
+    if (item.isFailed) {
+      return renderFailedRow(item, index);
+    } else {
+      return renderFileRow(item, index);
+    }
+  }).join('');
+
+  // Restore selection state
+  restoreSelectionState();
+
+  // Update filter status
+  if (currentFilter) {
+    filterStatus.textContent = `Showing ${filtered.length} of ${allItems.length} items`;
+  } else {
+    filterStatus.textContent = '';
+  }
+
+  // Update checkbox states
+  updateSelectAllState();
+  updateDownloadButtonState();
+}
+
+/**
+ * Restore checkbox selection state after re-render
+ */
+function restoreSelectionState() {
+  const checkboxes = filesTbody.querySelectorAll('input[type="checkbox"]');
+  checkboxes.forEach(cb => {
+    const key = getItemKey(cb);
+    cb.checked = selectedFiles.has(key);
+  });
 }
 
 /**
