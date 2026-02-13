@@ -37,8 +37,6 @@ export interface ConversionJobData {
 export interface ConversionJobResult {
   /** Path to generated PDF file (if saved to disk) */
   pdfPath?: string;
-  /** PDF content as base64 string (for storage in Redis) */
-  pdfBase64?: string;
   /** Size of PDF in bytes */
   pdfSize?: number;
   /** ISO timestamp of completion */

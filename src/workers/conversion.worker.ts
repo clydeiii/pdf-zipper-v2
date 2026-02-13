@@ -385,7 +385,7 @@ async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Pro
   // Return success result with quality data
   return {
     pdfPath,
-    pdfBase64: result.pdfBuffer.toString('base64'),
+
     pdfSize: result.size,
     completedAt: new Date().toISOString(),
     url,

@@ -5,9 +5,6 @@ services:
     restart: unless-stopped
     # Run as host user to avoid root-owned files in ./data
     user: "1000:1000"
-    # Uses external pdf-zipper-redis container (has processing history)
-    # depends_on:
-    #   - redis
     environment:
       - NODE_ENV=production
       - PORT=3002
@@ -52,27 +49,27 @@ services:
       # Privacy filter - hide elements containing these terms (comma-separated)
       - PRIVACY_FILTER_TERMS=Clyde Wright,clydeiii
 
+      # AI Self-Healing Fix System
+      - FIX_ENABLED=true
+      - CLAUDE_CLI_PATH=/home/clyde/.local/share/claude/versions/2.1.27
+      - HOME=/home/clyde
+
     ports:
       - "3002:3002"
     volumes:
       - ./data:/data
+      # Claude CLI for AI self-healing fix system
+      - /home/clyde/.local/share/claude:/home/clyde/.local/share/claude:ro
+      - /home/clyde/.claude:/home/clyde/.claude
+      # Project source at same path for Claude Code to edit
+      - /home/clyde/pdf-zipper-v2:/home/clyde/pdf-zipper-v2
     shm_size: "1gb"
     networks:
       - proxy-network
       - default
 
-  redis:
-    image: redis:7-alpine
-    container_name: pdfzipper-v2-redis
-    restart: unless-stopped
-    volumes:
-      - redis-data:/data
-    networks:
-      - default
 
 networks:
   proxy-network:
     external: true
 
-volumes:
-  redis-data:
