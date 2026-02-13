@@ -9,6 +9,7 @@ pdf-zipper-v2 is an async URL-to-PDF conversion system with:
 - **Discord webhook** notifications for job completion/failure
 - **Web UI** for file browsing, downloading, and management
 - **Podcast transcription** via Whisper ASR for Apple Podcasts URLs
+- **AI Self-Healing** via Claude Code for diagnosing and fixing classification errors
 
 ## Key Architecture Decisions
 
@@ -40,6 +41,17 @@ pdf-zipper-v2 is an async URL-to-PDF conversion system with:
 - PDF generated with metadata header + full transcript
 - Saved to weekly bins under `podcasts/` folder
 - Uses separate BullMQ queue (`podcast-transcription`) with lower concurrency
+
+### AI Self-Healing Fix System
+- Users can flag items as incorrectly classified via "Fix Selected" button
+- **False Positive**: Saved PDF that should have failed quality checks
+- **False Negative**: Failed URL that should have succeeded
+- Every 5 minutes (offset 2.5 min from feed polling), pending items are processed
+- Spawns headless Claude Code to diagnose issues and apply code fixes
+- Claude Code can read PDFs, analyze quality scoring code, and make targeted fixes
+- Results sent to Discord webhook; history viewable via API
+- Safety boundaries: can only modify `src/quality/*` and `src/converters/*`
+- Requires `FIX_ENABLED=true` and Claude CLI in PATH
 
 ## Lessons Learned (Debugging Session 2026-01-26)
 
@@ -378,6 +390,64 @@ Also added CSS to hide Substack modals/popups as backup.
 **Safety:** Old file is only deleted after new file is saved. If the job fails at any earlier stage, old file is preserved. ENOENT and permission errors are logged but don't fail the job.
 **Files:** `src/jobs/types.ts` (oldFilePath field), `src/workers/conversion.worker.ts` (deleteOldFileIfDifferent helper), `src/api/routes/files.ts` (both rerun endpoints pass old paths)
 
+**41. WinAnsi Encoding for Podcast Transcript PDFs**
+**Problem:** PDF generation failing with `WinAnsi cannot encode "⁠" (0x2060)` error
+**Cause:** LLM-formatted transcripts contain invisible Unicode characters (Word Joiner U+2060, zero-width spaces, etc.) that pdf-lib's StandardFonts can't encode - WinAnsi only supports a subset of characters
+**Solution:** Added `sanitizeForWinAnsi()` function that:
+1. Removes zero-width/invisible chars: U+200B-200D (ZW spaces/joiners), U+2060 (Word Joiner), U+FEFF (BOM), U+00AD (soft hyphen)
+2. Replaces smart quotes with ASCII equivalents
+3. Replaces en-dash/em-dash with hyphens
+4. Replaces ellipsis with three dots
+5. Strips any remaining non-Latin-1 characters
+**File:** `src/podcasts/pdf-generator.ts`
+
+**42. Extended Timeouts for Long Podcast Transcription**
+**Problem:** 2-hour podcasts failing with "fetch failed" after exactly 30 minutes
+**Cause:** The undici Agent had 30-minute timeout, but transcription takes ~0.4x realtime (114 min podcast = ~46 min transcription)
+**Solution:** Increased timeouts to handle 6+ hour podcasts (Dwarkesh, Lex Fridman):
+- `headersTimeout`: 4 hours (6hr podcast × 0.4 = 2.4hr transcription + buffer)
+- `bodyTimeout`: 4 hours
+- `connectTimeout`: 5 min (for large audio uploads, 6hr podcast = ~500MB)
+**Note:** The medium.en Whisper model processes audio at roughly 0.4x realtime
+**File:** `src/podcasts/transcriber.ts`
+
+**43. Karakeep Uploaded PDF Assets**
+**Problem:** PDFs dragged into Karakeep were not being collected by pdf-zipper-v2
+**Cause:** Karakeep stores uploaded files as `content.type: "asset"` (not `"link"`), and the parser only handled links
+**Discovery:** Karakeep API shows uploaded PDFs with structure:
+```json
+"content": { "type": "asset", "assetType": "pdf", "assetId": "uuid", "fileName": "file.pdf" }
+```
+**Solution:**
+1. Updated Karakeep parser to detect `type: "asset"` + `assetType: "pdf"` bookmarks
+2. Create enclosure pointing to `/api/assets/{assetId}` with `application/pdf` MIME type
+3. Set `mediaType: 'pdf'` so metadata worker routes to media collection (not PDF conversion)
+4. Added `'pdf'` to `MediaType` union in `src/media/types.ts`
+5. Skip web metadata extraction for asset URLs (they're not web pages)
+6. Early return after media collection queuing for PDF assets (skip conversion)
+**Files:** `src/feeds/parsers/karakeep.ts`, `src/feeds/metadata-worker.ts`, `src/media/types.ts`
+
+**44. Karakeep PDF Asset Filename Location**
+**Problem:** All Karakeep PDF assets were saved as "uploaded.pdf", overwriting each other
+**Cause:** Parser looked for filename in `bookmark.content.fileName` which is often `null`
+**Discovery:** The actual filename is in `bookmark.assets[].fileName`, not `content.fileName`
+**Solution:** Check both locations for filename:
+```javascript
+const assetInfo = bookmark.assets?.find(a => a.id === assetId);
+const fileName = bookmark.content.fileName || assetInfo?.fileName || `pdf-${assetId.slice(0,8)}.pdf`;
+```
+**File:** `src/feeds/parsers/karakeep.ts`
+
+**45. Paywall Detection in PDF Content Analysis**
+**Problem:** Paywalled articles (Bloomberg, WSJ, etc.) passed quality checks because they had enough text (headline, teaser, author bio)
+**Cause:** PDF content analysis checked for minimum characters and error pages, but not subscription/paywall prompts
+**Solution:** Added `PAYWALL_PATTERNS` array with 20+ regex patterns to detect:
+- Generic: "get unlimited access", "subscribe to continue reading", "unlock this article"
+- Price-based: "$X.XX your first month", "starting at $X.XX"
+- Site-specific: Bloomberg, WSJ, NYT patterns
+**Result:** PDFs with paywall prompts now fail with `"Paywall detected: \"...\". Article content is behind a subscription wall."`
+**File:** `src/quality/pdf-content.ts`
+
 ## Common Commands (Development)
 
 ```bash
@@ -404,6 +474,8 @@ Key optional settings:
 - `COOKIES_FILE` - Netscape cookies.txt for paywall bypass
 - `WHISPER_HOST` - Whisper ASR server URL, default `http://10.0.0.81:9000`
 - `PRIVACY_FILTER_TERMS` - Comma-separated terms to hide from PDF captures (names, handles)
+- `FIX_ENABLED` - Enable AI self-healing fix system (requires Claude CLI)
+- `CLAUDE_CLI_PATH` - Path to Claude CLI executable, default `claude`
 
 ## File Structure
 
@@ -421,11 +493,14 @@ src/
 │   └── discord.ts    # Discord webhook integration
 ├── converters/
 │   └── pdf.ts        # Playwright PDF generation
-└── podcasts/         # Podcast transcription
-    ├── apple.ts      # Apple Podcasts URL parsing, iTunes API
-    ├── transcriber.ts    # Audio download, Whisper ASR client
-    ├── pdf-generator.ts  # Transcript PDF generation
-    └── podcast-worker.ts # BullMQ worker orchestration
+├── podcasts/         # Podcast transcription
+│   ├── apple.ts      # Apple Podcasts URL parsing, iTunes API
+│   ├── transcriber.ts    # Audio download, Whisper ASR client
+│   ├── pdf-generator.ts  # Transcript PDF generation
+│   └── podcast-worker.ts # BullMQ worker orchestration
+└── fix/              # AI self-healing system
+    ├── pending.ts    # Redis pending storage helpers
+    └── prompt-builder.ts # Claude Code prompt generation
 ```
 
 ## UI Features
@@ -436,4 +511,5 @@ src/
 - **Rerun All** - Re-capture entire week
 - **Rerun Selected** - Re-capture specific items (files or failed URLs)
 - **Delete Selected** - Remove files AND/OR failed items (removes from BullMQ)
+- **Fix Selected** - Submit items for AI diagnosis (false positives/negatives)
 - **Download Selected** - ZIP download

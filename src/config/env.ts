@@ -34,6 +34,10 @@ interface EnvConfig {
   TRANSCRIPT_FORMAT_MODEL: string;
   /** Comma-separated list of terms to filter from PDF captures for privacy (optional) */
   PRIVACY_FILTER_TERMS?: string;
+  /** Enable AI self-healing fix feature (requires Claude CLI) */
+  FIX_ENABLED: boolean;
+  /** Path to Claude CLI (default: 'claude' in PATH) */
+  CLAUDE_CLI_PATH: string;
 }
 
 const requiredEnvVars = ['REDIS_HOST', 'REDIS_PORT', 'PORT'] as const;
@@ -90,4 +94,7 @@ export const env: EnvConfig = {
   TRANSCRIPT_FORMAT_MODEL: process.env.TRANSCRIPT_FORMAT_MODEL || process.env.OLLAMA_MODEL || 'gemma3',
   // Privacy filter terms (comma-separated list of names/handles to hide from captures)
   PRIVACY_FILTER_TERMS: process.env.PRIVACY_FILTER_TERMS,
+  // AI self-healing fix feature
+  FIX_ENABLED: process.env.FIX_ENABLED === 'true',
+  CLAUDE_CLI_PATH: process.env.CLAUDE_CLI_PATH || 'claude',
 };

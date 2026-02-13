@@ -37,6 +37,10 @@ import { startMediaWorker, stopMediaWorker } from './media/collection-worker.js'
 // Import podcast transcription
 import { startPodcastWorker, stopPodcastWorker } from './podcasts/podcast-worker.js';
 
+// Import AI self-healing fix system
+import { initializeFixScheduler } from './queues/fix.queue.js';
+import { startFixWorker, stopFixWorker } from './workers/fix.worker.js';
+
 console.log(`Environment: ${env.NODE_ENV}`);
 console.log(`Server port configured: ${env.PORT}`);
 
@@ -54,6 +58,10 @@ async function gracefulShutdown(signal: string): Promise<void> {
 
   try {
     // Close workers in reverse order of startup
+    console.log('Closing fix worker...');
+    await stopFixWorker();
+    console.log('Fix worker closed');
+
     console.log('Closing podcast worker...');
     await stopPodcastWorker();
     console.log('Podcast worker closed');
@@ -93,6 +101,11 @@ async function gracefulShutdown(signal: string): Promise<void> {
   await startPodcastWorker();
   console.log('Podcast transcription worker initialized');
 
+  // Start AI self-healing fix system
+  await initializeFixScheduler();
+  await startFixWorker();
+  console.log('AI fix system initialized');
+
   // Register additional shutdown handlers for feed workers
   // Note: conversion worker registers its own handlers in startWorker()
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
@@ -103,4 +116,5 @@ async function gracefulShutdown(signal: string): Promise<void> {
   console.log('Feed monitoring active');
   console.log('Media collection active');
   console.log('Podcast transcription active');
+  console.log('AI fix system active');
 })();

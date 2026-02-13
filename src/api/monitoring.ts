@@ -9,6 +9,7 @@ import { BullMQAdapter } from '@bull-board/api/bullMQAdapter';
 import { ExpressAdapter } from '@bull-board/express';
 import { conversionQueue } from '../queues/conversion.queue.js';
 import { podcastQueue } from '../podcasts/podcast.queue.js';
+import { fixQueue } from '../queues/fix.queue.js';
 
 /**
  * Express adapter for Bull Board dashboard
@@ -24,6 +25,7 @@ createBullBoard({
   queues: [
     new BullMQAdapter(conversionQueue),
     new BullMQAdapter(podcastQueue),
+    new BullMQAdapter(fixQueue),
   ],
   serverAdapter,
 });

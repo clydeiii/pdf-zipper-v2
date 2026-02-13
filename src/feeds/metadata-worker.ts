@@ -56,15 +56,27 @@ function isVideoOnlyUrl(url: string): boolean {
  * Merges feed metadata with extracted metadata (web takes precedence).
  * Items with media enclosures are also queued for media collection.
  */
+/**
+ * Check if URL is a Karakeep asset URL (not a web page)
+ */
+function isKarakeepAssetUrl(url: string): boolean {
+  return url.includes('/api/assets/');
+}
+
 export const metadataWorker = new Worker<MetadataJobData>(
   METADATA_QUEUE_NAME,
   async (job: Job<MetadataJobData>) => {
     const { url, canonicalUrl, source, feedMetadata } = job.data;
 
-    await job.log(`Extracting metadata from ${url}`);
+    // Skip web metadata extraction for Karakeep asset URLs (they're not web pages)
+    let webMetadata: { title?: string; author?: string; date?: string; description?: string; image?: string; publisher?: string } = {};
 
-    // Extract metadata from URL
-    const webMetadata = await extractUrlMetadata(url);
+    if (isKarakeepAssetUrl(url)) {
+      await job.log(`Skipping metadata extraction for asset URL: ${url}`);
+    } else {
+      await job.log(`Extracting metadata from ${url}`);
+      webMetadata = await extractUrlMetadata(url);
+    }
 
     // Merge: web metadata preferred, feed metadata as fallback
     // Include media fields if present
@@ -105,6 +117,23 @@ export const metadataWorker = new Worker<MetadataJobData>(
       }));
 
       await job.log(`Queued for media collection: ${enrichedItem.mediaType}`);
+
+      // For uploaded PDF assets, skip web metadata extraction and PDF conversion
+      // The PDF file is already complete - just download it via media collection
+      if (enrichedItem.mediaType === 'pdf') {
+        console.log(JSON.stringify({
+          event: 'pdf_asset_handled',
+          url: enrichedItem.url,
+          title: enrichedItem.title,
+          timestamp: new Date().toISOString(),
+        }));
+
+        return {
+          url: canonicalUrl,
+          metadata: enrichedItem,
+          mediaOnly: true,
+        };
+      }
     }
 
     // Check if this is an Apple Podcasts URL - route to podcast transcription

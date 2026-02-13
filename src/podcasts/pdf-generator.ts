@@ -25,6 +25,32 @@ const LINE_HEIGHT_BODY = 16;
 const LINE_HEIGHT_META = 14;
 
 /**
+ * Sanitize text for WinAnsi encoding (used by pdf-lib StandardFonts)
+ *
+ * WinAnsi can only encode a subset of characters. This removes/replaces
+ * problematic Unicode characters that would cause "WinAnsi cannot encode" errors.
+ */
+function sanitizeForWinAnsi(text: string): string {
+  return text
+    // Remove zero-width and invisible characters
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')  // Zero-width spaces, word joiner, BOM
+    .replace(/[\u00AD]/g, '')  // Soft hyphen
+    .replace(/[\u2028\u2029]/g, '\n')  // Line/paragraph separators → newline
+    // Replace smart quotes and apostrophes with ASCII equivalents
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'")  // Smart single quotes
+    .replace(/[\u201C\u201D\u201E\u201F]/g, '"')  // Smart double quotes
+    // Replace dashes
+    .replace(/[\u2013]/g, '-')   // En dash
+    .replace(/[\u2014]/g, '--')  // Em dash
+    // Replace ellipsis
+    .replace(/[\u2026]/g, '...')
+    // Replace bullet points
+    .replace(/[\u2022]/g, '*')   // Bullet
+    // Remove other non-WinAnsi characters (keep printable ASCII + Latin-1 supplement)
+    .replace(/[^\x00-\xFF]/g, '');
+}
+
+/**
  * Format duration from milliseconds to human readable
  */
 function formatDuration(ms: number): string {
@@ -170,6 +196,34 @@ export async function generateTranscriptPdf(
   const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
   const fontItalic = await pdfDoc.embedFont(StandardFonts.HelveticaOblique);
 
+  // Sanitize all text for WinAnsi encoding
+  const sanitizedMetadata = {
+    ...metadata,
+    podcastName: sanitizeForWinAnsi(metadata.podcastName),
+    episodeTitle: sanitizeForWinAnsi(metadata.episodeTitle),
+    podcastAuthor: sanitizeForWinAnsi(metadata.podcastAuthor),
+    genre: sanitizeForWinAnsi(metadata.genre),
+    description: metadata.description ? sanitizeForWinAnsi(metadata.description) : undefined,
+    shortDescription: metadata.shortDescription ? sanitizeForWinAnsi(metadata.shortDescription) : undefined,
+    showNotes: metadata.showNotes ? {
+      ...metadata.showNotes,
+      summary: metadata.showNotes.summary ? sanitizeForWinAnsi(metadata.showNotes.summary) : undefined,
+      links: metadata.showNotes.links.map(link => ({
+        ...link,
+        text: sanitizeForWinAnsi(link.text),
+        source: link.source ? sanitizeForWinAnsi(link.source) : undefined,
+      })),
+    } : undefined,
+  };
+  const sanitizedTranscript = {
+    ...transcript,
+    text: sanitizeForWinAnsi(transcript.text),
+    segments: transcript.segments?.map(seg => ({
+      ...seg,
+      text: sanitizeForWinAnsi(seg.text),
+    })),
+  };
+
   // Create first page
   let page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
   let y = PAGE_HEIGHT - MARGIN;
@@ -177,7 +231,7 @@ export async function generateTranscriptPdf(
   // === HEADER SECTION ===
 
   // Podcast name (title)
-  const podcastLines = wrapText(metadata.podcastName, fontBold, FONT_SIZE_TITLE, CONTENT_WIDTH);
+  const podcastLines = wrapText(sanitizedMetadata.podcastName, fontBold, FONT_SIZE_TITLE, CONTENT_WIDTH);
   for (const line of podcastLines) {
     y = drawText(page, line, MARGIN, y, fontBold, FONT_SIZE_TITLE);
     y -= FONT_SIZE_TITLE + 4;
@@ -185,7 +239,7 @@ export async function generateTranscriptPdf(
 
   // Episode title (subtitle)
   y -= 8;
-  const titleLines = wrapText(metadata.episodeTitle, fontBold, FONT_SIZE_SUBTITLE, CONTENT_WIDTH);
+  const titleLines = wrapText(sanitizedMetadata.episodeTitle, fontBold, FONT_SIZE_SUBTITLE, CONTENT_WIDTH);
   for (const line of titleLines) {
     y = drawText(page, line, MARGIN, y, fontBold, FONT_SIZE_SUBTITLE, rgb(0.2, 0.2, 0.2));
     y -= FONT_SIZE_SUBTITLE + 2;
@@ -193,19 +247,19 @@ export async function generateTranscriptPdf(
 
   // Metadata line 1: Host(s) and Genre
   y -= 12;
-  const metaLine1 = `Host: ${metadata.podcastAuthor}  |  Genre: ${metadata.genre}`;
+  const metaLine1 = `Host: ${sanitizedMetadata.podcastAuthor}  |  Genre: ${sanitizedMetadata.genre}`;
   drawText(page, metaLine1, MARGIN, y, fontRegular, FONT_SIZE_META, rgb(0.4, 0.4, 0.4));
   y -= LINE_HEIGHT_META;
 
   // Metadata line 2: Duration and Date
-  const duration = formatDuration(metadata.duration);
-  const date = formatDate(metadata.publishedAt);
+  const duration = formatDuration(sanitizedMetadata.duration);
+  const date = formatDate(sanitizedMetadata.publishedAt);
   const metaLine2 = `Duration: ${duration}  |  Published: ${date}`;
   drawText(page, metaLine2, MARGIN, y, fontRegular, FONT_SIZE_META, rgb(0.4, 0.4, 0.4));
   y -= LINE_HEIGHT_META;
 
   // Metadata line 3: Source URL
-  const metaLine3 = `Source: ${metadata.episodeUrl}`;
+  const metaLine3 = `Source: ${sanitizedMetadata.episodeUrl}`;
   const urlLines = wrapText(metaLine3, fontRegular, FONT_SIZE_META, CONTENT_WIDTH);
   for (const line of urlLines) {
     drawText(page, line, MARGIN, y, fontRegular, FONT_SIZE_META, rgb(0.3, 0.3, 0.6));
@@ -213,14 +267,14 @@ export async function generateTranscriptPdf(
   }
 
   // === SHOW NOTES SECTION (with clickable links) ===
-  if (metadata.showNotes && metadata.showNotes.links.length > 0) {
+  if (sanitizedMetadata.showNotes && sanitizedMetadata.showNotes.links.length > 0) {
     y -= 16;
     drawText(page, 'Show Notes', MARGIN, y, fontBold, FONT_SIZE_META + 1);
     y -= LINE_HEIGHT_META + 4;
 
     // Summary paragraph
-    if (metadata.showNotes.summary) {
-      const summaryLines = wrapText(metadata.showNotes.summary, fontItalic, FONT_SIZE_META, CONTENT_WIDTH);
+    if (sanitizedMetadata.showNotes.summary) {
+      const summaryLines = wrapText(sanitizedMetadata.showNotes.summary, fontItalic, FONT_SIZE_META, CONTENT_WIDTH);
       for (const line of summaryLines) {
         if (y < MARGIN + 40) {
           page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
@@ -232,15 +286,18 @@ export async function generateTranscriptPdf(
       y -= 8;
     }
 
-    // Links with clickable annotations
-    for (const link of metadata.showNotes.links) {
+    // Links with clickable annotations (use original URLs, sanitized text)
+    for (let i = 0; i < sanitizedMetadata.showNotes.links.length; i++) {
+      const link = sanitizedMetadata.showNotes.links[i];
+      const originalLink = metadata.showNotes!.links[i];  // Use original URL for href
+
       if (y < MARGIN + 40) {
         page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
         y = PAGE_HEIGHT - MARGIN;
       }
 
-      // Draw bullet point
-      const bulletText = '•';
+      // Draw bullet point (using asterisk instead of Unicode bullet for WinAnsi)
+      const bulletText = '*';
       drawText(page, bulletText, MARGIN, y, fontRegular, FONT_SIZE_META);
 
       // Draw link text in blue
@@ -250,7 +307,7 @@ export async function generateTranscriptPdf(
 
       drawText(page, linkText, linkX, y, fontRegular, FONT_SIZE_META, rgb(0.1, 0.3, 0.7));
 
-      // Add clickable link annotation
+      // Add clickable link annotation (use original URL)
       const linkAnnot = pdfDoc.context.register(
         pdfDoc.context.obj({
           Type: 'Annot',
@@ -260,7 +317,7 @@ export async function generateTranscriptPdf(
           A: {
             Type: 'Action',
             S: 'URI',
-            URI: pdfDoc.context.obj(link.url),
+            URI: pdfDoc.context.obj(originalLink.url),
           },
         })
       );
@@ -268,18 +325,18 @@ export async function generateTranscriptPdf(
 
       y -= LINE_HEIGHT_META + 2;
     }
-  } else if (metadata.shortDescription || metadata.description) {
+  } else if (sanitizedMetadata.shortDescription || sanitizedMetadata.description) {
     // Fallback to description if no show notes with links
     y -= 16;
     drawText(page, 'Episode Summary', MARGIN, y, fontBold, FONT_SIZE_META + 1);
     y -= LINE_HEIGHT_META + 4;
 
-    let desc = metadata.shortDescription || metadata.description;
-    if (desc.length > 500) {
-      desc = desc.substring(0, 497) + '...';
+    let desc = sanitizedMetadata.shortDescription || sanitizedMetadata.description;
+    if (desc!.length > 500) {
+      desc = desc!.substring(0, 497) + '...';
     }
 
-    const descLines = wrapText(desc, fontItalic, FONT_SIZE_META, CONTENT_WIDTH);
+    const descLines = wrapText(desc!, fontItalic, FONT_SIZE_META, CONTENT_WIDTH);
     for (const line of descLines) {
       if (y < MARGIN + 40) {
         page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
@@ -294,7 +351,7 @@ export async function generateTranscriptPdf(
   y -= 24;
 
   // Transcript header
-  const transcriptHeader = `Transcript (${transcript.text.length.toLocaleString()} characters)`;
+  const transcriptHeader = `Transcript (${sanitizedTranscript.text.length.toLocaleString()} characters)`;
   drawText(page, transcriptHeader, MARGIN, y, fontBold, FONT_SIZE_SUBTITLE);
   y -= FONT_SIZE_SUBTITLE + 8;
 
@@ -308,7 +365,7 @@ export async function generateTranscriptPdf(
   y -= 16;
 
   // Format and wrap transcript
-  const formattedTranscript = formatTranscript(transcript);
+  const formattedTranscript = formatTranscript(sanitizedTranscript);
   const transcriptLines = wrapText(formattedTranscript, fontRegular, FONT_SIZE_BODY, CONTENT_WIDTH);
 
   // Draw transcript with pagination
@@ -332,9 +389,9 @@ export async function generateTranscriptPdf(
   }
 
   // === FOOTER: Set PDF metadata ===
-  pdfDoc.setTitle(`${metadata.episodeTitle} - ${metadata.podcastName}`);
-  pdfDoc.setAuthor(metadata.podcastAuthor);
-  pdfDoc.setSubject(metadata.episodeUrl);  // For rerun feature
+  pdfDoc.setTitle(`${sanitizedMetadata.episodeTitle} - ${sanitizedMetadata.podcastName}`);
+  pdfDoc.setAuthor(sanitizedMetadata.podcastAuthor);
+  pdfDoc.setSubject(sanitizedMetadata.episodeUrl);  // For rerun feature
   pdfDoc.setProducer(`pdf-zipper v2 podcast transcriber - ${new Date().toISOString()}`);
   pdfDoc.setCreator('Whisper ASR + pdf-zipper');
 
@@ -343,9 +400,9 @@ export async function generateTranscriptPdf(
 
   console.log(JSON.stringify({
     event: 'transcript_pdf_generated',
-    episodeTitle: metadata.episodeTitle,
+    episodeTitle: sanitizedMetadata.episodeTitle,
     pageCount: pdfDoc.getPageCount(),
-    transcriptLength: transcript.text.length,
+    transcriptLength: sanitizedTranscript.text.length,
     pdfSize: pdfBytes.length,
     timestamp: new Date().toISOString(),
   }));

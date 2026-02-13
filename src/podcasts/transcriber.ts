@@ -20,12 +20,18 @@ import type { WhisperResponse, TranscriptionResult } from './types.js';
 /**
  * Custom HTTP agent for Whisper requests with extended timeouts
  * Node's fetch uses undici internally, which has 5-minute default timeouts
- * Whisper transcription can take 7+ minutes for long podcasts
+ *
+ * Timeout math for medium.en model (~0.4x realtime):
+ * - 2hr podcast → ~48 min transcription
+ * - 4hr podcast → ~96 min transcription
+ * - 6hr podcast (Dwarkesh/Lex) → ~144 min transcription (2.4 hours)
+ *
+ * Using 4-hour timeout to safely handle 6+ hour podcasts with buffer
  */
 const whisperAgent = new Agent({
-  headersTimeout: 30 * 60 * 1000,  // 30 minutes for response headers
-  bodyTimeout: 30 * 60 * 1000,     // 30 minutes for response body
-  connectTimeout: 30 * 1000,       // 30 seconds to establish connection
+  headersTimeout: 4 * 60 * 60 * 1000,  // 4 hours for response headers
+  bodyTimeout: 4 * 60 * 60 * 1000,     // 4 hours for response body
+  connectTimeout: 5 * 60 * 1000,       // 5 minutes to establish connection (large uploads)
 });
 
 /**

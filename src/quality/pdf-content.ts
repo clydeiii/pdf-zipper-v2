@@ -93,6 +93,46 @@ const ERROR_PAGE_PATTERNS = [
 ];
 
 /**
+ * Paywall patterns - if any of these appear, the article is likely behind a paywall
+ * These are common subscription prompts that indicate truncated content
+ */
+const PAYWALL_PATTERNS = [
+  // Generic subscription prompts
+  /get\s+unlimited\s+access/i,
+  /subscribe\s+to\s+(continue|keep)\s+reading/i,
+  /unlock\s+(this\s+)?(article|story|content)/i,
+  /sign\s+up\s+to\s+(continue|keep)\s+reading/i,
+  /create\s+(a\s+)?free\s+account\s+to\s+(continue|read)/i,
+  /already\s+a\s+subscriber\?\s*sign\s+in/i,
+  /subscribers\s+only/i,
+  /premium\s+(content|article|story)/i,
+  /member(\s+|-)?exclusive/i,
+
+  // Price-based prompts (e.g., "$1.99 your first month")
+  /\$\d+\.?\d*\s+(per|a|your|\/)\s*(week|month|year|first)/i,
+  /for\s+just\s+\$\d+\.?\d*/i,
+  /starting\s+at\s+\$\d+\.?\d*/i,
+
+  // Bloomberg-specific
+  /unlock\s+the\s+global\s+benchmark/i,
+  /bloomberg\s+(terminal|professional)/i,
+
+  // WSJ-specific
+  /subscribe\s+to\s+wsj/i,
+  /wall\s+street\s+journal\s+membership/i,
+
+  // NYT-specific
+  /subscribe\s+to\s+(the\s+)?new\s+york\s+times/i,
+  /times\s+insider/i,
+
+  // Generic newspaper/news site patterns
+  /become\s+a\s+(subscriber|member)/i,
+  /join\s+(now\s+)?to\s+(continue|unlock|access)/i,
+  /this\s+(article|content)\s+is\s+(only\s+)?(available|accessible)\s+to\s+subscribers/i,
+  /you('ve|'re|\s+have)\s+(reached|hit)\s+(your|the)\s+(article|story|free)\s+(limit|cap)/i,
+];
+
+/**
  * Extract and analyze text content from a PDF buffer
  * Detects truncated articles by checking text-to-size ratio
  *
@@ -142,6 +182,20 @@ export async function analyzePdfContent(pdfBuffer: Buffer): Promise<PdfContentRe
             reason: `Error page detected: "${normalizedText.match(pattern)?.[0]}". This appears to be a 404 or error page.`,
           };
         }
+      }
+    }
+
+    // Check 0.5: Paywall detection
+    // Paywalled articles often have substantial text (headline, teaser, byline)
+    // but contain subscription prompts indicating the real content is locked
+    for (const pattern of PAYWALL_PATTERNS) {
+      if (pattern.test(normalizedText)) {
+        const match = normalizedText.match(pattern)?.[0];
+        return {
+          ...baseResult,
+          passed: false,
+          reason: `Paywall detected: "${match}". Article content is behind a subscription wall.`,
+        };
       }
     }
 

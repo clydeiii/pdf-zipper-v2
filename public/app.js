@@ -21,6 +21,7 @@ const downloadButton = document.getElementById('download-button');
 const rerunButton = document.getElementById('rerun-button');
 const rerunSelectedButton = document.getElementById('rerun-selected-button');
 const deleteButton = document.getElementById('delete-button');
+const fixButton = document.getElementById('fix-button');
 const backButton = document.getElementById('back-button');
 const statusMessage = document.getElementById('status-message');
 const filterInput = document.getElementById('filter-input');
@@ -43,6 +44,7 @@ function setupEventListeners() {
   rerunButton.addEventListener('click', rerunAll);
   rerunSelectedButton.addEventListener('click', rerunSelected);
   deleteButton.addEventListener('click', deleteSelected);
+  fixButton.addEventListener('click', fixSelected);
   filterInput.addEventListener('input', handleFilterInput);
   filterClear.addEventListener('click', clearFilter);
 }
@@ -335,19 +337,48 @@ function clearFilter() {
 
 /**
  * Get items matching the current filter
+ *
+ * Supports special prefixes:
+ *   status:success / status:ok   — only successful files
+ *   status:fail / status:failed  — only failed items
+ * Remaining text after prefix is matched against filename/URL.
+ * Example: "status:success nyt" → successful files matching "nyt"
  */
 function getFilteredItems() {
   if (!currentFilter) {
     return allItems;
   }
-  return allItems.filter(item => {
-    if (item.isFailed) {
-      // Match on URL for failed items
-      return item.url.toLowerCase().includes(currentFilter);
-    } else {
-      // Match on filename for files
-      return item.name.toLowerCase().includes(currentFilter);
+
+  let statusFilter = null; // null = no status filter, true = success only, false = failed only
+  let textFilter = currentFilter;
+
+  // Parse status: prefix
+  const statusMatch = currentFilter.match(/^status:(\S+)\s*(.*)/);
+  if (statusMatch) {
+    const statusValue = statusMatch[1];
+    textFilter = statusMatch[2] || '';
+    if (statusValue === 'success' || statusValue === 'ok') {
+      statusFilter = true;
+    } else if (statusValue === 'fail' || statusValue === 'failed') {
+      statusFilter = false;
     }
+  }
+
+  return allItems.filter(item => {
+    // Apply status filter
+    if (statusFilter === true && item.isFailed) return false;
+    if (statusFilter === false && !item.isFailed) return false;
+
+    // Apply text filter
+    if (textFilter) {
+      if (item.isFailed) {
+        return item.url.toLowerCase().includes(textFilter);
+      } else {
+        return item.name.toLowerCase().includes(textFilter);
+      }
+    }
+
+    return true;
   });
 }
 
@@ -425,6 +456,7 @@ function updateDownloadButtonState() {
   downloadButton.disabled = !hasSelection;
   deleteButton.disabled = !hasSelection;
   rerunSelectedButton.disabled = !hasSelection;
+  fixButton.disabled = !hasSelection;
 }
 
 /**
@@ -435,10 +467,13 @@ function updateDownloadButtonState() {
  */
 function downloadSelected() {
   const checkboxes = filesTbody.querySelectorAll('input[type="checkbox"]:checked');
-  const filePaths = Array.from(checkboxes).map(cb => cb.dataset.path);
+  // Only include items with a file path (failed items have no file on disk)
+  const filePaths = Array.from(checkboxes)
+    .map(cb => cb.dataset.path)
+    .filter(p => p);
 
   if (filePaths.length === 0) {
-    showStatus('Please select files to download', 'error');
+    showStatus('No downloadable files selected (failed items have no file)', 'error');
     return;
   }
 
@@ -679,6 +714,76 @@ async function deleteSelected() {
   } finally {
     deleteButton.disabled = false;
     deleteButton.textContent = 'Delete Selected';
+  }
+}
+
+/**
+ * Submit selected items for AI diagnosis
+ * - Successful PDFs → false positive (should have failed)
+ * - Failed items → false negative (should have succeeded)
+ */
+async function fixSelected() {
+  const checkboxes = filesTbody.querySelectorAll('input[type="checkbox"]:checked');
+
+  if (checkboxes.length === 0) {
+    showStatus('Please select items to diagnose', 'error');
+    return;
+  }
+
+  // Build items array for API
+  const items = [];
+
+  checkboxes.forEach(cb => {
+    if (cb.dataset.failed === 'true') {
+      // Failed item → false_negative
+      items.push({
+        url: cb.dataset.url,
+        jobId: cb.dataset.jobId,
+        requestType: 'false_negative',
+      });
+    } else if (cb.dataset.path && cb.dataset.path.endsWith('.pdf')) {
+      // PDF file → false_positive
+      items.push({
+        path: cb.dataset.path,
+        requestType: 'false_positive',
+      });
+    }
+  });
+
+  if (items.length === 0) {
+    showStatus('No PDF files or failed items selected to diagnose', 'error');
+    return;
+  }
+
+  if (!confirm(`Submit ${items.length} item(s) for AI diagnosis?\n\nThe system will analyze why these items were incorrectly classified and may apply code fixes.`)) {
+    return;
+  }
+
+  fixButton.disabled = true;
+  fixButton.textContent = 'Submitting...';
+  showStatus('Submitting items for AI diagnosis...', 'info');
+
+  try {
+    const response = await fetch('/api/fix/submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items }),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+
+    showStatus(data.message, 'success');
+  } catch (error) {
+    console.error('Fix submit failed:', error);
+    showStatus(`Failed to submit: ${error.message}`, 'error');
+  } finally {
+    fixButton.disabled = false;
+    fixButton.textContent = 'Fix Selected';
+    updateDownloadButtonState();
   }
 }
 

@@ -157,6 +157,20 @@ header h1 {
   cursor: not-allowed;
 }
 
+.btn-info {
+  background: #17a2b8;
+  color: white;
+}
+
+.btn-info:hover:not(:disabled) {
+  background: #138496;
+}
+
+.btn-info:disabled {
+  background: #5fc3d1;
+  cursor: not-allowed;
+}
+
 /* Toolbar actions container */
 .toolbar-actions {
   display: flex;

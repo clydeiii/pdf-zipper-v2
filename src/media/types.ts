@@ -3,7 +3,7 @@
  * Supports collecting mp4 files from Karakeep and PDF transcripts from Matter
  */
 
-export type MediaType = 'video' | 'transcript' | 'podcast';
+export type MediaType = 'video' | 'transcript' | 'podcast' | 'pdf';
 
 export interface MediaEnclosure {
   url: string;           // Direct download URL from RSS enclosure

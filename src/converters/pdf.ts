@@ -168,6 +168,33 @@ function isTwitterUrl(url: string): boolean {
 }
 
 /**
+ * Rewrite Datawrapper wrapper URLs to direct CDN embed URLs
+ * The wrapper page (datawrapper.de/_/XXXXX/) renders the visualization inside
+ * a narrow iframe with nav/footer chrome. The CDN embed URL renders the bare
+ * visualization at full viewport width.
+ *
+ * datawrapper.de/_/vAWlE/ → datawrapper.dwcdn.net/vAWlE/
+ */
+function rewriteDatawrapperUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+    if (host !== 'datawrapper.de') return url;
+
+    // Extract chart ID from path: /_/XXXXX/ or /_/XXXXX
+    const match = parsed.pathname.match(/^\/_\/([A-Za-z0-9]+)/);
+    if (!match) return url;
+
+    const chartId = match[1];
+    const embedUrl = `https://datawrapper.dwcdn.net/${chartId}/`;
+    console.log(`Rewriting Datawrapper URL: ${url} → ${embedUrl}`);
+    return embedUrl;
+  } catch {
+    return url;
+  }
+}
+
+/**
  * Get privacy filter terms from environment
  * Returns array of lowercase terms to filter out
  */
@@ -306,8 +333,10 @@ export async function convertUrlToPDF(
 
     // Clean Substack URLs (remove tracking params that cause popups)
     // Rewrite Twitter/X URLs to Nitter for better capture
+    // Rewrite Datawrapper URLs to direct CDN embed (avoids iframe + chrome)
     const cleanedUrl = cleanSubstackUrl(url);
-    const targetUrl = rewriteTwitterUrl(cleanedUrl);
+    const datawrapperUrl = rewriteDatawrapperUrl(cleanedUrl);
+    const targetUrl = rewriteTwitterUrl(datawrapperUrl);
 
     // Navigate with timeout
     // Try networkidle first for complete page load, fallback to domcontentloaded for heavy SPAs

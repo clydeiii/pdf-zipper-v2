@@ -6,6 +6,7 @@
  */
 
 import { env } from '../config/env.js';
+import type { FixHistoryEntry } from '../jobs/fix-types.js';
 
 /**
  * Discord embed color codes
@@ -60,6 +61,7 @@ export function isDiscordEnabled(): boolean {
  */
 async function sendToDiscord(payload: DiscordPayload): Promise<void> {
   if (!env.DISCORD_WEBHOOK_URL) {
+    console.log('[Discord] Webhook URL not configured, skipping notification');
     return;
   }
 
@@ -73,11 +75,12 @@ async function sendToDiscord(payload: DiscordPayload): Promise<void> {
     });
 
     if (!response.ok) {
-      console.error(`Discord webhook failed: ${response.status} ${response.statusText}`);
+      const body = await response.text();
+      console.error(`[Discord] Webhook failed: ${response.status} ${response.statusText}`, body);
     }
   } catch (error) {
     // Don't throw - notifications are best-effort
-    console.error('Discord notification error:', error instanceof Error ? error.message : error);
+    console.error('[Discord] Notification error:', error instanceof Error ? error.message : error);
   }
 }
 
@@ -234,4 +237,79 @@ export async function sendDiscordNotification(data: {
       timestamp: new Date().toISOString(),
     }],
   });
+}
+
+/**
+ * Notify Discord when fix items are submitted for diagnosis
+ */
+export async function notifyFixSubmitted(data: {
+  itemCount: number;
+  urls: string[];
+}): Promise<void> {
+  const urlList = data.urls.slice(0, 5).map(url => `• ${truncate(url, 60)}`).join('\n');
+
+  await sendToDiscord({
+    embeds: [{
+      title: '🔧 Fix Items Submitted',
+      description: `${data.itemCount} item(s) queued for AI diagnosis.\nProcessing runs every 5 minutes.`,
+      color: COLORS.warning,
+      fields: urlList ? [{ name: 'URLs', value: urlList, inline: false }] : undefined,
+      timestamp: new Date().toISOString(),
+    }],
+  });
+
+  console.log(`[Discord] Sent fix submission notification for ${data.itemCount} items`);
+}
+
+/**
+ * Notify Discord of AI fix diagnosis results
+ */
+export async function sendFixDiagnosisNotification(entry: FixHistoryEntry): Promise<void> {
+  // Skip notification if no items were processed
+  if (entry.itemCount === 0) {
+    console.log('[Discord] Skipping fix diagnosis notification - no items processed');
+    return;
+  }
+
+  console.log(`[Discord] Sending fix diagnosis notification for batch ${entry.batchId.substring(0, 8)}`);
+
+  const fields: EmbedField[] = [
+    { name: 'Items Diagnosed', value: `${entry.itemCount}`, inline: true },
+    { name: 'Files Modified', value: `${entry.totalFilesModified}`, inline: true },
+    { name: 'Verifications', value: `${entry.successfulVerifications}`, inline: true },
+  ];
+
+  // Add diagnosis summaries (up to 5)
+  const diagnosisSummaries = entry.diagnoses.slice(0, 5).map((d, i) => {
+    const icon = d.fixApplied ? '🔧' : '🔍';
+    const status = d.fixApplied ? 'Fixed' : 'Diagnosed';
+    const url = truncate(d.context.url, 50);
+    return `${icon} **${status}**: ${url}\n   └ ${truncate(d.rootCause, 100)}`;
+  }).join('\n\n');
+
+  if (diagnosisSummaries) {
+    fields.push({
+      name: 'Diagnoses',
+      value: truncate(diagnosisSummaries, 1024),
+      inline: false,
+    });
+  }
+
+  // Determine color based on results
+  const color = entry.totalFilesModified > 0 ? COLORS.success : COLORS.info;
+
+  await sendToDiscord({
+    embeds: [{
+      title: 'AI Self-Healing Diagnosis Complete',
+      description: entry.totalFilesModified > 0
+        ? 'Code fixes have been applied to improve classification accuracy.'
+        : 'Issues analyzed. No code changes were necessary.',
+      color,
+      fields,
+      timestamp: new Date().toISOString(),
+      footer: { text: `Batch ${entry.batchId.substring(0, 8)}` },
+    }],
+  });
+
+  console.log(`[Discord] Sent fix diagnosis notification for batch ${entry.batchId.substring(0, 8)}`);
 }

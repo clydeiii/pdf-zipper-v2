@@ -10,12 +10,16 @@ interface KarakeepBookmark {
   modifiedAt?: string;
   title?: string | null;
   content?: {
-    type: string;
+    type: string;  // 'link', 'asset', 'text', etc.
     url?: string;
     title?: string;
     description?: string;
     author?: string;
     videoAssetId?: string;
+    // For asset type (uploaded files like PDFs)
+    assetType?: string;  // 'pdf', 'image', etc.
+    assetId?: string;
+    fileName?: string;
   };
   assets?: Array<{
     id: string;
@@ -110,34 +114,70 @@ export async function parseKarakeepFeed(
         continue;
       }
 
-      // Only process link-type bookmarks with URLs
-      if (bookmark.content?.type !== 'link' || !bookmark.content.url) {
+      // Handle different bookmark content types
+      const contentType = bookmark.content?.type;
+
+      // Skip bookmarks without content
+      if (!bookmark.content) {
         continue;
       }
 
-      const bookmarkUrl = bookmark.content.url;
+      let bookmarkItem: BookmarkItem | null = null;
       const guid = bookmark.id;
 
-      const bookmarkItem: BookmarkItem = {
-        url: bookmarkUrl,
-        canonicalUrl: normalizeBookmarkUrl(bookmarkUrl),
-        guid,
-        source: 'karakeep',
-        title: bookmark.content.title || bookmark.title || undefined,
-        creator: bookmark.content.author,
-        bookmarkedAt: bookmark.createdAt,
-      };
-
-      // Check for video asset
-      const videoAsset = bookmark.assets?.find(a => a.assetType === 'video');
-      if (videoAsset && bookmark.content.videoAssetId) {
-        // Karakeep serves assets at /api/assets/{assetId}
-        bookmarkItem.enclosure = {
-          url: `${baseUrl}/api/assets/${bookmark.content.videoAssetId}`,
-          type: 'video/mp4',
-          length: undefined,
+      if (contentType === 'link' && bookmark.content.url) {
+        // Standard link bookmark
+        const bookmarkUrl = bookmark.content.url;
+        bookmarkItem = {
+          url: bookmarkUrl,
+          canonicalUrl: normalizeBookmarkUrl(bookmarkUrl),
+          guid,
+          source: 'karakeep',
+          title: bookmark.content.title || bookmark.title || undefined,
+          creator: bookmark.content.author,
+          bookmarkedAt: bookmark.createdAt,
         };
-        bookmarkItem.mediaType = 'video';
+
+        // Check for video asset
+        const videoAsset = bookmark.assets?.find(a => a.assetType === 'video');
+        if (videoAsset && bookmark.content.videoAssetId) {
+          // Karakeep serves assets at /api/assets/{assetId}
+          bookmarkItem.enclosure = {
+            url: `${baseUrl}/api/assets/${bookmark.content.videoAssetId}`,
+            type: 'video/mp4',
+            length: undefined,
+          };
+          bookmarkItem.mediaType = 'video';
+        }
+      } else if (contentType === 'asset' && bookmark.content.assetType === 'pdf' && bookmark.content.assetId) {
+        // Uploaded PDF file - create a direct URL to the asset
+        const pdfUrl = `${baseUrl}/api/assets/${bookmark.content.assetId}`;
+        // Filename may be in content.fileName OR in the assets array
+        const assetId = bookmark.content!.assetId;
+        const assetInfo = bookmark.assets?.find(a => a.id === assetId);
+        const fileName = bookmark.content.fileName || assetInfo?.fileName || `pdf-${bookmark.content.assetId.slice(0, 8)}.pdf`;
+
+        bookmarkItem = {
+          url: pdfUrl,
+          canonicalUrl: pdfUrl,  // Use asset URL as canonical (no normalization needed)
+          guid,
+          source: 'karakeep',
+          title: bookmark.title || fileName.replace(/\.pdf$/i, ''),
+          bookmarkedAt: bookmark.createdAt,
+          mediaType: 'pdf',
+          enclosure: {
+            url: pdfUrl,
+            type: 'application/pdf',
+            length: undefined,
+          },
+        };
+
+        console.log(`Karakeep PDF asset: ${fileName} -> ${pdfUrl}`);
+      }
+
+      // Skip if we couldn't create a bookmark item
+      if (!bookmarkItem) {
+        continue;
       }
 
       allItems.push(bookmarkItem);
