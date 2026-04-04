@@ -18,7 +18,7 @@ import { QUEUE_NAME } from '../queues/conversion.queue.js';
 import { env } from '../config/env.js';
 import type { ConversionJobData, ConversionJobResult } from '../jobs/types.js';
 import { initBrowser, closeBrowser } from '../browsers/manager.js';
-import { convertUrlToPDF, isPdfUrl, downloadPdfDirect } from '../converters/pdf.js';
+import { convertUrlToPDF, isPdfUrl, downloadPdfDirect, rewriteToPdfUrl } from '../converters/pdf.js';
 import { checkOllamaHealth } from '../quality/ollama.js';
 import { scoreScreenshotQuality } from '../quality/scorer.js';
 import { analyzePdfContent } from '../quality/pdf-content.js';
@@ -287,26 +287,44 @@ async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Pro
 
   // Check if this is a direct PDF URL - use pass-through instead of conversion
   if (isPdfUrl(url)) {
-    console.log(`PDF URL detected, using pass-through: ${url}`);
-    const passthroughResult = await downloadPdfDirect(url);
+    // Rewrite abstract/landing URLs to direct PDF (e.g., arxiv.org/abs/ → arxiv.org/pdf/)
+    const pdfUrl = rewriteToPdfUrl(url);
+    console.log(`PDF URL detected, using pass-through: ${pdfUrl}`);
+    const passthroughResult = await downloadPdfDirect(pdfUrl);
 
     await job.updateProgress(50);
 
     if (!passthroughResult.success) {
-      console.log(`PDF pass-through failed for ${url}: ${passthroughResult.reason} - ${passthroughResult.error}`);
+      console.log(`PDF pass-through failed for ${pdfUrl}: ${passthroughResult.reason} - ${passthroughResult.error}`);
       throw new Error(`${passthroughResult.reason}: ${passthroughResult.error}`);
     }
 
     // Use suggested filename from Content-Disposition, or job title, or extract from URL
     const title = jobTitle || passthroughResult.suggestedFilename?.replace(/\.pdf$/i, '');
 
-    // Save directly to weekly bin (skip quality checks - it's an existing PDF)
+    // Extract text and enrich metadata (Karpathify the PDF)
+    let enrichedMetadata: EnrichedMetadata | undefined;
+    try {
+      const contentResult = await analyzePdfContent(passthroughResult.pdfBuffer);
+      if (contentResult.extractedText && contentResult.extractedText.length > 100) {
+        enrichedMetadata = await enrichDocumentMetadata(contentResult.extractedText, url, title);
+        console.log(`Pass-through PDF enriched: "${enrichedMetadata.title}" [${enrichedMetadata.language}]`);
+      }
+    } catch (error) {
+      console.warn(`Pass-through PDF enrichment failed (non-fatal):`, error instanceof Error ? error.message : error);
+    }
+
+    await job.updateProgress(80);
+
+    // Save to weekly bin with enriched metadata
     const filePath = await savePdfToWeeklyBin(
       passthroughResult.pdfBuffer,
       url,
       title,
       bookmarkedAt,
-      originalUrl
+      originalUrl,
+      undefined,
+      enrichedMetadata
     );
 
     await job.updateProgress(100);
@@ -320,6 +338,8 @@ async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Pro
       pdfSize: passthroughResult.size,
       completedAt: new Date().toISOString(),
       url,
+      summary: enrichedMetadata?.summary || undefined,
+      language: enrichedMetadata?.language || undefined,
     };
   }
 

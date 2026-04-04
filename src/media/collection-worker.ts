@@ -4,9 +4,14 @@
  */
 
 import { Worker, Job } from 'bullmq';
+import { readFile, writeFile } from 'node:fs/promises';
+import { PDFDocument } from 'pdf-lib';
 import { workerConnection } from '../config/redis.js';
 import { downloadMedia } from './collector.js';
 import { enrichVideo } from './video-enrichment.js';
+import { analyzePdfContent } from '../quality/pdf-content.js';
+import { enrichDocumentMetadata } from '../metadata/enrichment.js';
+import { setInfoDictFields } from '../utils/pdf-info-dict.js';
 import type { MediaItem, MediaCollectionResult } from './types.js';
 import type { MediaCollectionJobData } from '../feeds/monitor.js';
 
@@ -59,6 +64,52 @@ export async function startMediaWorker(): Promise<void> {
           } catch (err) {
             // Non-fatal: video was still downloaded successfully
             console.warn('Video enrichment failed (non-fatal):', err instanceof Error ? err.message : err);
+          }
+        }
+
+        // Post-download enrichment for PDF assets (Karpathify)
+        if (item.mediaType === 'pdf' && result.filePath.endsWith('.pdf')) {
+          try {
+            const pdfBuffer = await readFile(result.filePath);
+            const contentResult = await analyzePdfContent(pdfBuffer);
+
+            if (contentResult.extractedText && contentResult.extractedText.length > 100) {
+              const metadata = await enrichDocumentMetadata(contentResult.extractedText, item.url, item.title);
+
+              // Embed metadata into the PDF Info Dict
+              const pdfDoc = await PDFDocument.load(pdfBuffer);
+              if (metadata.title) pdfDoc.setTitle(metadata.title);
+              if (metadata.author) pdfDoc.setAuthor(metadata.author);
+              if (metadata.tags.length > 0) pdfDoc.setKeywords(metadata.tags);
+              if (metadata.publication) pdfDoc.setCreator(`${metadata.publication} via pdf-zipper v2`);
+              pdfDoc.setSubject(item.url);
+              pdfDoc.setProducer(`pdf-zipper v2 - captured ${new Date().toISOString()}`);
+
+              setInfoDictFields(pdfDoc, {
+                Summary: metadata.summary,
+                Language: metadata.language,
+                Publication: metadata.publication,
+                PublishDate: metadata.publishDate,
+                Tags: metadata.tags.length > 0 ? metadata.tags.join(', ') : undefined,
+                Translation: metadata.translation,
+                EnrichedAt: new Date().toISOString(),
+              });
+
+              const enrichedPdf = await pdfDoc.save();
+              await writeFile(result.filePath, Buffer.from(enrichedPdf));
+
+              console.log(JSON.stringify({
+                event: 'pdf_asset_enrichment_complete',
+                filePath: result.filePath,
+                title: metadata.title,
+                language: metadata.language,
+                tags: metadata.tags,
+                timestamp: new Date().toISOString(),
+              }));
+            }
+          } catch (err) {
+            // Non-fatal: PDF was still downloaded successfully
+            console.warn('PDF asset enrichment failed (non-fatal):', err instanceof Error ? err.message : err);
           }
         }
 

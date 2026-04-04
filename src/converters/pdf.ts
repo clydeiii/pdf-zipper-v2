@@ -25,9 +25,44 @@ export function isPdfUrl(url: string): boolean {
       return true;
     }
 
+    // arxiv.org/abs/XXXX.XXXXX — abstract page, but we want the PDF
+    if (host === 'arxiv.org' && path.startsWith('/abs/')) {
+      return true;
+    }
+
     return false;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Rewrite known abstract/landing page URLs to their direct PDF equivalents.
+ * Returns the original URL if no rewrite is applicable.
+ *
+ * Currently handles:
+ * - arxiv.org/abs/XXXX.XXXXX → arxiv.org/pdf/XXXX.XXXXX
+ * - arxiv.org/html/XXXX.XXXXX → arxiv.org/pdf/XXXX.XXXXX
+ */
+export function rewriteToPdfUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+
+    if (host === 'arxiv.org') {
+      // /abs/2506.12345 → /pdf/2506.12345
+      // /html/2506.12345v2 → /pdf/2506.12345v2
+      const absMatch = parsed.pathname.match(/^\/(abs|html)\/(.+)/);
+      if (absMatch) {
+        const pdfUrl = `https://arxiv.org/pdf/${absMatch[2]}`;
+        console.log(`Rewriting arxiv URL: ${url} → ${pdfUrl}`);
+        return pdfUrl;
+      }
+    }
+
+    return url;
+  } catch {
+    return url;
   }
 }
 
