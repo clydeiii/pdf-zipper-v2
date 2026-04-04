@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { env } from '../config/env.js';
 import { queueConnection } from '../config/redis.js';
 import { buildDiagnosisPrompt } from './prompt-builder.js';
+import { loadExclusionSignals } from './signals.js';
 import type { FixJobContext, FixProvider, FixRequestType } from '../jobs/fix-types.js';
 
 const ROUND_ROBIN_KEY = 'fix:provider:round-robin-next';
@@ -192,7 +193,8 @@ function buildProviderCommand(provider: FixProvider, prompt: string): { cmd: str
 }
 
 async function runProvider(provider: FixProvider, items: FixJobContext[]): Promise<{ parsed?: ProviderDiagnosisOutput; raw: string; error?: string }> {
-  const prompt = buildDiagnosisPrompt(items);
+  const exclusionSignals = await loadExclusionSignals();
+  const prompt = buildDiagnosisPrompt(items, exclusionSignals);
   const timeoutMs = Math.max(1, env.FIX_PROVIDER_TIMEOUT_MINUTES) * 60 * 1000;
   const command = buildProviderCommand(provider, prompt);
   const result = await runCommand(command.cmd, command.args, {

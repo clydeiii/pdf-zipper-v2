@@ -670,6 +670,33 @@ function downloadSelected() {
     return;
   }
 
+  // STRONG SELF-HEALING SIGNAL: track which files were EXCLUDED from the zip.
+  // When the user has reviewed a set of new files and chose to exclude specific
+  // ones, those excluded files are problematic (bad quality, paywall, wrong content).
+  // Only consider "new since export" files as candidates — excluding already-exported
+  // files is not a signal (they're just old).
+  const includedSet = new Set(filePaths);
+  const excludedNewFiles = allItems
+    .filter(item => !item.isFailed && item.path && isNewSinceExport(item))
+    .filter(item => !includedSet.has(item.path))
+    .map(item => ({
+      path: item.path,
+      sourceUrl: item.sourceUrl || null,
+      name: item.name,
+    }));
+
+  // Fire-and-forget telemetry for the zip export event
+  fetch('/api/telemetry/zip-export', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+    body: JSON.stringify({
+      weekId: currentWeekId,
+      timestamp: new Date().toISOString(),
+      includedCount: filePaths.length,
+      excludedFiles: excludedNewFiles, // the signal for self-healing
+    }),
+  }).catch(() => {});
+
   // Record export timestamp for this week
   if (currentWeekId) {
     setLastExportTime(currentWeekId, new Date().toISOString());
@@ -678,7 +705,10 @@ function downloadSelected() {
     renderFilteredItems();
   }
 
-  showStatus('Starting download...', 'info');
+  const excludedMsg = excludedNewFiles.length > 0
+    ? ` (${excludedNewFiles.length} excluded)`
+    : '';
+  showStatus(`Starting download...${excludedMsg}`, 'info');
 
   // Create a hidden form for POST download
   // Form submissions for downloads work better with browser security

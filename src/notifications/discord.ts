@@ -251,7 +251,7 @@ export async function notifyFixSubmitted(data: {
   await sendToDiscord({
     embeds: [{
       title: '🔧 Fix Items Submitted',
-      description: `${data.itemCount} item(s) queued for AI diagnosis.\nProcessing runs every 5 minutes.`,
+      description: `${data.itemCount} item(s) queued for AI diagnosis.\nProcessing runs every 12 hours.`,
       color: COLORS.warning,
       fields: urlList ? [{ name: 'URLs', value: urlList, inline: false }] : undefined,
       timestamp: new Date().toISOString(),

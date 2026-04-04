@@ -207,7 +207,7 @@ fixRouter.post('/submit', requireApiToken, async (req: Request, res: Response): 
     const response: FixSubmitResponse = {
       queued,
       message: queued > 0
-        ? `Submitted ${queued} item(s) for AI diagnosis. Processing runs every 5 minutes.`
+        ? `Submitted ${queued} item(s) for AI diagnosis. Processing runs every 12 hours.`
         : 'All items were skipped (recently attempted or duplicates).',
     };
 

@@ -1,7 +1,7 @@
 /**
  * Fix queue for AI self-healing diagnosis jobs
  *
- * Uses BullMQ Job Scheduler to process pending fix requests every 5 minutes.
+ * Uses BullMQ Job Scheduler to process pending fix requests every 12 hours.
  * Offset by 2.5 minutes from feed polling to avoid overlap.
  */
 
@@ -44,7 +44,8 @@ export const fixQueue = new Queue<FixJobData, FixHistoryEntry>(
 /**
  * Initialize the fix diagnosis scheduler
  *
- * Runs every 5 minutes, offset 2.5 minutes from feed polling.
+ * Runs every 12 hours. Fix diagnosis is expensive (spawns Claude/Codex CLI)
+ * and user-initiated fix requests are rare — daily-cadence polling is plenty.
  * Only runs if FIX_ENABLED is true.
  */
 export async function initializeFixScheduler(): Promise<void> {
@@ -53,23 +54,13 @@ export async function initializeFixScheduler(): Promise<void> {
     return;
   }
 
-  // 5 minute interval
-  const intervalMs = 5 * 60 * 1000;
-
-  // Calculate offset from feed polling (2.5 minutes)
-  // Feed polling runs at :00, :15, :30, :45
-  // Fix processing runs at :02:30, :07:30, :12:30, etc.
-  const offsetMs = 2.5 * 60 * 1000;
-
-  // Use startDate to offset the schedule
-  const now = Date.now();
-  const nextRun = now + offsetMs - (now % intervalMs) + intervalMs;
+  // 12 hour interval
+  const intervalMs = 12 * 60 * 60 * 1000;
 
   await fixQueue.upsertJobScheduler(
     'fix-processor',
     {
       every: intervalMs,
-      startDate: new Date(nextRun),
     },
     {
       name: 'process-pending-fixes',
@@ -77,7 +68,7 @@ export async function initializeFixScheduler(): Promise<void> {
     }
   );
 
-  console.log(`Fix diagnosis scheduler initialized: every 5 minutes (offset 2.5 min from feeds)`);
+  console.log(`Fix diagnosis scheduler initialized: every 12 hours`);
 }
 
 console.log(`Fix queue '${FIX_QUEUE_NAME}' initialized`);

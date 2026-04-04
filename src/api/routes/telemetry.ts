@@ -16,6 +16,7 @@ import { env } from '../../config/env.js';
 export const telemetryRouter = Router();
 
 const TELEMETRY_KEY = 'pdfzipper:telemetry';
+const ZIP_EXPORTS_KEY = 'pdfzipper:zip-exports';
 const MAX_ENTRIES = 1000;
 
 let redis: Redis | null = null;
@@ -39,6 +40,19 @@ interface TelemetryEntry {
   weekId?: string;
   timestamp: string;
   error?: string;
+}
+
+interface ExcludedFile {
+  path: string;
+  sourceUrl: string | null;
+  name: string;
+}
+
+interface ZipExportEvent {
+  weekId: string;
+  timestamp: string;
+  includedCount: number;
+  excludedFiles: ExcludedFile[];
 }
 
 /**
@@ -127,5 +141,101 @@ telemetryRouter.get('/signals', async (req: Request, res: Response): Promise<voi
     res.json(signals);
   } catch (error) {
     res.status(500).json({ error: 'Failed to aggregate signals' });
+  }
+});
+
+/**
+ * POST /telemetry/zip-export - Record a zip export event with excluded files
+ *
+ * This is the STRONGEST self-healing signal. When the user exports a zip but
+ * excludes specific files, those files are problematic — the user reviewed
+ * them and rejected them. Multiple exclusions of the same URL (from reruns)
+ * strongly suggest the automated capture is failing in a way worth fixing.
+ */
+telemetryRouter.post('/zip-export', async (req: Request, res: Response): Promise<void> => {
+  const event = req.body as ZipExportEvent;
+
+  if (!event.weekId || !Array.isArray(event.excludedFiles)) {
+    res.status(400).json({ error: 'weekId and excludedFiles required' });
+    return;
+  }
+
+  try {
+    const r = getRedis();
+    await r.lpush(ZIP_EXPORTS_KEY, JSON.stringify(event));
+    await r.ltrim(ZIP_EXPORTS_KEY, 0, MAX_ENTRIES - 1);
+    res.json({ ok: true, excludedCount: event.excludedFiles.length });
+  } catch (error) {
+    console.warn('Zip export telemetry write failed:', error instanceof Error ? error.message : error);
+    res.json({ ok: true, warning: 'storage unavailable' });
+  }
+});
+
+/**
+ * GET /telemetry/problematic - URLs flagged as problematic via exclusion signal
+ *
+ * Aggregates zip-export exclusions per source URL. URLs excluded multiple times
+ * across different export sessions are highest priority for self-healing.
+ * This is the primary input the fix system should use.
+ */
+telemetryRouter.get('/problematic', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const r = getRedis();
+    const raw = await r.lrange(ZIP_EXPORTS_KEY, 0, MAX_ENTRIES - 1);
+    const events = raw.map((s: string) => JSON.parse(s) as ZipExportEvent);
+
+    // Aggregate exclusions by source URL
+    const problematic: Record<string, {
+      sourceUrl: string;
+      name: string;
+      exclusionCount: number;
+      exclusionSessions: number;
+      lastExcludedAt: string;
+      weekIds: string[];
+    }> = {};
+
+    for (const event of events) {
+      const seenInSession = new Set<string>();
+      for (const file of event.excludedFiles) {
+        const key = file.sourceUrl || file.path;
+        if (!key) continue;
+
+        if (!problematic[key]) {
+          problematic[key] = {
+            sourceUrl: file.sourceUrl || file.path,
+            name: file.name,
+            exclusionCount: 0,
+            exclusionSessions: 0,
+            lastExcludedAt: event.timestamp,
+            weekIds: [],
+          };
+        }
+        const entry = problematic[key];
+        entry.exclusionCount++;
+        if (!seenInSession.has(key)) {
+          entry.exclusionSessions++;
+          seenInSession.add(key);
+        }
+        if (event.timestamp > entry.lastExcludedAt) {
+          entry.lastExcludedAt = event.timestamp;
+        }
+        if (!entry.weekIds.includes(event.weekId)) {
+          entry.weekIds.push(event.weekId);
+        }
+      }
+    }
+
+    // Sort by exclusion sessions (repeated exclusions = stronger signal than
+    // single-session exclusions of many files)
+    const ranked = Object.values(problematic).sort((a, b) => {
+      if (b.exclusionSessions !== a.exclusionSessions) {
+        return b.exclusionSessions - a.exclusionSessions;
+      }
+      return b.exclusionCount - a.exclusionCount;
+    });
+
+    res.json(ranked);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to aggregate problematic URLs' });
   }
 });

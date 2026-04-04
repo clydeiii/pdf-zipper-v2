@@ -10,6 +10,18 @@
 import type { FixJobContext } from '../jobs/fix-types.js';
 
 /**
+ * Signal data from user behavior (zip export exclusions).
+ * URLs that the user repeatedly excludes from their exports are problematic.
+ */
+export interface ExclusionSignal {
+  sourceUrl: string;
+  name: string;
+  exclusionCount: number;
+  exclusionSessions: number;
+  lastExcludedAt: string;
+}
+
+/**
  * Build the diagnosis prompt for Claude Code
  *
  * The prompt instructs Claude to:
@@ -19,7 +31,7 @@ import type { FixJobContext } from '../jobs/fix-types.js';
  * 4. Apply a fix if possible
  * 5. Output structured JSON with diagnosis
  */
-export function buildDiagnosisPrompt(items: FixJobContext[]): string {
+export function buildDiagnosisPrompt(items: FixJobContext[], exclusionSignals: ExclusionSignal[] = []): string {
   const sections: string[] = [];
 
   // Introduction
@@ -54,6 +66,11 @@ You are authorized to modify files within these boundaries:
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
     sections.push(buildItemSection(item, i + 1));
+  }
+
+  // User behavior signal: URLs repeatedly excluded from zip exports
+  if (exclusionSignals.length > 0) {
+    sections.push(buildExclusionSignalSection(exclusionSignals));
   }
 
   // Output format
@@ -155,6 +172,39 @@ function buildItemSection(item: FixJobContext, index: number): string {
   lines.push('');
   lines.push('---');
 
+  return lines.join('\n');
+}
+
+/**
+ * Build a section listing URLs the user has repeatedly excluded from zip exports.
+ * These are strong signals of problematic captures (quality issues, paywalls,
+ * wrong content) that bypassed all automated checks.
+ */
+function buildExclusionSignalSection(signals: ExclusionSignal[]): string {
+  const lines: string[] = [];
+  lines.push('');
+  lines.push('## User Behavior Signal: Repeatedly Excluded URLs');
+  lines.push('');
+  lines.push('The following URLs passed all automated quality checks but the user');
+  lines.push('**chose to exclude them from their zip exports**. This is the strongest');
+  lines.push('available signal that these captures are problematic — the user reviewed');
+  lines.push('them and rejected them. Consider these when looking for patterns.');
+  lines.push('');
+  lines.push('URLs with multiple exclusion sessions (repeated reviews, repeated rejections)');
+  lines.push('are highest priority. If one of the explicitly-flagged items above shares');
+  lines.push('a pattern with these excluded URLs, your fix should address both.');
+  lines.push('');
+
+  const top = signals.slice(0, 20);
+  for (const sig of top) {
+    lines.push(`- **${sig.sourceUrl}**`);
+    lines.push(`  - Excluded in ${sig.exclusionSessions} separate session(s), ${sig.exclusionCount} total file(s)`);
+    lines.push(`  - Last excluded: ${sig.lastExcludedAt}`);
+    if (sig.name) lines.push(`  - Filename: \`${sig.name}\``);
+  }
+  lines.push('');
+  lines.push('---');
+  lines.push('');
   return lines.join('\n');
 }
 
