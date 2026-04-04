@@ -28,6 +28,38 @@ function isNewSinceExport(item) {
   return new Date(item.modified) > new Date(lastExport);
 }
 
+// Click telemetry — tracks user interactions for self-healing insights
+// When the user clicks source links, PDFs, error badges, or archive links,
+// it signals manual intervention (paywall bypass, quality review, etc.)
+const TELEMETRY_KEY = 'pdfzipperTelemetry';
+const TELEMETRY_MAX_ENTRIES = 500;
+
+function recordClick(action, url, extra = {}) {
+  const entry = {
+    action,       // 'view_pdf' | 'view_source' | 'view_error' | 'view_archive'
+    url,
+    weekId: currentWeekId,
+    timestamp: new Date().toISOString(),
+    ...extra,
+  };
+
+  // Save locally
+  const entries = JSON.parse(localStorage.getItem(TELEMETRY_KEY) || '[]');
+  entries.push(entry);
+  // Cap at max entries (keep most recent)
+  if (entries.length > TELEMETRY_MAX_ENTRIES) {
+    entries.splice(0, entries.length - TELEMETRY_MAX_ENTRIES);
+  }
+  localStorage.setItem(TELEMETRY_KEY, JSON.stringify(entries));
+
+  // Fire-and-forget POST to server
+  fetch('/api/telemetry', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+    body: JSON.stringify(entry),
+  }).catch(() => {}); // Silent fail — telemetry is best-effort
+}
+
 // DOM elements
 const weeksView = document.getElementById('weeks-view');
 const filesView = document.getElementById('files-view');
@@ -70,6 +102,28 @@ function setupEventListeners() {
   filterInput.addEventListener('input', handleFilterInput);
   filterClear.addEventListener('click', clearFilter);
   selectNewButton.addEventListener('click', selectNewSinceExport);
+
+  // Click telemetry via event delegation on the file table
+  filesTbody.addEventListener('click', (e) => {
+    const link = e.target.closest('a');
+    if (!link) return;
+
+    const href = link.getAttribute('href') || '';
+    const classes = link.className || '';
+
+    if (classes.includes('file-link')) {
+      recordClick('view_pdf', href);
+    } else if (classes.includes('source-link')) {
+      recordClick('view_source', href);
+    } else if (classes.includes('archive-link')) {
+      recordClick('view_archive', href);
+    } else if (classes.includes('badge-failed-link')) {
+      recordClick('view_error', href, { error: link.querySelector('.badge-failed')?.dataset?.tooltip });
+    } else if (classes.includes('failed-url')) {
+      recordClick('view_failed_url', href);
+    }
+  });
+
   if (fixCenterButton) {
     fixCenterButton.addEventListener('click', openFixCenterModal);
   }

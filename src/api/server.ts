@@ -20,6 +20,7 @@ import { cookiesRouter } from './routes/cookies.js';
 import { debugRouter } from './routes/debug.js';
 import { serveRouter } from './routes/serve.js';
 import { fixRouter } from './routes/fix.js';
+import { telemetryRouter } from './routes/telemetry.js';
 import { serverAdapter } from './monitoring.js';
 import { env } from '../config/env.js';
 
@@ -41,6 +42,10 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 const publicPath = path.join(__dirname, '..', '..', 'public');
 app.use(express.static(publicPath));
 
+// Serve Chrome helper plugins for download
+const pluginsPath = path.join(__dirname, '..', '..', 'helper-chrome-plugins');
+app.use('/plugins', express.static(pluginsPath));
+
 // Health check endpoint
 app.get('/health', (_req: Request, res: Response) => {
   res.json({ status: 'ok' });
@@ -53,6 +58,7 @@ app.use('/api/download', downloadRouter);
 app.use('/api/cookies', cookiesRouter);
 app.use('/api/debug', debugRouter);
 app.use('/api/fix', fixRouter);
+app.use('/api/telemetry', telemetryRouter);
 app.use('/api', serveRouter);
 
 // Mount Bull Board dashboard

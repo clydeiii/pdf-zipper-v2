@@ -24,6 +24,7 @@ RUN mkdir -p /opt/playwright-browsers && \
 COPY tsconfig.json ./
 COPY src ./src
 COPY public ./public
+COPY helper-chrome-plugins ./helper-chrome-plugins
 
 # Install dev dependencies for build, then remove them
 RUN npm install --save-dev typescript @types/node @types/express @types/archiver && \
