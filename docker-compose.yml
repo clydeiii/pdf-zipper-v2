@@ -51,7 +51,7 @@ services:
 
       # AI Self-Healing Fix System
       - FIX_ENABLED=true
-      - CLAUDE_CLI_PATH=/home/clyde/.local/share/claude/versions/2.1.27
+      - CLAUDE_CLI_PATH=/home/clyde/.local/bin/claude
       - CODEX_CLI_PATH=codex
       - FIX_PROVIDER_TIMEOUT_MINUTES=30
       - HOME=/home/clyde
@@ -62,6 +62,7 @@ services:
       - ./data:/data
       # Claude CLI for AI self-healing fix system
       - /home/clyde/.local/share/claude:/home/clyde/.local/share/claude:ro
+      - /home/clyde/.local/bin:/home/clyde/.local/bin:ro
       - /home/clyde/.claude:/home/clyde/.claude
       # Project source at same path for Claude Code to edit
       - /home/clyde/pdf-zipper-v2:/home/clyde/pdf-zipper-v2
