@@ -8,6 +8,7 @@ import { Router, Request, Response } from 'express';
 import { stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import { env } from '../../config/env.js';
+import { resolveWithinRoot } from '../../utils/paths.js';
 
 export const serveRouter = Router();
 
@@ -36,10 +37,10 @@ serveRouter.get('/file/*', async (req: Request, res: Response): Promise<void> =>
   try {
     // Resolve the full path and ensure it's within DATA_DIR
     const dataDir = path.resolve(env.DATA_DIR);
-    const filePath = path.resolve(dataDir, relativePath);
+    const filePath = resolveWithinRoot(dataDir, relativePath);
 
     // Security check: ensure path is within DATA_DIR (prevent directory traversal)
-    if (!filePath.startsWith(dataDir)) {
+    if (!filePath) {
       res.status(400).json({ error: 'Invalid file path' });
       return;
     }

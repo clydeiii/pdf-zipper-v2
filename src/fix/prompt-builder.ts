@@ -58,7 +58,7 @@ You are authorized to modify files within these boundaries:
 
   // Output format
   sections.push(`
-## Output Format
+## Output Format (STRICT)
 
 After completing your diagnosis, output a JSON object with this structure:
 
@@ -77,6 +77,11 @@ After completing your diagnosis, output a JSON object with this structure:
   "summary": "Brief summary of all diagnoses and any patterns observed"
 }
 \`\`\`
+
+IMPORTANT:
+- Output valid JSON only.
+- Do not include prose before or after JSON.
+- Keep \`filesModified\` accurate and repository-relative.
 
 ## Important Notes
 

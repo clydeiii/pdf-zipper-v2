@@ -5,7 +5,7 @@
 pdf-zipper-v2 is an async URL-to-PDF conversion system with:
 - **BullMQ + Redis** job queue for processing URLs from RSS feeds (Matter.com, Karakeep)
 - **Playwright** with stealth plugin for PDF generation
-- **Ollama vision model** (Gemma 3) for quality verification
+- **Ollama vision model** (Gemma 4) for quality verification + AI metadata enrichment
 - **Discord webhook** notifications for job completion/failure
 - **Web UI** for file browsing, downloading, and management
 - **Podcast transcription** via Whisper ASR for Apple Podcasts URLs
@@ -448,6 +448,59 @@ const fileName = bookmark.content.fileName || assetInfo?.fileName || `pdf-${asse
 **Result:** PDFs with paywall prompts now fail with `"Paywall detected: \"...\". Article content is behind a subscription wall."`
 **File:** `src/quality/pdf-content.ts`
 
+**46. Gemma 4 Model Upgrade + AI Metadata Enrichment**
+**Problem:** Gemma 3 models (4b/12b) were underpowered for quality scoring and text tasks
+**Solution:** Upgraded to Gemma 4 models on M4 Mac Mini Pro (24GB, MLX):
+- `gemma3:4b` → `gemma4:e4b` (8B params, vision) for quality scoring
+- `gemma3:12b` → `gemma4:26b` (25.8B MoE, 3.8B active) for text tasks
+**Model memory (num_ctx=8192):** gemma4:e4b = 10.8GB, gemma4:26b = 20.4GB. At default 131K context, 26b balloons to ~31GB (always set num_ctx explicitly). Use e4b for quality scoring + metadata enrichment (no model swap overhead). Reserve 26b with `think: false` for transcript formatting only.
+**think: false:** Gemma 4 26b uses internal reasoning by default (~3000 tokens overhead per call). Setting `think: false` in the Ollama API cuts this to ~150 tokens and speeds up 26b by ~16x. Applied to transcript-formatter.ts. The e4b model doesn't use thinking so it's unaffected.
+**New Feature:** AI metadata enrichment for every PDF:
+1. After quality checks pass, Ollama (e4b) extracts: title, author, publication, date, language, summary, tags
+2. Non-English docs get full English translation
+3. Standard fields embedded in PDF metadata (Title, Author, Keywords, Creator, CreationDate)
+4. Custom Info Dict fields for rich data: Summary, Language, Publication, PublishDate, Tags, Translation, EnrichedAt
+5. ALL metadata lives inside the PDF — no sidecar files needed
+6. Web UI displays metadata inline: author, publication, tags, summary
+7. API endpoint `GET /api/files/metadata/*` reads directly from PDF Info Dict
+**pdf-lib custom metadata pattern:**
+```typescript
+const infoDict = (pdfDoc as any).getInfoDict();
+infoDict.set(PDFName.of('Summary'), PDFHexString.fromText(summary));
+// roundtrips through save/load, works for large values (tested with 15K chars)
+```
+**Ollama Audio:** Gemma 4 e4b supports audio at model level, but Ollama API doesn't support audio input yet (only text+images). Keep Whisper ASR for transcription. Monitor Ollama releases for audio API support.
+**Files:** `src/metadata/enrichment.ts` (new), `src/workers/conversion.worker.ts`, `src/quality/pdf-content.ts`, `src/config/env.ts`, `src/api/routes/files.ts`, `public/app.js`, `public/style.css`, `docker-compose.yml`
+
+**47. MP3 ID3 Metadata Enrichment**
+**Problem:** Podcast MP3 files had no metadata tags - just raw audio files
+**Solution:** After transcription, use AI (Ollama e4b) to extract summary+tags from transcript, then write ID3 tags:
+- Standard: title (episode), artist (author), album (show), year, genre
+- Comment: AI summary + tags + source URL
+- TXXX custom frames: SUMMARY, TAGS, SOURCE_URL, AUDIO_URL, PODCAST_FEED, DURATION_MS, PUBLISHED_AT
+**Library:** `node-id3` (pure JS, MP3 only - M4A skipped)
+**Files:** `src/metadata/audio-tags.ts` (new), `src/podcasts/podcast-worker.ts`
+
+**48. MP4 Video Transcription + VTT Subtitles + Metadata**
+**Problem:** Downloaded MP4 videos had no transcripts, subtitles, or metadata
+**Solution:** Post-download enrichment pipeline for videos:
+1. Extract audio via ffmpeg (WAV, 16kHz mono for Whisper)
+2. Transcribe with Whisper ASR (both `output=txt` and `output=vtt`)
+3. AI enrichment (summary + tags from transcript via Ollama)
+4. Single ffmpeg pass: embed VTT subtitles + write metadata (title, summary, tags, source URL)
+5. Save `.transcript.txt` alongside the video
+**Size limit:** Skip transcription for files > 500MB (too expensive)
+**Dependency:** ffmpeg added to Dockerfile
+**Files:** `src/metadata/video-tags.ts` (new), `src/media/video-enrichment.ts` (new), `src/media/collection-worker.ts`, `Dockerfile`
+
+**49. Karpathy Knowledge Base Pattern**
+**Design goal:** Make every file self-describing with embedded metadata so a downstream LLM can build a structured wiki
+- **PDFs:** Custom Info Dict fields (Title, Author, Summary, Tags, Language, Translation, Publication, PublishDate)
+- **MP3s:** ID3 tags with standard + TXXX custom frames (summary, tags, source URL)
+- **MP4s:** ffmpeg metadata (title, comment, custom fields) + embedded VTT subtitles + .transcript.txt sidecar
+- **.md companion files:** NOT generated here — consuming system handles wiki generation from the enriched files
+All metadata is designed for extraction by `grep`, `ffprobe`, `pdf-lib`, or `node-id3` from another system.
+
 ## Common Commands (Development)
 
 ```bash
@@ -470,7 +523,8 @@ curl -X POST http://localhost:3002/api/jobs \
 Key optional settings:
 - `DISCORD_WEBHOOK_URL` - Discord notifications for job events
 - `QUALITY_THRESHOLD` - Score 0-100, default 50
-- `OLLAMA_MODEL` - Vision model, default `gemma3`
+- `OLLAMA_MODEL` - Vision model for quality scoring, default `gemma4:e4b`
+- `TRANSCRIPT_FORMAT_MODEL` - Text model for formatting + metadata enrichment, default `gemma4:26b`
 - `COOKIES_FILE` - Netscape cookies.txt for paywall bypass
 - `WHISPER_HOST` - Whisper ASR server URL, default `http://10.0.0.81:9000`
 - `PRIVACY_FILTER_TERMS` - Comma-separated terms to hide from PDF captures (names, handles)
@@ -491,6 +545,8 @@ src/
 │   └── scorer.ts     # Vision model quality check
 ├── notifications/
 │   └── discord.ts    # Discord webhook integration
+├── metadata/
+│   └── enrichment.ts # AI metadata extraction, summarization, translation
 ├── converters/
 │   └── pdf.ts        # Playwright PDF generation
 ├── podcasts/         # Podcast transcription

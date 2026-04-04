@@ -18,6 +18,28 @@ interface FormattingContext {
 }
 
 /**
+ * Strip SRT subtitle formatting to get plain text
+ * Handles both standard SRT (sequence + timestamps + text) and partial formats
+ */
+function stripSrtFormatting(text: string): string {
+  // Check if this looks like SRT format (has timestamp patterns)
+  if (!/\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,.]\d{3}/.test(text)) {
+    return text; // Not SRT, return as-is
+  }
+
+  return text
+    // Remove sequence numbers (standalone digits on their own line)
+    .replace(/^\d+\s*$/gm, '')
+    // Remove timestamp lines
+    .replace(/^\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,.]\d{3}\s*$/gm, '')
+    // Collapse multiple blank lines
+    .replace(/\n{3,}/g, '\n\n')
+    // Rejoin lines broken mid-sentence (lowercase continuation)
+    .replace(/\n([a-z])/g, ' $1')
+    .trim();
+}
+
+/**
  * Format a transcript using LLM to create readable paragraphs
  *
  * @param rawTranscript - Raw transcript from Whisper (choppy paragraphs)
@@ -28,14 +50,19 @@ export async function formatTranscriptWithLLM(
   rawTranscript: string,
   context?: FormattingContext
 ): Promise<string> {
+  // Strip SRT formatting if present (old Whisper instances may return SRT)
+  const cleanedTranscript = stripSrtFormatting(rawTranscript);
+
   // For very short transcripts, skip LLM processing
-  if (rawTranscript.length < 500) {
-    return rawTranscript;
+  if (cleanedTranscript.length < 500) {
+    return cleanedTranscript;
   }
 
   console.log(JSON.stringify({
     event: 'transcript_format_start',
-    inputLength: rawTranscript.length,
+    rawLength: rawTranscript.length,
+    cleanedLength: cleanedTranscript.length,
+    srtStripped: cleanedTranscript.length !== rawTranscript.length,
     timestamp: new Date().toISOString(),
   }));
 
@@ -45,11 +72,11 @@ export async function formatTranscriptWithLLM(
   // Most podcasts are 10-60 min = 5,000-30,000 chars, which should fit
   const maxChunkSize = 15000; // ~15k chars per chunk
 
-  if (rawTranscript.length > maxChunkSize) {
-    return await formatLongTranscript(rawTranscript, maxChunkSize, context);
+  if (cleanedTranscript.length > maxChunkSize) {
+    return await formatLongTranscript(cleanedTranscript, maxChunkSize, context);
   }
 
-  const formatted = await formatChunk(rawTranscript, context);
+  const formatted = await formatChunk(cleanedTranscript, context);
 
   const elapsed = Date.now() - startTime;
   console.log(JSON.stringify({
@@ -113,22 +140,24 @@ function buildSpellingCorrections(context?: FormattingContext): string {
 async function formatChunk(text: string, context?: FormattingContext): Promise<string> {
   const spellingHints = buildSpellingCorrections(context);
 
-  const prompt = `You are reformatting a podcast transcript. Your task is to make it readable while preserving the content exactly.
+  const prompt = `Reformat this podcast transcript into clean, readable prose.
 
-${spellingHints ? `CRITICAL - CORRECT THESE SPELLINGS:
-The following terms appear in this podcast. When you see phonetically similar words, use these EXACT spellings:
-${spellingHints}
+INPUT CONTEXT:
+- This is a podcast transcript (may be conversational or a narrated blog post)
+- It may contain ASR artifacts from speech-to-text: "Subtitle", "Heading", "Subheading" are structural markers spoken aloud — remove them
+- Image/figure descriptions ("There's an image here...") should be condensed to just the figure number and caption
+${spellingHints ? `- Proper nouns to correct: ${spellingHints}` : ''}
 
-For example: if you see "Claude Bot" or "claw bot" in the text, it should be "Clawdbot" (from the episode title).
-` : ''}
-FORMATTING RULES:
-1. Combine short choppy sentences into flowing paragraphs (4-6 sentences each)
-2. Remove filler words: "um", "uh", "like" (as filler), "you know", "I mean"
-3. Add paragraph breaks when the topic changes
-4. Keep ALL content including sponsor reads - just make it readable
-5. Output plain text only - no markdown, no headers, no commentary
+RULES:
+1. Group related sentences into paragraphs of 3-5 sentences. Break at topic shifts.
+2. Remove TTS artifacts: "Subtitle", "Heading", "Subheading", "There's a heading here"
+3. For figure references, keep only: [Figure N: caption text]
+4. Remove verbal filler: "um", "uh", "you know", "I mean", "sort of", "kind of" (as filler)
+5. Fix punctuation and capitalization where ASR got it wrong
+6. Preserve ALL substantive content — do not summarize or skip anything
+7. Output plain text only. No markdown formatting, no headers, no commentary.
 
-Return ONLY the reformatted transcript:
+Return ONLY the cleaned transcript:
 
 ${text}`;
 
@@ -149,9 +178,11 @@ ${text}`;
           content: prompt,
         },
       ],
+      think: false,       // Disable internal reasoning (saves ~3000 tokens per call)
       options: {
         temperature: 0.3, // Low temperature for consistent formatting
         num_predict: -1,  // No limit on output tokens
+        num_ctx: 32768,   // 32K context for long transcript chunks
       },
     });
 

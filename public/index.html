@@ -86,8 +86,14 @@
       <div class="footer-content">
         <p>PDF Zipper v2 - URL to PDF conversion with media collection</p>
         <div class="settings-section">
+          <button id="fix-center-btn" class="btn btn-small" title="View AI fix batches and apply ready patches">
+            🧠 Fix Center
+          </button>
           <button id="cookies-btn" class="btn btn-small" title="Upload cookies.txt for paywall bypass">
             🍪 Cookies
+          </button>
+          <button id="api-token-btn" class="btn btn-small" title="Set API token for protected actions">
+            🔑 API Token
           </button>
         </div>
       </div>
@@ -115,6 +121,27 @@
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="closeCookiesModal()">Close</button>
           <button id="upload-btn" class="btn btn-primary" onclick="uploadCookies()" disabled>Upload</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Fix Center modal -->
+    <div id="fix-center-modal" class="modal hidden">
+      <div class="modal-content fix-center-modal-content">
+        <div class="modal-header">
+          <h3>Fix Center</h3>
+          <button class="modal-close" onclick="closeFixCenterModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p>Recent self-healing batches. Batches in <strong>ready</strong> state can be marked applied.</p>
+          <div id="fix-center-status" class="cookies-status"></div>
+          <div id="fix-center-list" class="fix-center-list">
+            <p class="loading">Loading batches...</p>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="closeFixCenterModal()">Close</button>
+          <button id="fix-center-refresh-btn" class="btn btn-primary" onclick="loadFixCenter()">Refresh</button>
         </div>
       </div>
     </div>

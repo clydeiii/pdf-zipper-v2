@@ -277,7 +277,21 @@ export async function sendFixDiagnosisNotification(entry: FixHistoryEntry): Prom
     { name: 'Items Diagnosed', value: `${entry.itemCount}`, inline: true },
     { name: 'Files Modified', value: `${entry.totalFilesModified}`, inline: true },
     { name: 'Verifications', value: `${entry.successfulVerifications}`, inline: true },
+    { name: 'Gate', value: entry.gateStatus, inline: true },
   ];
+
+  if (entry.provider) {
+    fields.push({ name: 'Provider', value: entry.provider, inline: true });
+  }
+  if (entry.branchName) {
+    fields.push({ name: 'Branch', value: truncate(entry.branchName, 256), inline: false });
+  }
+  if (entry.commitSha) {
+    fields.push({ name: 'Commit', value: `\`${entry.commitSha.substring(0, 12)}\``, inline: true });
+  }
+  if (entry.gateReason) {
+    fields.push({ name: 'Gate Reason', value: truncate(entry.gateReason, 256), inline: false });
+  }
 
   // Add diagnosis summaries (up to 5)
   const diagnosisSummaries = entry.diagnoses.slice(0, 5).map((d, i) => {
@@ -302,7 +316,7 @@ export async function sendFixDiagnosisNotification(entry: FixHistoryEntry): Prom
     embeds: [{
       title: 'AI Self-Healing Diagnosis Complete',
       description: entry.totalFilesModified > 0
-        ? 'Code fixes have been applied to improve classification accuracy.'
+        ? `Code fixes prepared. Gate status: **${entry.gateStatus}**.`
         : 'Issues analyzed. No code changes were necessary.',
       color,
       fields,

@@ -9,6 +9,7 @@ import { Router, Request, Response } from 'express';
 import { writeFile, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { env } from '../../config/env.js';
+import { requireApiToken } from '../auth.js';
 
 export const cookiesRouter = Router();
 
@@ -23,7 +24,7 @@ export const cookiesRouter = Router();
  * - 400 Bad Request if content is empty or invalid format
  * - 500 Internal Server Error on write failure
  */
-cookiesRouter.post('/upload', async (req: Request, res: Response): Promise<void> => {
+cookiesRouter.post('/upload', requireApiToken, async (req: Request, res: Response): Promise<void> => {
   try {
     // Get raw body content
     const content = req.body?.content;

@@ -28,6 +28,7 @@ export interface PDFSuccessResult {
   size: number; // buffer length in bytes
   pageTitle?: string; // Extracted page title for filename generation
   isXArticle?: boolean; // True if this was an X Article captured directly (not via Nitter)
+  expandedUrl?: string; // Final URL after expanding short URLs (t.co, apple.news, etc.)
 }
 
 /**

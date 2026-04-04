@@ -195,6 +195,93 @@ function rewriteDatawrapperUrl(url: string): string {
 }
 
 /**
+ * Known short URL / redirect domains that should be expanded before capture
+ * These services redirect to the real URL, which we want for:
+ * 1. Better filenames (based on final domain, not t.co)
+ * 2. Proper cookie matching (cookies are domain-scoped)
+ * 3. Correct deduplication (two t.co links may point to same article)
+ */
+const SHORT_URL_HOSTS = new Set([
+  't.co',
+  'apple.news',
+  'bit.ly',
+  'tinyurl.com',
+  'goo.gl',
+  'ow.ly',
+  'is.gd',
+  'buff.ly',
+  'dlvr.it',
+  'flip.it',
+  'shar.es',
+  'lnkd.in',
+  'rb.gy',
+]);
+
+/**
+ * Check if a URL is a known short/redirect URL that should be expanded
+ */
+function isShortUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return SHORT_URL_HOSTS.has(parsed.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Expand a short URL by following redirects
+ * Uses HEAD for most services, GET for apple.news (which uses JS/HTML redirects)
+ * Returns the final URL after all redirects, or the original if expansion fails
+ */
+async function expandShortUrl(url: string): Promise<string> {
+  if (!isShortUrl(url)) return url;
+
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    console.log(`Expanding short URL: ${url}`);
+
+    // apple.news uses HTML/JS redirects — need to GET the page and parse the redirect URL
+    if (host === 'apple.news') {
+      const response = await fetch(url, {
+        method: 'GET',
+        redirect: 'follow',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        },
+        signal: AbortSignal.timeout(10000),
+      });
+      const html = await response.text();
+      // apple.news embeds the real URL as a link in the page
+      const linkMatch = html.match(/href="(https?:\/\/(?!www\.apple\.com)[^"]+)"/);
+      if (linkMatch) {
+        console.log(`Expanded apple.news URL: ${url} → ${linkMatch[1]}`);
+        return linkMatch[1];
+      }
+    }
+
+    // For all other short URL services, HEAD request follows HTTP redirects
+    const response = await fetch(url, {
+      method: 'HEAD',
+      redirect: 'follow',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+    const finalUrl = response.url;
+    if (finalUrl && finalUrl !== url) {
+      console.log(`Expanded short URL: ${url} → ${finalUrl}`);
+      return finalUrl;
+    }
+  } catch (error) {
+    console.warn(`Failed to expand short URL ${url}: ${error instanceof Error ? error.message : error}`);
+  }
+  return url;
+}
+
+/**
  * Get privacy filter terms from environment
  * Returns array of lowercase terms to filter out
  */
@@ -331,10 +418,13 @@ export async function convertUrlToPDF(
   try {
     const page = await context.newPage();
 
+    // Expand short URLs (t.co, apple.news, bit.ly, etc.) to their final destination
+    const expandedUrl = await expandShortUrl(url);
+
     // Clean Substack URLs (remove tracking params that cause popups)
     // Rewrite Twitter/X URLs to Nitter for better capture
     // Rewrite Datawrapper URLs to direct CDN embed (avoids iframe + chrome)
-    const cleanedUrl = cleanSubstackUrl(url);
+    const cleanedUrl = cleanSubstackUrl(expandedUrl);
     const datawrapperUrl = rewriteDatawrapperUrl(cleanedUrl);
     const targetUrl = rewriteTwitterUrl(datawrapperUrl);
 
@@ -357,8 +447,17 @@ export async function convertUrlToPDF(
             timeout,
             waitUntil: 'domcontentloaded'
           });
-          // Extra wait for JS to render
-          await page.waitForTimeout(5000);
+          // Wait for article content to render (SPAs hydrate after DOM ready)
+          // Try to detect when meaningful content appears, with a hard cap of 15s
+          try {
+            await page.waitForFunction(() => {
+              const body = document.body?.innerText || '';
+              return body.length > 3000;
+            }, { timeout: 15000 });
+          } catch {
+            // Content didn't reach threshold - proceed with whatever loaded
+            await page.waitForTimeout(5000);
+          }
           navigationSucceeded = true;
         } catch (retryError) {
           const retryMsg = retryError instanceof Error ? retryError.message : String(retryError);
@@ -439,6 +538,126 @@ export async function convertUrlToPDF(
     // Apply privacy filtering (hides elements containing configured terms)
     await applyPrivacyFilter(page);
 
+    // Remove ALL fixed/sticky positioned elements (cookie banners, newsletter popups,
+    // dark/light toggles, floating share buttons, chat widgets, "back to top", etc.)
+    // CSS attribute selectors only catch inline styles — this catches everything via computed style.
+    try {
+      const removed = await page.evaluate(() => {
+        let count = 0;
+
+        // Phase 1: Try clicking "accept" on cookie banners to dismiss them cleanly
+        const acceptSelectors = [
+          '[id*="cookie"] button', '[class*="cookie"] button',
+          '[id*="consent"] button', '[class*="consent"] button',
+          'button[data-testid*="accept"]', 'button[data-testid*="cookie"]',
+          '.cc-accept', '.cc-dismiss', '#accept-cookies', '.accept-cookies',
+        ];
+        for (const selector of acceptSelectors) {
+          for (const btn of document.querySelectorAll(selector)) {
+            const text = btn.textContent?.toLowerCase() || '';
+            if (text.includes('accept') || text.includes('agree') || text.includes('ok') || text.includes('got it') || text.includes('dismiss')) {
+              (btn as HTMLElement).click();
+              break;
+            }
+          }
+        }
+
+        // Phase 2: Remove all fixed/sticky elements from the DOM
+        // These are ALWAYS overlays in a PDF context — navbars, floating buttons,
+        // cookie banners, newsletter popups, theme toggles, chat widgets, etc.
+        // We walk all elements and check computed position.
+        const allElements = document.querySelectorAll('*');
+        for (const el of allElements) {
+          const style = window.getComputedStyle(el);
+          const position = style.position;
+          if (position === 'fixed' || position === 'sticky') {
+            // Safety: don't remove <html>, <body>, or the main content root
+            const tag = el.tagName.toLowerCase();
+            if (tag === 'html' || tag === 'body') continue;
+
+            (el as HTMLElement).remove();
+            count++;
+          }
+        }
+
+        // Phase 3: Remove high z-index elements that might still float over content
+        // Some overlays use position:absolute with very high z-index
+        const remaining = document.querySelectorAll('*');
+        for (const el of remaining) {
+          const style = window.getComputedStyle(el);
+          const zIndex = parseInt(style.zIndex, 10);
+          if (zIndex >= 10000 && style.position === 'absolute') {
+            // Check it's not a large content element (overlays are typically small)
+            const rect = (el as HTMLElement).getBoundingClientRect();
+            const viewportArea = window.innerWidth * window.innerHeight;
+            const elArea = rect.width * rect.height;
+            // Skip if it covers >60% of viewport (likely a content wrapper)
+            if (elArea / viewportArea > 0.6) continue;
+
+            (el as HTMLElement).remove();
+            count++;
+          }
+        }
+
+        // Phase 4: Collapse empty containers left behind by removed elements
+        // When fixed/sticky navbars are removed, their parent wrappers often remain
+        // as empty spacers (e.g., LessWrong's Header-headerHeight span)
+        for (const el of document.querySelectorAll('*')) {
+          const htmlEl = el as HTMLElement;
+          // Only collapse elements that are visually empty but take up space
+          if (htmlEl.offsetHeight > 100 && htmlEl.children.length === 0 &&
+              (htmlEl.textContent?.trim().length || 0) === 0) {
+            htmlEl.style.display = 'none';
+            count++;
+          }
+        }
+
+        // Phase 5: Remove large dark obscuring shapes (beehiiv black oval, etc.)
+        // These are typically image containers with dark backgrounds and heavy
+        // border-radius that render as giant ovals/circles when images fail to load
+        for (const el of document.querySelectorAll('figure, div, span')) {
+          const htmlEl = el as HTMLElement;
+          const rect = htmlEl.getBoundingClientRect();
+          // Only check elements that are large enough to obscure content
+          if (rect.width < 200 || rect.height < 200) continue;
+
+          const style = window.getComputedStyle(htmlEl);
+          const bg = style.backgroundColor;
+          const borderRadius = parseInt(style.borderRadius) || 0;
+          const isRounded = borderRadius > 50 || style.borderRadius.includes('9999');
+          const isDark = bg === 'rgb(0, 0, 0)' || bg === 'rgba(0, 0, 0, 1)';
+
+          // Remove large dark rounded elements (the beehiiv black oval pattern)
+          if (isDark && isRounded && rect.height > 200) {
+            htmlEl.remove();
+            count++;
+            continue;
+          }
+
+          // Also handle: large elements with dark background that cover >40% of viewport
+          // and contain only an image (failed hero image containers)
+          if (isDark && rect.height > 400) {
+            const children = htmlEl.children;
+            const hasOnlyImg = children.length <= 2 &&
+              htmlEl.querySelector('img') !== null &&
+              (htmlEl.textContent?.trim().length || 0) < 20;
+            if (hasOnlyImg) {
+              // Make background transparent instead of removing (keep the image if it loaded)
+              htmlEl.style.backgroundColor = 'transparent';
+              count++;
+            }
+          }
+        }
+
+        return count;
+      });
+      if (removed > 0) {
+        console.log(`Removed ${removed} fixed/sticky/overlay elements from ${url}`);
+      }
+    } catch {
+      // Element removal failed, CSS fallback will handle it
+    }
+
     // For Twitter URLs via Nitter: check if this is an article stub
     // Nitter doesn't support X Articles and just shows a link like "x.com/i/article/..."
     if (isTwitterUrl(url) && targetUrl !== url) {
@@ -508,7 +727,8 @@ export async function convertUrlToPDF(
           screenshotBuffer: Buffer.from(screenshotBuffer),
           url,
           size: pdfBuffer.length,
-          isXArticle: true  // Mark as X Article (captured directly, not via Nitter)
+          isXArticle: true,  // Mark as X Article (captured directly, not via Nitter)
+          expandedUrl: expandedUrl !== url ? expandedUrl : undefined,
         };
       }
     }
@@ -587,28 +807,52 @@ export async function convertUrlToPDF(
           height: auto !important;
         }
 
-        /* Hide inline-styled fixed/sticky elements */
-        [style*="position: fixed"], [style*="position:fixed"],
-        [style*="position: sticky"], [style*="position:sticky"] {
+        /* LessWrong: hide vote sidebar, nav, header chrome, ToC — but keep post title */
+        [class*="PostsVoteDefault"], [class*="LWPostsPageTopHeaderVote"],
+        [class*="PostsPageTopHeader-leftSection"],
+        [class*="TableOfContents"], [class*="ToCColumn"],
+        [class*="WelcomeBox"], [class*="welcomeBox"],
+        [class*="Header-root"], [class*="Header-appBar"],
+        [class*="headroom-wrapper"],
+        [class*="Layout-searchResultsArea"] {
           display: none !important;
         }
-
-        /* Force common sticky/fixed elements to static positioning (catches CSS-set positions) */
-        header, nav, footer, aside,
-        .header, .nav, .navbar, .footer, .sidebar,
-        .sticky, .fixed, .floating, .toolbar, .topbar, .bottombar,
-        [class*="sticky"], [class*="fixed"], [class*="floating"],
-        [class*="navbar"], [class*="header"], [class*="toolbar"],
-        [role="banner"], [role="navigation"], [role="complementary"] {
-          position: static !important;
+        /* LessWrong: collapse the page wrapper height (wraps entire content) */
+        [class*="Header-headerHeight"] {
+          display: block !important;
+          height: auto !important;
+          min-height: 0 !important;
+        }
+        /* LessWrong: make content area fill the full width */
+        [class*="PostsPage-postContent"], [class*="ContentStyles-postBody"],
+        [class*="MultiToCLayout-root"], [class*="MultiToCLayout-content"],
+        [class*="PostsPage-centralColumn"], [class*="RouteRootClient-centralColumn"] {
+          max-width: 100% !important;
+          width: 100% !important;
+          margin: 0 !important;
+          padding: 0 20px !important;
+        }
+        /* LessWrong: ensure the post title is visible and prominent */
+        [class*="PostsPageTitle"] {
+          display: block !important;
+          visibility: visible !important;
+          font-size: 2em !important;
+          margin: 10px 0 !important;
+        }
+        /* LessWrong: ensure figures and images don't overflow */
+        [class*="PostsPage-postContent"] figure,
+        [class*="PostsPage-postContent"] img,
+        [class*="PostsPage-postContent"] [class*="figure"],
+        [class*="ContentStyles"] figure,
+        [class*="ContentStyles"] img {
+          max-width: 100% !important;
+          height: auto !important;
         }
 
         /* Hide site mastheads/headers entirely for cleaner PDFs */
-        /* NYT masthead - appears on every page and obscures content */
         [data-testid="masthead"], [data-testid="masthead-container"],
         [class*="Masthead"], [class*="masthead"],
         #masthead, .masthead,
-        /* Generic site headers that should be hidden in PDFs */
         [data-testid="site-header"], [data-testid="nav-header"],
         .site-header, .page-header, #site-header,
         /* Audio player bars */
@@ -678,12 +922,30 @@ export async function convertUrlToPDF(
           visibility: hidden !important;
         }
 
-        /* Substack: hide modals, popups, and overlays */
-        /* These include "I've Shared This With Myself" and subscription prompts */
+        /* Modals, popups, overlays, and dialogs (non-floating variants caught by CSS) */
         .modal, .modal-backdrop, [class*="modal"], [class*="overlay"],
         [class*="popup"], [class*="dialog"], [role="dialog"],
         .subscription-widget-wrap, .subscribe-widget,
         .pencraft.pc-modal, [class*="pc-modal"] {
+          display: none !important;
+          visibility: hidden !important;
+        }
+
+        /* Inline CTAs and signup forms (not position:fixed, so JS won't catch them) */
+        /* Ghost CMS / Outpost plugin */
+        [class*="gh-post-upgrade"], [class*="subscribe-form"],
+        [data-portal="signup"], [data-portal="subscribe"],
+        [class*="outpost-cta"], [class*="outpost-subscribe"],
+        [class*="outpost-slideup"], [class*="outpost-pub-container"],
+        .footer-cta, .post-footer-cta, [class*="footer-cta"],
+        /* Beehiiv */
+        [class*="beehiiv"], .bee-popup, .bee-modal,
+        /* Generic inline signup/paywall/newsletter CTAs */
+        [data-testid*="paywall"], [class*="paywall"],
+        [class*="subscribe-prompt"], [class*="subscription-prompt"],
+        [class*="newsletter-signup"], [class*="email-signup"],
+        [class*="signup-modal"], [class*="signup-overlay"],
+        [class*="gate"], [class*="Gate"] {
           display: none !important;
           visibility: hidden !important;
         }
@@ -732,7 +994,8 @@ export async function convertUrlToPDF(
       url,
       size: pdfBuffer.length,
       pageTitle,
-      isXArticle: isNitterCapture ? false : undefined  // false = Nitter tweet, undefined = not Twitter
+      isXArticle: isNitterCapture ? false : undefined,  // false = Nitter tweet, undefined = not Twitter
+      expandedUrl: expandedUrl !== url ? expandedUrl : undefined,
     };
 
   } finally {

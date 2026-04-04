@@ -10,6 +10,7 @@ import archiver from 'archiver';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { env } from '../../config/env.js';
+import { resolveWithinRoot } from '../../utils/paths.js';
 
 export const downloadRouter = Router();
 
@@ -29,9 +30,11 @@ async function handleZipDownload(
     return;
   }
 
-  // Validate each file path doesn't contain ".." (path traversal prevention)
+  const dataDir = path.resolve(env.DATA_DIR);
+
+  // Validate each file path resolves within DATA_DIR (path traversal prevention)
   for (const filePath of files) {
-    if (filePath.includes('..')) {
+    if (!resolveWithinRoot(dataDir, filePath)) {
       res.status(400).json({
         error: 'Path traversal detected in file path',
         path: filePath,
@@ -95,8 +98,16 @@ async function handleZipDownload(
 
   // Add each file to the archive
   for (const filePath of files) {
-    const fullPath = path.join(env.DATA_DIR, filePath);
+    const fullPath = resolveWithinRoot(dataDir, filePath);
     const basename = path.basename(filePath);
+
+    if (!fullPath) {
+      console.warn('File path rejected (outside DATA_DIR), skipping:', {
+        path: filePath,
+        timestamp: new Date().toISOString(),
+      });
+      continue;
+    }
 
     if (fs.existsSync(fullPath)) {
       try {

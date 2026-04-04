@@ -39,6 +39,8 @@ export interface PdfContentResult {
   charsPerKb: number;
   /** Reason for failure (if failed) */
   reason?: string;
+  /** Extracted text content (for downstream metadata enrichment) */
+  extractedText?: string;
 }
 
 /**
@@ -66,7 +68,7 @@ const MIN_CHARS_PER_KB = 5;
  * If a PDF has this much text, it's clearly not truncated regardless of ratio
  * (e.g., image-heavy tech articles with lots of screenshots)
  */
-const SUFFICIENT_CHARS_BYPASS_RATIO = 3000;
+const SUFFICIENT_CHARS_BYPASS_RATIO = 5000;
 
 /**
  * Chars-per-page threshold that bypasses ratio check
@@ -93,43 +95,92 @@ const ERROR_PAGE_PATTERNS = [
 ];
 
 /**
- * Paywall patterns - if any of these appear, the article is likely behind a paywall
- * These are common subscription prompts that indicate truncated content
+ * Firewall/WAF patterns - if any of these appear, the page was blocked by a firewall
+ * Common on sites using Cloudflare, Akamai, AWS WAF, etc.
  */
-const PAYWALL_PATTERNS = [
-  // Generic subscription prompts
-  /get\s+unlimited\s+access/i,
+const FIREWALL_PATTERNS = [
+  /attention\s+required!?\s*\|?\s*cloudflare/i,
+  /checking\s+(your\s+)?browser\s+before\s+accessing/i,
+  /please\s+(wait\s+while\s+we\s+)?verify\s+(you\s+are|you're)\s+(a\s+)?human/i,
+  /ray\s+id:\s*[0-9a-f]+/i,
+  /performance\s+&?\s*security\s+by\s+cloudflare/i,
+  /access\s+(to\s+this\s+)?(page|site|resource)\s+(has\s+been\s+)?(denied|blocked|forbidden)/i,
+  /you\s+(have\s+been|are)\s+blocked/i,
+  /this\s+website\s+is\s+using\s+a\s+security\s+service/i,
+  /sorry,?\s+you\s+have\s+been\s+blocked/i,
+  /web\s+application\s+firewall/i,
+  /automated\s+access\s+to\s+this\s+(page|site)\s+has\s+been\s+(denied|blocked)/i,
+  /enable\s+(javascript\s+and\s+)?cookies\s+to\s+continue/i,
+  /please\s+turn\s+javascript\s+on/i,
+  /just\s+a\s+moment\s*\.{3}/i,
+  /verifying\s+(you|that\s+you)\s+are\s+(not\s+a\s+)?(a\s+)?robot/i,
+  /403\s+forbidden/i,
+  /access\s+denied/i,
+  // Reuters bot detection
+  /access\s+is\s+temporarily\s+restricted/i,
+  /we\s+detected\s+unusual\s+activity\s+from\s+your/i,
+  /automated\s+\(bot\)\s+activity\s+on\s+your\s+network/i,
+];
+
+/**
+ * HARD paywall patterns - these definitively indicate a paywall gate
+ * and should ALWAYS flag regardless of total text length.
+ * (News sites have lots of nav/sidebar/footer text that inflates char count
+ * even when the actual article is truncated behind a paywall.)
+ */
+const HARD_PAYWALL_PATTERNS = [
+  // Explicit "continue reading" gates
+  /continue\s+reading\s+(your\s+)?(article|story)\s+with\s+a/i,
   /subscribe\s+to\s+(continue|keep)\s+reading/i,
-  /unlock\s+(this\s+)?(article|story|content)/i,
   /sign\s+up\s+to\s+(continue|keep)\s+reading/i,
   /create\s+(a\s+)?free\s+account\s+to\s+(continue|read)/i,
   /already\s+a\s+subscriber\?\s*sign\s+in/i,
   /subscribers\s+only/i,
+  /this\s+(article|content)\s+is\s+(only\s+)?(available|accessible)\s+to\s+subscribers/i,
+  /you('ve|'re|\s+have)\s+(reached|hit)\s+(your|the)\s+(article|story|free)\s+(limit|cap)/i,
+
+  // Site-specific hard gates
+  /subscribe\s+to\s+wsj/i,
+  /continue\s+reading\s+with\s+a\s+wsj\s+subscription/i,
+  /subscribe\s+to\s+(the\s+)?new\s+york\s+times/i,
+  /unlock\s+the\s+global\s+benchmark/i, // Bloomberg
+  /get\s+unlimited\s+access\s+to/i,
+  // Atlantic
+  /to\s+read\s+this\s+story,?\s*sign\s+in\s+or\s+start\s+a\s+digital/i,
+  /start\s+a\s+digital\s+trial\s+or\s+digital\s+subscription/i,
+  // Fortune
+  /to\s+(continue|keep)\s+reading,?\s*(please\s+)?(subscribe|sign\s+in|log\s+in)/i,
+  // Generic "sign in to read/continue" gates
+  /sign\s+in\s+to\s+(read|continue|access)\s+(this|the)\s+(article|story|content)/i,
+];
+
+/**
+ * SOFT paywall patterns - these suggest a paywall but could also appear
+ * in legitimate article text (e.g., "subscribe to my newsletter for $7/month").
+ * Only checked when content is short (<5000 chars).
+ */
+const SOFT_PAYWALL_PATTERNS = [
+  /unlock\s+(this\s+)?(article|story|content)/i,
   /premium\s+(content|article|story)/i,
   /member(\s+|-)?exclusive/i,
 
-  // Price-based prompts (e.g., "$1.99 your first month")
+  // Price-based prompts
   /\$\d+\.?\d*\s+(per|a|your|\/)\s*(week|month|year|first)/i,
   /for\s+just\s+\$\d+\.?\d*/i,
   /starting\s+at\s+\$\d+\.?\d*/i,
 
-  // Bloomberg-specific
-  /unlock\s+the\s+global\s+benchmark/i,
+  // Bloomberg
   /bloomberg\s+(terminal|professional)/i,
 
-  // WSJ-specific
-  /subscribe\s+to\s+wsj/i,
+  // WSJ
   /wall\s+street\s+journal\s+membership/i,
 
-  // NYT-specific
-  /subscribe\s+to\s+(the\s+)?new\s+york\s+times/i,
+  // NYT
   /times\s+insider/i,
 
-  // Generic newspaper/news site patterns
+  // Generic
   /become\s+a\s+(subscriber|member)/i,
   /join\s+(now\s+)?to\s+(continue|unlock|access)/i,
-  /this\s+(article|content)\s+is\s+(only\s+)?(available|accessible)\s+to\s+subscribers/i,
-  /you('ve|'re|\s+have)\s+(reached|hit)\s+(your|the)\s+(article|story|free)\s+(limit|cap)/i,
 ];
 
 /**
@@ -167,6 +218,7 @@ export async function analyzePdfContent(pdfBuffer: Buffer): Promise<PdfContentRe
       charCount,
       pdfSize,
       charsPerKb: Math.round(charsPerKb * 10) / 10,
+      extractedText: normalizedText,
     };
 
     // Check 0: Error page detection (404, page not found, etc.)
@@ -185,10 +237,30 @@ export async function analyzePdfContent(pdfBuffer: Buffer): Promise<PdfContentRe
       }
     }
 
-    // Check 0.5: Paywall detection
-    // Paywalled articles often have substantial text (headline, teaser, byline)
-    // but contain subscription prompts indicating the real content is locked
-    for (const pattern of PAYWALL_PATTERNS) {
+    // Check 0.5: Firewall/WAF detection
+    // These pages are typically short — real articles with substantial content
+    // that mention "access denied" etc. in their text should not be flagged
+    const MAX_CHARS_FOR_FIREWALL = 3000;
+    if (charCount < MAX_CHARS_FOR_FIREWALL) {
+      for (const pattern of FIREWALL_PATTERNS) {
+        if (pattern.test(normalizedText)) {
+          const match = normalizedText.match(pattern)?.[0];
+          return {
+            ...baseResult,
+            passed: false,
+            reason: `Firewall/WAF blocked: "${match}". Page was blocked by a security service.`,
+          };
+        }
+      }
+    }
+
+    // Check 0.75: Paywall detection (two tiers)
+    //
+    // HARD patterns: Always checked. These definitively indicate a paywall gate
+    // (e.g., "Continue reading your article with a WSJ subscription").
+    // News sites have tons of nav/sidebar/footer/recommendation text that inflates
+    // char count well above 5000 even when the actual article is truncated.
+    for (const pattern of HARD_PAYWALL_PATTERNS) {
       if (pattern.test(normalizedText)) {
         const match = normalizedText.match(pattern)?.[0];
         return {
@@ -196,6 +268,23 @@ export async function analyzePdfContent(pdfBuffer: Buffer): Promise<PdfContentRe
           passed: false,
           reason: `Paywall detected: "${match}". Article content is behind a subscription wall.`,
         };
+      }
+    }
+
+    // SOFT patterns: Only checked when content is short (<5000 chars).
+    // These could legitimately appear in article text (e.g., a blog post mentioning
+    // "subscribe to my newsletter for $7/month").
+    const MAX_CHARS_FOR_SOFT_PAYWALL = 5000;
+    if (charCount < MAX_CHARS_FOR_SOFT_PAYWALL) {
+      for (const pattern of SOFT_PAYWALL_PATTERNS) {
+        if (pattern.test(normalizedText)) {
+          const match = normalizedText.match(pattern)?.[0];
+          return {
+            ...baseResult,
+            passed: false,
+            reason: `Paywall detected: "${match}". Article content is behind a subscription wall.`,
+          };
+        }
       }
     }
 

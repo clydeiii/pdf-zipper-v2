@@ -6,6 +6,7 @@
 import { Worker, Job } from 'bullmq';
 import { workerConnection } from '../config/redis.js';
 import { downloadMedia } from './collector.js';
+import { enrichVideo } from './video-enrichment.js';
 import type { MediaItem, MediaCollectionResult } from './types.js';
 import type { MediaCollectionJobData } from '../feeds/monitor.js';
 
@@ -41,6 +42,26 @@ export async function startMediaWorker(): Promise<void> {
           downloadDuration: result.downloadDuration,
           timestamp: new Date().toISOString(),
         }));
+
+        // Post-download enrichment for video files
+        if (item.mediaType === 'video' && result.filePath.endsWith('.mp4')) {
+          try {
+            const enrichResult = await enrichVideo(result.filePath, item);
+            console.log(JSON.stringify({
+              event: 'video_enrichment_complete',
+              filePath: result.filePath,
+              transcriptLength: enrichResult.transcriptLength,
+              vttEmbedded: enrichResult.vttEmbedded,
+              metadataWritten: enrichResult.metadataWritten,
+              tags: enrichResult.tags,
+              timestamp: new Date().toISOString(),
+            }));
+          } catch (err) {
+            // Non-fatal: video was still downloaded successfully
+            console.warn('Video enrichment failed (non-fatal):', err instanceof Error ? err.message : err);
+          }
+        }
+
         return result;
       }
 

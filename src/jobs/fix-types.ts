@@ -8,7 +8,7 @@
  * Claude Code diagnoses the issue and can autonomously apply fixes.
  */
 
-import type { QualityIssue } from '../quality/types.js';
+import type { FailureClass } from '../fix/failure.js';
 
 /**
  * Type of fix request - inferred from item status
@@ -16,6 +16,28 @@ import type { QualityIssue } from '../quality/types.js';
  * - false_negative: Failure that should have succeeded (user flagged a failed URL)
  */
 export type FixRequestType = 'false_positive' | 'false_negative';
+
+/**
+ * How a fix request was queued.
+ */
+export type FixRequestSource = 'manual' | 'automatic';
+
+/**
+ * Provider used for diagnosis/patching.
+ */
+export type FixProvider = 'claude' | 'codex';
+
+/**
+ * Verification/apply lifecycle state for a fix batch.
+ */
+export type FixGateStatus =
+  | 'diagnosed'
+  | 'patched'
+  | 'verifying'
+  | 'ready'
+  | 'rejected'
+  | 'applied'
+  | 'failed';
 
 /**
  * Context for a single item pending diagnosis
@@ -44,6 +66,18 @@ export interface FixJobContext {
   weekId: string;
   /** Timestamp when fix was requested */
   requestedAt: string;
+  /** Manual user submission or automatic trigger from final failures */
+  requestedBy: FixRequestSource;
+  /** Classified failure type for trigger/cooldown policy */
+  failureClass?: FailureClass;
+  /** Manual one-time cooldown bypass */
+  overrideCooldown?: boolean;
+  /** Optional operator note when overriding cooldown */
+  overrideReason?: string;
+  /** Optional explicit provider override */
+  forceProvider?: FixProvider;
+  /** Why this item was accepted/rejected by trigger policy */
+  triggerReason?: string;
 }
 
 /**
@@ -69,12 +103,18 @@ export interface FixDiagnosis {
   filesModified: string[];
   /** Whether a code fix was applied */
   fixApplied: boolean;
+  /** Provider that produced this diagnosis */
+  provider: FixProvider;
   /** Verification result after re-running URL */
   verification?: {
     /** Whether the re-run produced expected result */
     success: boolean;
-    /** New job ID from re-run */
-    newJobId?: string;
+    /** New job IDs from replay checks */
+    newJobIds?: string[];
+    /** Build gate result */
+    buildPassed?: boolean;
+    /** Replay gate result */
+    replayPassed?: boolean;
     /** Error if verification failed */
     error?: string;
   };
@@ -93,10 +133,32 @@ export interface FixHistoryEntry {
   itemCount: number;
   /** Diagnoses for each item */
   diagnoses: FixDiagnosis[];
+  /** Human-readable provider summary */
+  summary?: string;
+  /** Primary provider used for this batch */
+  provider?: FixProvider;
+  /** Whether fallback provider was used */
+  providerFallbackUsed?: boolean;
   /** Total files modified across all diagnoses */
   totalFilesModified: number;
   /** Number of successful verifications */
   successfulVerifications: number;
+  /** Gate/apply lifecycle state */
+  gateStatus: FixGateStatus;
+  /** Gate rejection/failure reason (if any) */
+  gateReason?: string;
+  /** Prepared branch containing changes */
+  branchName?: string;
+  /** Commit SHA for prepared patch */
+  commitSha?: string;
+  /** Suggested command to review/apply changes */
+  applyCommand?: string;
+  /** Replay verification jobs */
+  verificationJobs?: string[];
+  /** When batch was marked applied */
+  appliedAt?: string;
+  /** Operator identifier for apply action */
+  appliedBy?: string;
   /** Start timestamp */
   startedAt: string;
   /** End timestamp */
@@ -107,6 +169,12 @@ export interface FixHistoryEntry {
  * Request body for POST /api/fix/submit
  */
 export interface FixSubmitRequest {
+  /** Optional top-level override for all submitted items */
+  overrideCooldown?: boolean;
+  /** Optional reason for cooldown override */
+  overrideReason?: string;
+  /** Optional provider override for this submission */
+  forceProvider?: FixProvider;
   items: Array<{
     /** File path (for successful items) */
     path?: string;
@@ -116,6 +184,12 @@ export interface FixSubmitRequest {
     jobId?: string;
     /** Request type (inferred if not provided) */
     requestType?: FixRequestType;
+    /** One-off cooldown override for this item */
+    overrideCooldown?: boolean;
+    /** Optional note for item-level override */
+    overrideReason?: string;
+    /** Optional explicit provider override for this item */
+    forceProvider?: FixProvider;
   }>;
 }
 

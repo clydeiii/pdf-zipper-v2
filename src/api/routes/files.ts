@@ -10,12 +10,16 @@ import { Router, Request, Response } from 'express';
 import { readdir, stat, readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { PDFDocument } from 'pdf-lib';
+import { readInfoDictField } from '../../utils/pdf-info-dict.js';
 import { env } from '../../config/env.js';
 import { conversionQueue } from '../../queues/conversion.queue.js';
 import { podcastQueue } from '../../podcasts/podcast.queue.js';
 import { isApplePodcastsUrl } from '../../podcasts/apple.js';
 import { getISOWeekNumber } from '../../media/organization.js';
 import { notifyWeekRerun } from '../../notifications/discord.js';
+import { requireApiToken } from '../auth.js';
+import { resolveWithinRoot } from '../../utils/paths.js';
+import { getWeekIndexedJobIds } from '../../jobs/week-index.js';
 import type { PodcastJobData } from '../../podcasts/types.js';
 
 export const filesRouter = Router();
@@ -41,6 +45,15 @@ interface FileInfo {
   type: 'video' | 'transcript' | 'pdf' | 'audio';
   sourceUrl?: string; // Original URL (for PDFs, extracted from metadata)
   relatedFiles?: string[]; // Paths to related files (e.g., audio file for podcast transcript)
+  metadata?: {
+    title?: string;
+    author?: string;
+    publication?: string;
+    summary?: string;
+    language?: string;
+    tags?: string[];
+    hasTranslation?: boolean;
+  };
 }
 
 /**
@@ -267,6 +280,16 @@ filesRouter.get('/weeks/:weekId', async (req: Request, res: Response): Promise<v
               sourceUrl = await extractUrlFromPdf(filePath) || undefined;
             }
 
+            // Load enriched metadata from PDF Info Dict custom fields
+            let metadata: FileInfo['metadata'];
+            if (fileType === 'pdf') {
+              try {
+                metadata = await extractEnrichedMetadata(filePath);
+              } catch {
+                // No enriched metadata - that's fine
+              }
+            }
+
             const fileInfo: FileInfo = {
               name: entry,
               path: relativePath,
@@ -274,6 +297,7 @@ filesRouter.get('/weeks/:weekId', async (req: Request, res: Response): Promise<v
               modified: stats.mtime.toISOString(),
               type: fileType,
               sourceUrl,
+              metadata,
             };
 
             files.push(fileInfo);
@@ -364,33 +388,48 @@ filesRouter.get('/weeks/:weekId/failures', async (req: Request, res: Response): 
       return;
     }
 
-    // Get all failed jobs from the queue
-    const failedJobs = await conversionQueue.getFailed();
-
     const failures: FailureInfo[] = [];
+    const indexedJobIds = await getWeekIndexedJobIds(weekId, 'failed');
 
-    // Filter jobs by week based on when they were created
-    for (const job of failedJobs) {
-      // job.timestamp is when the job was created
-      const jobDate = new Date(job.timestamp);
-      const jobWeek = getISOWeekNumber(jobDate);
+    if (indexedJobIds.length > 0) {
+      for (const jobId of indexedJobIds) {
+        const job = await conversionQueue.getJob(jobId);
+        if (!job) continue;
 
-      // Match against requested week
-      if (jobWeek.year === parsed.year && jobWeek.week === parsed.week) {
-        // BullMQ stores error message in failedReason for failed jobs
         const failedReason = job.failedReason || 'unknown';
-        // Check if failure is due to bot detection (blank_page also indicates bot blocking)
         const isBotDetected = failedReason.startsWith('bot_detected:') ||
           failedReason.startsWith('blank_page:') ||
           failedReason.toLowerCase().includes('bot detection');
 
         failures.push({
           url: job.data.url,
-          originalUrl: job.data.originalUrl,  // Preserved for archive.is links
+          originalUrl: job.data.originalUrl,
+          failureReason: failedReason,
+          failedAt: job.finishedOn ? new Date(job.finishedOn).toISOString() : new Date(job.timestamp).toISOString(),
+          isBotDetected,
+          jobId: job.id!,
+        });
+      }
+    } else {
+      // Fallback for historical jobs not yet indexed.
+      const failedJobs = await conversionQueue.getFailed();
+      for (const job of failedJobs) {
+        const jobDate = new Date(job.timestamp);
+        const jobWeek = getISOWeekNumber(jobDate);
+        if (jobWeek.year !== parsed.year || jobWeek.week !== parsed.week) continue;
+
+        const failedReason = job.failedReason || 'unknown';
+        const isBotDetected = failedReason.startsWith('bot_detected:') ||
+          failedReason.startsWith('blank_page:') ||
+          failedReason.toLowerCase().includes('bot detection');
+
+        failures.push({
+          url: job.data.url,
+          originalUrl: job.data.originalUrl,
           failureReason: failedReason,
           failedAt: job.finishedOn ? new Date(job.finishedOn).toISOString() : jobDate.toISOString(),
           isBotDetected,
-          jobId: job.id!,  // For debug screenshot link
+          jobId: job.id!,
         });
       }
     }
@@ -433,6 +472,40 @@ async function extractUrlFromPdf(pdfPath: string): Promise<string | null> {
   }
 }
 
+// readInfoDictField imported from utils/pdf-info-dict.ts
+
+/**
+ * Extract enriched metadata from PDF Info Dict custom fields
+ * Returns undefined if no enrichment has been done on this PDF
+ */
+async function extractEnrichedMetadata(pdfPath: string): Promise<FileInfo['metadata'] | undefined> {
+  try {
+    const pdfBytes = await readFile(pdfPath);
+    const pdfDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+
+    const summary = readInfoDictField(pdfDoc, 'Summary');
+    const language = readInfoDictField(pdfDoc, 'Language');
+
+    // Only return metadata if enrichment was actually done
+    if (!summary && !language) return undefined;
+
+    const tagsStr = readInfoDictField(pdfDoc, 'Tags');
+    const translation = readInfoDictField(pdfDoc, 'Translation');
+
+    return {
+      title: pdfDoc.getTitle() || undefined,
+      author: pdfDoc.getAuthor() || undefined,
+      publication: readInfoDictField(pdfDoc, 'Publication'),
+      summary: summary || undefined,
+      language: language || undefined,
+      tags: tagsStr ? tagsStr.split(', ').filter(Boolean) : undefined,
+      hasTranslation: !!translation,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * POST /weeks/:weekId/rerun - Rerun all URLs from a specific week
  *
@@ -448,7 +521,7 @@ async function extractUrlFromPdf(pdfPath: string): Promise<string | null> {
  * - 400 Bad Request if weekId invalid format
  * - 500 Internal Server Error on failure
  */
-filesRouter.post('/weeks/:weekId/rerun', async (req: Request, res: Response): Promise<void> => {
+filesRouter.post('/weeks/:weekId/rerun', requireApiToken, async (req: Request, res: Response): Promise<void> => {
   const weekId = req.params.weekId;
 
   // Validate weekId format
@@ -471,33 +544,55 @@ filesRouter.post('/weeks/:weekId/rerun', async (req: Request, res: Response): Pr
     const urlsToRerun = new Set<string>();
     const urlToOldFile = new Map<string, string>();
 
-    // 1. Get URLs from completed jobs in BullMQ
-    const completedJobs = await conversionQueue.getCompleted();
-    for (const job of completedJobs) {
-      const jobDate = new Date(job.timestamp);
-      const jobWeek = getISOWeekNumber(jobDate);
-      if (jobWeek.year === parsed.year && jobWeek.week === parsed.week) {
-        // Use originalUrl if available, otherwise use url
+    // 1. Get URLs from completed jobs in indexed week set (fallback to full queue scan)
+    const indexedCompleted = await getWeekIndexedJobIds(weekId, 'completed');
+    if (indexedCompleted.length > 0) {
+      for (const jobId of indexedCompleted) {
+        const job = await conversionQueue.getJob(jobId);
+        if (!job) continue;
+
         const urlToUse = job.data.originalUrl || job.data.url;
-        if (urlToUse) {
-          urlsToRerun.add(urlToUse);
-          // Track old file path from job result (may be overwritten by disk scan below)
-          if (job.returnvalue?.pdfPath) {
-            urlToOldFile.set(urlToUse, path.resolve(job.returnvalue.pdfPath));
+        if (!urlToUse) continue;
+
+        urlsToRerun.add(urlToUse);
+        if (job.returnvalue?.pdfPath) {
+          urlToOldFile.set(urlToUse, path.resolve(job.returnvalue.pdfPath));
+        }
+      }
+    } else {
+      const completedJobs = await conversionQueue.getCompleted();
+      for (const job of completedJobs) {
+        const jobDate = new Date(job.timestamp);
+        const jobWeek = getISOWeekNumber(jobDate);
+        if (jobWeek.year === parsed.year && jobWeek.week === parsed.week) {
+          const urlToUse = job.data.originalUrl || job.data.url;
+          if (urlToUse) {
+            urlsToRerun.add(urlToUse);
+            if (job.returnvalue?.pdfPath) {
+              urlToOldFile.set(urlToUse, path.resolve(job.returnvalue.pdfPath));
+            }
           }
         }
       }
     }
 
-    // 2. Get URLs from failed jobs in BullMQ (no old file to track)
-    const failedJobs = await conversionQueue.getFailed();
-    for (const job of failedJobs) {
-      const jobDate = new Date(job.timestamp);
-      const jobWeek = getISOWeekNumber(jobDate);
-      if (jobWeek.year === parsed.year && jobWeek.week === parsed.week) {
+    // 2. Get URLs from failed jobs in indexed week set (fallback to full queue scan)
+    const indexedFailed = await getWeekIndexedJobIds(weekId, 'failed');
+    if (indexedFailed.length > 0) {
+      for (const jobId of indexedFailed) {
+        const job = await conversionQueue.getJob(jobId);
+        if (!job) continue;
         const urlToUse = job.data.originalUrl || job.data.url;
-        if (urlToUse) {
-          urlsToRerun.add(urlToUse);
+        if (urlToUse) urlsToRerun.add(urlToUse);
+      }
+    } else {
+      const failedJobs = await conversionQueue.getFailed();
+      for (const job of failedJobs) {
+        const jobDate = new Date(job.timestamp);
+        const jobWeek = getISOWeekNumber(jobDate);
+        if (jobWeek.year === parsed.year && jobWeek.week === parsed.week) {
+          const urlToUse = job.data.originalUrl || job.data.url;
+          if (urlToUse) urlsToRerun.add(urlToUse);
         }
       }
     }
@@ -587,7 +682,7 @@ filesRouter.post('/weeks/:weekId/rerun', async (req: Request, res: Response): Pr
  * - 400 Bad Request if files array is missing
  * - 500 Internal Server Error on failure
  */
-filesRouter.post('/delete', async (req: Request, res: Response): Promise<void> => {
+filesRouter.post('/delete', requireApiToken, async (req: Request, res: Response): Promise<void> => {
   const { files } = req.body as { files?: string[] };
 
   if (!files || !Array.isArray(files) || files.length === 0) {
@@ -604,8 +699,8 @@ filesRouter.post('/delete', async (req: Request, res: Response): Promise<void> =
 
     for (const filePath of files) {
       // Resolve full path and ensure it's within DATA_DIR
-      const fullPath = path.resolve(dataDir, filePath);
-      if (!fullPath.startsWith(dataDir)) {
+      const fullPath = resolveWithinRoot(dataDir, filePath);
+      if (!fullPath) {
         console.warn(`Delete rejected - path outside DATA_DIR: ${filePath}`);
         continue;
       }
@@ -644,7 +739,7 @@ filesRouter.post('/delete', async (req: Request, res: Response): Promise<void> =
  * - 400 Bad Request if jobIds array is missing
  * - 500 Internal Server Error on failure
  */
-filesRouter.post('/delete-failures', async (req: Request, res: Response): Promise<void> => {
+filesRouter.post('/delete-failures', requireApiToken, async (req: Request, res: Response): Promise<void> => {
   const { jobIds } = req.body as { jobIds?: string[] };
 
   if (!jobIds || !Array.isArray(jobIds) || jobIds.length === 0) {
@@ -695,7 +790,7 @@ filesRouter.post('/delete-failures', async (req: Request, res: Response): Promis
  * - 400 Bad Request if neither files nor urls provided
  * - 500 Internal Server Error on failure
  */
-filesRouter.post('/rerun-selected', async (req: Request, res: Response): Promise<void> => {
+filesRouter.post('/rerun-selected', requireApiToken, async (req: Request, res: Response): Promise<void> => {
   const { files, urls } = req.body as { files?: string[]; urls?: string[] };
 
   const hasFiles = files && Array.isArray(files) && files.length > 0;
@@ -720,8 +815,8 @@ filesRouter.post('/rerun-selected', async (req: Request, res: Response): Promise
         if (!filePath.endsWith('.pdf')) continue;
 
         // Resolve full path and ensure it's within DATA_DIR
-        const fullPath = path.resolve(dataDir, filePath);
-        if (!fullPath.startsWith(dataDir)) {
+        const fullPath = resolveWithinRoot(dataDir, filePath);
+        if (!fullPath) {
           continue;
         }
 
@@ -785,5 +880,49 @@ filesRouter.post('/rerun-selected', async (req: Request, res: Response): Promise
     res.status(500).json({
       error: 'Failed to rerun selected items',
     });
+  }
+});
+
+/**
+ * GET /metadata/:filePath
+ * Get full enriched metadata (including translation) from a PDF's Info Dict
+ * filePath is relative to DATA_DIR (e.g., media/2026-W14/pdfs/example.com-article.pdf)
+ */
+filesRouter.get('/metadata/*', async (req: Request, res: Response): Promise<void> => {
+  try {
+    let relativePath = (req.params as Record<string, string>)[0];
+    if (!relativePath.endsWith('.pdf')) relativePath += '.pdf';
+    const dataDir = env.DATA_DIR || './data';
+    const pdfPath = resolveWithinRoot(dataDir, relativePath);
+    if (!pdfPath) {
+      res.status(400).json({ error: 'Invalid file path' });
+      return;
+    }
+
+    const pdfBytes = await readFile(pdfPath);
+    const pdfDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+
+    const tagsStr = readInfoDictField(pdfDoc, 'Tags');
+
+    const metadata = {
+      title: pdfDoc.getTitle() || null,
+      author: pdfDoc.getAuthor() || null,
+      publication: readInfoDictField(pdfDoc, 'Publication') || null,
+      publishDate: readInfoDictField(pdfDoc, 'PublishDate') || null,
+      language: readInfoDictField(pdfDoc, 'Language') || null,
+      summary: readInfoDictField(pdfDoc, 'Summary') || null,
+      tags: tagsStr ? tagsStr.split(', ').filter(Boolean) : [],
+      translation: readInfoDictField(pdfDoc, 'Translation') || null,
+      sourceUrl: pdfDoc.getSubject() || null,
+      enrichedAt: readInfoDictField(pdfDoc, 'EnrichedAt') || null,
+    };
+
+    res.json(metadata);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      res.status(404).json({ error: 'PDF not found' });
+    } else {
+      res.status(500).json({ error: 'Failed to read metadata' });
+    }
   }
 });

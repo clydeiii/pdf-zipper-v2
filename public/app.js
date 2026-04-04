@@ -9,6 +9,7 @@ let selectedFiles = new Set();
 let allItems = [];        // Store full dataset for filtering
 let currentFilter = '';   // Current filter string
 let filterDebounceTimer = null;
+let apiToken = localStorage.getItem('pdfzipperApiToken') || '';
 
 // DOM elements
 const weeksView = document.getElementById('weeks-view');
@@ -27,6 +28,8 @@ const statusMessage = document.getElementById('status-message');
 const filterInput = document.getElementById('filter-input');
 const filterClear = document.getElementById('filter-clear');
 const filterStatus = document.getElementById('filter-status');
+const fixCenterButton = document.getElementById('fix-center-btn');
+const apiTokenButton = document.getElementById('api-token-btn');
 
 // Initialize app on page load
 document.addEventListener('DOMContentLoaded', () => {
@@ -47,6 +50,33 @@ function setupEventListeners() {
   fixButton.addEventListener('click', fixSelected);
   filterInput.addEventListener('input', handleFilterInput);
   filterClear.addEventListener('click', clearFilter);
+  if (fixCenterButton) {
+    fixCenterButton.addEventListener('click', openFixCenterModal);
+  }
+  if (apiTokenButton) {
+    apiTokenButton.addEventListener('click', promptForApiToken);
+  }
+}
+
+function getAuthHeaders(extra = {}) {
+  const headers = { ...extra };
+  if (apiToken) {
+    headers['x-api-token'] = apiToken;
+  }
+  return headers;
+}
+
+function promptForApiToken() {
+  const value = prompt('Enter API token (leave empty to clear):', apiToken);
+  if (value === null) return;
+  apiToken = value.trim();
+  if (apiToken) {
+    localStorage.setItem('pdfzipperApiToken', apiToken);
+    showStatus('API token saved in browser storage', 'success');
+  } else {
+    localStorage.removeItem('pdfzipperApiToken');
+    showStatus('API token cleared', 'info');
+  }
 }
 
 /**
@@ -171,6 +201,23 @@ function renderFileRow(file, index) {
     ? '<span class="badge-audio">🎧 audio</span>'
     : file.type;
 
+  // Metadata line (if enriched metadata available)
+  let metaLine = '';
+  if (file.metadata) {
+    const m = file.metadata;
+    const parts = [];
+    if (m.author) parts.push(escapeHtml(m.author));
+    if (m.publication) parts.push(escapeHtml(m.publication));
+    if (m.language && m.language !== 'en') parts.push(`🌐 ${escapeHtml(m.language)}${m.hasTranslation ? ' (translated)' : ''}`);
+    if (m.tags && m.tags.length > 0) parts.push(m.tags.map(t => `<span class="meta-tag">${escapeHtml(t)}</span>`).join(' '));
+
+    const metaParts = parts.length > 0 ? `<span class="meta-info">${parts.join(' · ')}</span>` : '';
+    const summary = m.summary ? `<span class="meta-summary" title="${escapeHtml(m.summary)}">${escapeHtml(truncate(m.summary, 120))}</span>` : '';
+    if (metaParts || summary) {
+      metaLine = `<div class="meta-line">${metaParts}${metaParts && summary ? '<br>' : ''}${summary}</div>`;
+    }
+  }
+
   return `
     <tr>
       <td class="col-checkbox">
@@ -182,7 +229,7 @@ function renderFileRow(file, index) {
         >
       </td>
       <td class="col-name">
-        <a href="${escapeHtml(fileUrl)}" target="_blank" class="file-link">${escapeHtml(file.name)}</a>${sourceLink}${relatedLink}
+        <a href="${escapeHtml(fileUrl)}" target="_blank" class="file-link">${escapeHtml(file.name)}</a>${sourceLink}${relatedLink}${metaLine}
       </td>
       <td class="col-type">${typeBadge}</td>
       <td class="col-size">${formatFileSize(file.size)}</td>
@@ -534,9 +581,9 @@ async function rerunAll() {
   try {
     const response = await fetch(`/api/files/weeks/${currentWeekId}/rerun`, {
       method: 'POST',
-      headers: {
+      headers: getAuthHeaders({
         'Content-Type': 'application/json',
-      },
+      }),
     });
 
     if (!response.ok) {
@@ -599,7 +646,7 @@ async function rerunSelected() {
   try {
     const response = await fetch('/api/files/rerun-selected', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ files: pdfPaths, urls: failedUrls }),
     });
 
@@ -668,7 +715,7 @@ async function deleteSelected() {
     if (filePaths.length > 0) {
       const response = await fetch('/api/files/delete', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ files: filePaths }),
       });
 
@@ -685,7 +732,7 @@ async function deleteSelected() {
     if (failedJobIds.length > 0) {
       const response = await fetch('/api/files/delete-failures', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ jobIds: failedJobIds }),
       });
 
@@ -766,7 +813,7 @@ async function fixSelected() {
   try {
     const response = await fetch('/api/fix/submit', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ items }),
     });
 
@@ -853,6 +900,187 @@ function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
+}
+
+/**
+ * Truncate text with ellipsis
+ */
+function truncate(text, maxLen) {
+  if (!text || text.length <= maxLen) return text;
+  return text.slice(0, maxLen).trimEnd() + '...';
+}
+
+// ============================================
+// Fix Center
+// ============================================
+
+async function openFixCenterModal() {
+  const modal = document.getElementById('fix-center-modal');
+  modal.classList.remove('hidden');
+  await loadFixCenter();
+}
+
+function closeFixCenterModal() {
+  const modal = document.getElementById('fix-center-modal');
+  modal.classList.add('hidden');
+}
+
+function renderGatePill(gateStatus) {
+  const safe = escapeHtml(gateStatus || 'unknown');
+  return `<span class="gate-pill ${safe}">${safe}</span>`;
+}
+
+function renderFixCenterRow(batch) {
+  const readyToApply = batch.gateStatus === 'ready';
+  const canReverify = batch.gateStatus === 'rejected' || batch.gateStatus === 'failed';
+  const provider = batch.provider || '-';
+  const commit = batch.commitSha ? `<span class="mono">${escapeHtml(batch.commitSha.substring(0, 12))}</span>` : '-';
+  const branch = batch.branchName ? `<span class="mono">${escapeHtml(batch.branchName)}</span>` : '-';
+  const reason = batch.gateReason ? `<div class="mono">${escapeHtml(batch.gateReason)}</div>` : '';
+
+  const actions = [];
+  if (readyToApply) {
+    actions.push(`<button class="btn btn-primary btn-small" onclick="applyFixBatch('${escapeHtml(batch.batchId)}')">Apply</button>`);
+  }
+  if (canReverify) {
+    actions.push(`<button class="btn btn-secondary btn-small" onclick="reverifyFixBatch('${escapeHtml(batch.batchId)}')">Reverify</button>`);
+  }
+  if (batch.applyCommand) {
+    actions.push(`<button class="btn btn-secondary btn-small" onclick="copyApplyCommand('${escapeHtml(batch.batchId)}')">Copy Cmd</button>`);
+  }
+
+  return `
+    <tr>
+      <td><span class="mono">${escapeHtml(batch.batchId.substring(0, 8))}</span></td>
+      <td>${renderGatePill(batch.gateStatus)}</td>
+      <td>${escapeHtml(provider)}</td>
+      <td>${escapeHtml(String(batch.itemCount || 0))}</td>
+      <td>${escapeHtml(String(batch.totalFilesModified || 0))}</td>
+      <td>${escapeHtml(String(batch.successfulVerifications || 0))}</td>
+      <td>${branch}</td>
+      <td>${commit}</td>
+      <td>
+        ${actions.join(' ')}
+        ${reason}
+      </td>
+    </tr>
+  `;
+}
+
+async function loadFixCenter() {
+  const listEl = document.getElementById('fix-center-list');
+  const statusEl = document.getElementById('fix-center-status');
+  listEl.innerHTML = '<p class="loading">Loading batches...</p>';
+
+  try {
+    const [statusResp, historyResp] = await Promise.all([
+      fetch('/api/fix/status'),
+      fetch('/api/fix/history?limit=20'),
+    ]);
+
+    const status = statusResp.ok ? await statusResp.json() : null;
+    const history = historyResp.ok ? await historyResp.json() : { batches: [] };
+    const batches = Array.isArray(history.batches) ? history.batches : [];
+
+    if (!status || !status.enabled) {
+      statusEl.className = 'cookies-status warning';
+      statusEl.innerHTML = '<div class="status-info"><strong>Fix system disabled</strong></div>';
+    } else {
+      statusEl.className = 'cookies-status success';
+      statusEl.innerHTML = `
+        <div class="status-info">
+          <strong>Fix system enabled</strong><br>
+          Pending queue: ${escapeHtml(String(status.pending || 0))}<br>
+          Claude: ${escapeHtml(status.claudeCliPath || '-')}<br>
+          Codex: ${escapeHtml(status.codexCliPath || '-')}
+        </div>
+      `;
+    }
+
+    if (batches.length === 0) {
+      listEl.innerHTML = '<p class="loading">No fix batches found.</p>';
+      return;
+    }
+
+    const rows = batches.map(renderFixCenterRow).join('');
+    listEl.innerHTML = `
+      <table class="fix-center-table">
+        <thead>
+          <tr>
+            <th>Batch</th>
+            <th>Gate</th>
+            <th>Provider</th>
+            <th>Items</th>
+            <th>Files</th>
+            <th>Verified</th>
+            <th>Branch</th>
+            <th>Commit</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+  } catch (error) {
+    listEl.innerHTML = `<p class="loading">Failed to load fix center: ${escapeHtml(error.message)}</p>`;
+  }
+}
+
+async function applyFixBatch(batchId) {
+  if (!confirm(`Mark batch ${batchId} as applied?`)) return;
+
+  try {
+    const response = await fetch(`/api/fix/batches/${encodeURIComponent(batchId)}/apply`, {
+      method: 'POST',
+      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({}),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    showStatus(`Batch ${batchId} marked as applied`, 'success');
+    await loadFixCenter();
+  } catch (error) {
+    showStatus(`Failed to apply batch: ${error.message}`, 'error');
+  }
+}
+
+async function reverifyFixBatch(batchId) {
+  try {
+    const response = await fetch(`/api/fix/batches/${encodeURIComponent(batchId)}/reverify`, {
+      method: 'POST',
+      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({}),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    showStatus(`Queued ${data.queued} replay job(s) for batch ${batchId}`, 'info');
+    await loadFixCenter();
+  } catch (error) {
+    showStatus(`Failed to reverify batch: ${error.message}`, 'error');
+  }
+}
+
+async function copyApplyCommand(batchId) {
+  try {
+    const response = await fetch(`/api/fix/batches/${encodeURIComponent(batchId)}`);
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    const command = data.applyCommand || '';
+    if (!command) {
+      showStatus('No apply command available for this batch', 'info');
+      return;
+    }
+    await navigator.clipboard.writeText(command);
+    showStatus(`Copied command: ${command}`, 'success');
+  } catch (error) {
+    showStatus(`Failed to copy command: ${error.message}`, 'error');
+  }
 }
 
 // ============================================
@@ -974,7 +1202,7 @@ async function uploadCookies() {
     // Upload to server
     const response = await fetch('/api/cookies/upload', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ content }),
     });
 

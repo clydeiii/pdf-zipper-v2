@@ -9,10 +9,9 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm install --omit=dev
 
-# Install Playwright OS deps + xvfb for virtual display
+# Install Playwright OS deps + ffmpeg for video metadata/subtitles
 RUN npx playwright install-deps chromium && \
-    apt-get update && \
-    apt-get install -y xvfb xauth && \
+    apt-get update && apt-get install -y --no-install-recommends ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Playwright browsers to a shared location accessible by non-root users
@@ -34,9 +33,7 @@ RUN npm install --save-dev typescript @types/node @types/express @types/archiver
 ENV NODE_ENV=production
 ENV PORT=3002
 
-# Run in headed mode with virtual display (better site compatibility)
-ENV HEADFUL=1
 EXPOSE 3002
 
-# Use xvfb-run to provide a virtual display for headed Chrome
-CMD xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" node dist/index.js
+# Browser runs headless (chromium_headless_shell), no Xvfb needed
+CMD ["node", "--max-old-space-size=512", "dist/index.js"]

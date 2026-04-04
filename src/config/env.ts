@@ -10,7 +10,7 @@ interface EnvConfig {
   NODE_ENV: 'development' | 'production' | 'test';
   /** Ollama server URL (default: http://127.0.0.1:11434) */
   OLLAMA_HOST: string;
-  /** Ollama model for vision analysis (default: gemma3) */
+  /** Ollama model for vision analysis (default: gemma4:e4b) */
   OLLAMA_MODEL: string;
   /** Quality score threshold 0-100 (default: 50) */
   QUALITY_THRESHOLD: number;
@@ -38,6 +38,14 @@ interface EnvConfig {
   FIX_ENABLED: boolean;
   /** Path to Claude CLI (default: 'claude' in PATH) */
   CLAUDE_CLI_PATH: string;
+  /** Path to Codex CLI (default: 'codex' in PATH) */
+  CODEX_CLI_PATH: string;
+  /** Optional explicit args for Codex CLI (space-delimited) */
+  CODEX_CLI_ARGS?: string;
+  /** Optional API token for mutating routes */
+  API_AUTH_TOKEN?: string;
+  /** Fix provider timeout in minutes (default: 30) */
+  FIX_PROVIDER_TIMEOUT_MINUTES: number;
 }
 
 const requiredEnvVars = ['REDIS_HOST', 'REDIS_PORT', 'PORT'] as const;
@@ -74,7 +82,7 @@ export const env: EnvConfig = {
   NODE_ENV: (process.env.NODE_ENV as EnvConfig['NODE_ENV']) || 'development',
   // Ollama settings (optional with sensible defaults)
   OLLAMA_HOST: process.env.OLLAMA_HOST || 'http://127.0.0.1:11434',
-  OLLAMA_MODEL: process.env.OLLAMA_MODEL || 'gemma3',
+  OLLAMA_MODEL: process.env.OLLAMA_MODEL || 'gemma4:e4b',
   QUALITY_THRESHOLD: parseInt(process.env.QUALITY_THRESHOLD || '50', 10),
   // Feed settings (optional)
   MATTER_FEED_URL: process.env.MATTER_FEED_URL,
@@ -91,10 +99,14 @@ export const env: EnvConfig = {
   // Nitter server for Twitter/X conversion
   NITTER_HOST: process.env.NITTER_HOST || 'http://localhost:8080',
   // Ollama model for transcript formatting (larger = better quality, slower)
-  TRANSCRIPT_FORMAT_MODEL: process.env.TRANSCRIPT_FORMAT_MODEL || process.env.OLLAMA_MODEL || 'gemma3',
+  TRANSCRIPT_FORMAT_MODEL: process.env.TRANSCRIPT_FORMAT_MODEL || process.env.OLLAMA_MODEL || 'gemma4:26b',
   // Privacy filter terms (comma-separated list of names/handles to hide from captures)
   PRIVACY_FILTER_TERMS: process.env.PRIVACY_FILTER_TERMS,
   // AI self-healing fix feature
   FIX_ENABLED: process.env.FIX_ENABLED === 'true',
   CLAUDE_CLI_PATH: process.env.CLAUDE_CLI_PATH || 'claude',
+  CODEX_CLI_PATH: process.env.CODEX_CLI_PATH || 'codex',
+  CODEX_CLI_ARGS: process.env.CODEX_CLI_ARGS,
+  API_AUTH_TOKEN: process.env.API_AUTH_TOKEN,
+  FIX_PROVIDER_TIMEOUT_MINUTES: parseInt(process.env.FIX_PROVIDER_TIMEOUT_MINUTES || '30', 10),
 };

@@ -1,24 +1,31 @@
 /**
- * Fix worker for AI self-healing diagnosis
+ * Fix worker for AI self-healing diagnosis/patching.
  *
- * Processes pending fix requests by spawning headless Claude Code sessions.
- * Claude Code analyzes PDFs, diagnoses issues, and can autonomously apply fixes.
+ * Flow:
+ * 1. Consume pending fix requests
+ * 2. Run provider (round-robin Claude/Codex)
+ * 3. Prepare patch branch/commit (if fix applied)
+ * 4. Verification gate: build + targeted replay jobs
+ * 5. Persist batch history + ledger outcomes
  */
 
-import { Worker, Job } from 'bullmq';
+import { Worker, Job, QueueEvents } from 'bullmq';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { workerConnection } from '../config/redis.js';
+import { workerConnection, createConnection } from '../config/redis.js';
 import { env } from '../config/env.js';
 import { FIX_QUEUE_NAME } from '../queues/fix.queue.js';
+import { QUEUE_NAME, conversionQueue } from '../queues/conversion.queue.js';
 import { consumePendingFixes, saveFixHistory } from '../fix/pending.js';
-import { buildDiagnosisPrompt } from '../fix/prompt-builder.js';
+import { runDiagnosisWithProviders } from '../fix/providers.js';
+import { classifyFailureMessage } from '../fix/failure.js';
+import { updateFixOutcome } from '../fix/ledger.js';
 import { sendFixDiagnosisNotification } from '../notifications/discord.js';
-import { conversionQueue } from '../queues/conversion.queue.js';
 import type {
   FixJobData,
   FixJobContext,
   FixDiagnosis,
+  FixGateStatus,
   FixHistoryEntry,
 } from '../jobs/fix-types.js';
 
@@ -28,142 +35,284 @@ let isShuttingDown = false;
 /** Reference to the worker instance */
 let fixWorkerInstance: Worker<FixJobData, FixHistoryEntry> | null = null;
 
-/**
- * Parse Claude Code JSON output from the response
- *
- * Claude Code outputs JSON wrapped in markdown code blocks.
- * This extracts and parses that JSON.
- */
-function parseClaudeOutput(output: string): {
-  diagnoses: Array<{
-    url: string;
-    requestType: string;
-    rootCause: string;
-    suggestedFix?: string;
-    filesModified: string[];
-    fixApplied: boolean;
-  }>;
-  summary: string;
-} | null {
-  try {
-    // Try to find JSON in the output
-    // First try: look for ```json block
-    const jsonBlockMatch = output.match(/```json\s*([\s\S]*?)```/);
-    if (jsonBlockMatch) {
-      return JSON.parse(jsonBlockMatch[1].trim());
-    }
+/** Shared queue-events for conversion replay verification */
+const conversionQueueEvents = new QueueEvents(QUEUE_NAME, {
+  connection: createConnection({ maxRetriesPerRequest: null }),
+});
 
-    // Second try: look for raw JSON object
-    const jsonMatch = output.match(/\{[\s\S]*"diagnoses"[\s\S]*\}/);
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
-    }
-
-    // Third try: parse entire output as JSON
-    return JSON.parse(output);
-  } catch (error) {
-    console.error('Failed to parse Claude output:', error);
-    console.error('Raw output:', output.substring(0, 500));
-    return null;
-  }
+interface CommandResult {
+  success: boolean;
+  stdout: string;
+  stderr: string;
+  code: number;
 }
 
-/**
- * Spawn Claude Code in headless mode and get diagnosis
- */
-async function runClaudeDiagnosis(
-  items: FixJobContext[]
-): Promise<{
-  success: boolean;
-  output: string;
-  error?: string;
-}> {
-  const prompt = buildDiagnosisPrompt(items);
-
+function runCommand(
+  command: string,
+  args: string[],
+  options?: {
+    cwd?: string;
+    timeoutMs?: number;
+  }
+): Promise<CommandResult> {
   return new Promise((resolve) => {
-    const claudePath = env.CLAUDE_CLI_PATH;
-
-    // Spawn Claude Code in headless mode
-    const child = spawn(claudePath, [
-      '--print',                          // Non-interactive, print output
-      '--output-format', 'text',          // Plain text output
-      '--allowedTools', 'Read,Grep,Glob,Bash,Edit,Write',  // Allowed tools
-      '--dangerously-skip-permissions',   // Pre-approved for autonomy
-      '-p', prompt,                        // The prompt
-    ], {
-      cwd: '/home/clyde/pdf-zipper-v2',
-      env: {
-        ...process.env,
-        // Prevent Claude from prompting for input
-        CLAUDE_CODE_HEADLESS: 'true',
-      },
-      timeout: 30 * 60 * 1000,  // 30 minute timeout (PDF analysis can be slow)
+    const child = spawn(command, args, {
+      cwd: options?.cwd || '/home/clyde/pdf-zipper-v2',
+      env: process.env,
+      timeout: options?.timeoutMs,
     });
 
     let stdout = '';
     let stderr = '';
 
-    child.stdout?.on('data', (data: Buffer) => {
-      stdout += data.toString();
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString();
     });
 
-    child.stderr?.on('data', (data: Buffer) => {
-      stderr += data.toString();
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
     });
 
     child.on('close', (code) => {
-      if (code === 0) {
-        resolve({
-          success: true,
-          output: stdout,
-        });
-      } else {
-        resolve({
-          success: false,
-          output: stdout,
-          error: `Claude Code exited with code ${code}: ${stderr}`,
-        });
-      }
+      const normalizedCode = code ?? 1;
+      resolve({
+        success: normalizedCode === 0,
+        stdout,
+        stderr,
+        code: normalizedCode,
+      });
     });
 
     child.on('error', (error) => {
       resolve({
         success: false,
-        output: stdout,
-        error: `Failed to spawn Claude Code: ${error.message}`,
+        stdout,
+        stderr: `${stderr}\n${error.message}`.trim(),
+        code: 1,
       });
     });
   });
 }
 
-/**
- * Submit URL for re-conversion to verify fix
- */
-async function submitForVerification(
-  url: string
-): Promise<{ jobId: string } | { error: string }> {
-  try {
+function parseGitStatusPaths(stdout: string): string[] {
+  const files: string[] = [];
+  const lines = stdout.split('\n').map((line) => line.trimEnd()).filter((line) => line.length > 0);
+
+  for (const line of lines) {
+    // Porcelain format: XY <path> or XY <old> -> <new>
+    const rawPath = line.substring(3).trim();
+    if (!rawPath) continue;
+
+    const renameParts = rawPath.split(' -> ');
+    const pathValue = renameParts[renameParts.length - 1].trim();
+    if (pathValue.length > 0) files.push(pathValue);
+  }
+
+  return files;
+}
+
+function isAllowedFixPath(filePath: string): boolean {
+  return (
+    filePath.startsWith('src/quality/') ||
+    filePath.startsWith('src/converters/') ||
+    filePath.startsWith('src/fix/')
+  );
+}
+
+async function buildGate(): Promise<{ passed: boolean; error?: string }> {
+  const result = await runCommand('npm', ['run', 'build', '--silent'], {
+    timeoutMs: 10 * 60 * 1000,
+  });
+
+  if (result.success) {
+    return { passed: true };
+  }
+
+  const tail = (result.stderr || result.stdout).slice(-1200);
+  return {
+    passed: false,
+    error: `build_failed: ${tail}`.trim(),
+  };
+}
+
+async function preparePatchBranch(params: {
+  batchId: string;
+  provider: string;
+}): Promise<{
+  success: boolean;
+  branchName?: string;
+  commitSha?: string;
+  applyCommand?: string;
+  changedFiles: string[];
+  error?: string;
+}> {
+  const status = await runCommand('git', ['status', '--porcelain']);
+  if (!status.success) {
+    return {
+      success: false,
+      changedFiles: [],
+      error: `git_status_failed: ${status.stderr || status.stdout}`,
+    };
+  }
+
+  const changedFiles = parseGitStatusPaths(status.stdout).filter(isAllowedFixPath);
+  if (changedFiles.length === 0) {
+    return {
+      success: false,
+      changedFiles: [],
+      error: 'no_allowed_changes_detected',
+    };
+  }
+
+  const branchName = `fix/batch-${params.batchId.slice(0, 8)}-${params.provider}`;
+  const checkout = await runCommand('git', ['switch', '-c', branchName]);
+  if (!checkout.success) {
+    return {
+      success: false,
+      changedFiles,
+      error: `git_branch_failed: ${checkout.stderr || checkout.stdout}`,
+    };
+  }
+
+  const add = await runCommand('git', ['add', '--', ...changedFiles]);
+  if (!add.success) {
+    return {
+      success: false,
+      changedFiles,
+      error: `git_add_failed: ${add.stderr || add.stdout}`,
+    };
+  }
+
+  const hasStaged = await runCommand('git', ['diff', '--cached', '--quiet']);
+  if (hasStaged.success) {
+    // diff --quiet exits 0 when there is no staged diff.
+    return {
+      success: false,
+      changedFiles,
+      error: 'no_staged_diff_after_add',
+    };
+  }
+
+  const commit = await runCommand('git', [
+    'commit',
+    '-m',
+    `fix(self-heal): batch ${params.batchId.slice(0, 8)} via ${params.provider}`,
+  ]);
+  if (!commit.success) {
+    return {
+      success: false,
+      changedFiles,
+      error: `git_commit_failed: ${commit.stderr || commit.stdout}`,
+    };
+  }
+
+  const sha = await runCommand('git', ['rev-parse', 'HEAD']);
+  if (!sha.success) {
+    return {
+      success: false,
+      changedFiles,
+      error: `git_rev_parse_failed: ${sha.stderr || sha.stdout}`,
+    };
+  }
+
+  return {
+    success: true,
+    branchName,
+    commitSha: sha.stdout.trim(),
+    applyCommand: `git switch ${branchName}`,
+    changedFiles,
+  };
+}
+
+async function getAllowedWorkingTreeChanges(): Promise<string[]> {
+  const status = await runCommand('git', ['status', '--porcelain']);
+  if (!status.success) return [];
+  return parseGitStatusPaths(status.stdout).filter(isAllowedFixPath);
+}
+
+async function runReplayGate(urls: string[]): Promise<{
+  passed: boolean;
+  successful: number;
+  jobIds: string[];
+  errors: string[];
+}> {
+  const uniqueUrls = Array.from(new Set(urls)).filter((url) => url.startsWith('http://') || url.startsWith('https://'));
+  if (uniqueUrls.length === 0) {
+    return {
+      passed: true,
+      successful: 0,
+      jobIds: [],
+      errors: [],
+    };
+  }
+
+  const jobs = [];
+  for (const url of uniqueUrls) {
     const job = await conversionQueue.add('convert-url', {
       url,
       originalUrl: url,
     });
+    jobs.push(job);
+  }
 
-    return { jobId: job.id! };
-  } catch (error) {
-    return {
-      error: error instanceof Error ? error.message : String(error),
-    };
+  const jobIds = jobs.map((job) => job.id!).filter(Boolean);
+  const errors: string[] = [];
+  let successful = 0;
+
+  for (const job of jobs) {
+    try {
+      await job.waitUntilFinished(conversionQueueEvents, 12 * 60 * 1000);
+      successful++;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      errors.push(`job_${job.id}: ${message}`);
+    }
+  }
+
+  return {
+    passed: errors.length === 0,
+    successful,
+    jobIds,
+    errors,
+  };
+}
+
+function createFallbackDiagnoses(items: FixJobContext[], reason: string): FixDiagnosis[] {
+  return items.map((item) => ({
+    context: item,
+    rootCause: reason,
+    filesModified: [],
+    fixApplied: false,
+    provider: item.forceProvider || 'claude',
+    diagnosedAt: new Date().toISOString(),
+  }));
+}
+
+async function updateLedgerForBatch(entry: FixHistoryEntry): Promise<void> {
+  for (const diagnosis of entry.diagnoses) {
+    const failureClass = diagnosis.context.failureClass || classifyFailureMessage(diagnosis.context.failureReason);
+
+    let outcome: 'diagnosed' | 'ready' | 'rejected' | 'failed' = 'diagnosed';
+    if (entry.gateStatus === 'ready' || entry.gateStatus === 'applied') outcome = 'ready';
+    else if (entry.gateStatus === 'rejected') outcome = 'rejected';
+    else if (entry.gateStatus === 'failed') outcome = 'failed';
+
+    await updateFixOutcome({
+      url: diagnosis.context.url,
+      outcome,
+      provider: diagnosis.provider,
+      batchId: entry.batchId,
+      failureClass,
+      details: {
+        gateStatus: entry.gateStatus,
+        gateReason: entry.gateReason,
+      },
+    });
   }
 }
 
 /**
- * Process a fix job
- *
- * 1. Consume all pending fix requests from Redis
- * 2. Spawn Claude Code with diagnosis prompt
- * 3. Parse output and create diagnoses
- * 4. Re-run affected URLs for verification
- * 5. Save history and send notifications
+ * Process a fix job.
  */
 async function processFixJob(
   job: Job<FixJobData, FixHistoryEntry>
@@ -173,171 +322,186 @@ async function processFixJob(
 
   console.log(`[Fix] Processing fix job ${job.id} (batch ${batchId})`);
 
-  // Get pending items
   const items = await consumePendingFixes();
-
   if (items.length === 0) {
-    console.log('[Fix] No pending items to process');
-    return {
+    const emptyEntry: FixHistoryEntry = {
       batchId,
       itemCount: 0,
       diagnoses: [],
+      summary: 'No pending items',
       totalFilesModified: 0,
       successfulVerifications: 0,
+      gateStatus: 'diagnosed',
       startedAt,
       completedAt: new Date().toISOString(),
     };
+    await saveFixHistory(emptyEntry);
+    return emptyEntry;
   }
 
-  console.log(`[Fix] Processing ${items.length} pending items`);
+  const forcedProvider = items.find((item) => !!item.forceProvider)?.forceProvider;
+  const providerResult = await runDiagnosisWithProviders(items, forcedProvider);
 
-  // Run Claude Code diagnosis
-  const result = await runClaudeDiagnosis(items);
-
-  if (!result.success) {
-    console.error('[Fix] Claude Code diagnosis failed:', result.error);
-
-    // Create failed diagnoses for all items
-    const diagnoses: FixDiagnosis[] = items.map((item) => ({
-      context: item,
-      rootCause: `Diagnosis failed: ${result.error}`,
-      filesModified: [],
-      fixApplied: false,
-      diagnosedAt: new Date().toISOString(),
-    }));
-
-    const historyEntry: FixHistoryEntry = {
+  if (!('parsed' in providerResult)) {
+    const failedEntry: FixHistoryEntry = {
       batchId,
       itemCount: items.length,
-      diagnoses,
+      diagnoses: createFallbackDiagnoses(
+        items,
+        `Provider diagnosis failed: ${providerResult.error}`
+      ),
+      summary: providerResult.error,
       totalFilesModified: 0,
       successfulVerifications: 0,
+      gateStatus: 'failed',
+      gateReason: providerResult.error,
       startedAt,
       completedAt: new Date().toISOString(),
     };
 
-    await saveFixHistory(historyEntry);
-    await sendFixDiagnosisNotification(historyEntry);
-
-    return historyEntry;
+    await saveFixHistory(failedEntry);
+    await updateLedgerForBatch(failedEntry);
+    await sendFixDiagnosisNotification(failedEntry);
+    return failedEntry;
   }
 
-  // Parse Claude's output
-  const parsed = parseClaudeOutput(result.output);
+  const diagnosisByUrl = new Map(
+    providerResult.parsed.diagnoses.map((d) => [d.url, d] as const)
+  );
 
-  if (!parsed) {
-    console.error('[Fix] Failed to parse Claude output');
-
-    const diagnoses: FixDiagnosis[] = items.map((item) => ({
-      context: item,
-      rootCause: 'Failed to parse diagnosis output',
-      filesModified: [],
-      fixApplied: false,
-      diagnosedAt: new Date().toISOString(),
-    }));
-
-    const historyEntry: FixHistoryEntry = {
-      batchId,
-      itemCount: items.length,
-      diagnoses,
-      totalFilesModified: 0,
-      successfulVerifications: 0,
-      startedAt,
-      completedAt: new Date().toISOString(),
-    };
-
-    await saveFixHistory(historyEntry);
-    await sendFixDiagnosisNotification(historyEntry);
-
-    return historyEntry;
-  }
-
-  // Map parsed diagnoses back to original items
-  const diagnoses: FixDiagnosis[] = [];
-  let totalFilesModified = 0;
-  let successfulVerifications = 0;
-
-  for (const item of items) {
-    // Find matching diagnosis from Claude's output
-    const claudeDiagnosis = parsed.diagnoses.find(
-      (d) => d.url === item.url
-    );
-
-    if (claudeDiagnosis) {
-      const diagnosis: FixDiagnosis = {
+  const diagnoses: FixDiagnosis[] = items.map((item) => {
+    const providerDiagnosis = diagnosisByUrl.get(item.url);
+    if (!providerDiagnosis) {
+      return {
         context: item,
-        rootCause: claudeDiagnosis.rootCause,
-        suggestedFix: claudeDiagnosis.suggestedFix,
-        filesModified: claudeDiagnosis.filesModified || [],
-        fixApplied: claudeDiagnosis.fixApplied || false,
-        diagnosedAt: new Date().toISOString(),
-      };
-
-      totalFilesModified += diagnosis.filesModified.length;
-
-      // If a fix was applied, submit URL for verification
-      if (diagnosis.fixApplied) {
-        const verifyResult = await submitForVerification(item.url);
-
-        if ('jobId' in verifyResult) {
-          diagnosis.verification = {
-            success: true,
-            newJobId: verifyResult.jobId,
-          };
-          successfulVerifications++;
-        } else {
-          diagnosis.verification = {
-            success: false,
-            error: verifyResult.error,
-          };
-        }
-      }
-
-      diagnoses.push(diagnosis);
-    } else {
-      // No diagnosis found for this item
-      diagnoses.push({
-        context: item,
-        rootCause: 'No diagnosis provided by Claude',
+        rootCause: 'No diagnosis provided for URL',
         filesModified: [],
         fixApplied: false,
+        provider: providerResult.provider,
         diagnosedAt: new Date().toISOString(),
-      });
+      };
+    }
+
+    return {
+      context: item,
+      rootCause: providerDiagnosis.rootCause,
+      suggestedFix: providerDiagnosis.suggestedFix,
+      filesModified: providerDiagnosis.filesModified,
+      fixApplied: providerDiagnosis.fixApplied,
+      provider: providerResult.provider,
+      diagnosedAt: new Date().toISOString(),
+    };
+  });
+
+  const fixAppliedDiagnoses = diagnoses.filter((d) => d.fixApplied);
+  const allowedWorkingChanges = await getAllowedWorkingTreeChanges();
+  const totalFilesModified = diagnoses.reduce((acc, d) => acc + d.filesModified.length, 0);
+
+  let gateStatus: FixGateStatus = 'diagnosed';
+  let gateReason: string | undefined;
+  let branchName: string | undefined;
+  let commitSha: string | undefined;
+  let applyCommand: string | undefined;
+  let verificationJobs: string[] = [];
+  let successfulVerifications = 0;
+
+  const shouldPreparePatch = fixAppliedDiagnoses.length > 0 || allowedWorkingChanges.length > 0;
+
+  if (shouldPreparePatch) {
+    gateStatus = 'patched';
+
+    const branchResult = await preparePatchBranch({
+      batchId,
+      provider: providerResult.provider,
+    });
+
+    if (!branchResult.success) {
+      gateStatus = 'rejected';
+      gateReason = branchResult.error || 'patch_branch_prep_failed';
+    } else {
+      branchName = branchResult.branchName;
+      commitSha = branchResult.commitSha;
+      applyCommand = branchResult.applyCommand;
+      gateStatus = 'verifying';
+
+      const buildResult = await buildGate();
+      if (!buildResult.passed) {
+        gateStatus = 'rejected';
+        gateReason = buildResult.error || 'build_failed';
+
+        for (const diagnosis of fixAppliedDiagnoses) {
+          diagnosis.verification = {
+            success: false,
+            buildPassed: false,
+            replayPassed: false,
+            error: gateReason,
+          };
+        }
+      } else {
+        const replayTargetUrls = fixAppliedDiagnoses.length > 0
+          ? fixAppliedDiagnoses.map((d) => d.context.url)
+          : diagnoses.map((d) => d.context.url);
+        const replayResult = await runReplayGate(replayTargetUrls);
+        verificationJobs = replayResult.jobIds;
+        successfulVerifications = replayResult.successful;
+
+        for (const diagnosis of fixAppliedDiagnoses) {
+          diagnosis.verification = {
+            success: replayResult.passed,
+            buildPassed: true,
+            replayPassed: replayResult.passed,
+            newJobIds: replayResult.jobIds,
+            error: replayResult.passed ? undefined : replayResult.errors.join('; '),
+          };
+        }
+
+        if (replayResult.passed) {
+          gateStatus = 'ready';
+        } else {
+          gateStatus = 'rejected';
+          gateReason = replayResult.errors.join('; ');
+        }
+      }
     }
   }
 
-  // Create history entry
   const historyEntry: FixHistoryEntry = {
     batchId,
     itemCount: items.length,
     diagnoses,
+    summary: providerResult.parsed.summary,
+    provider: providerResult.provider,
+    providerFallbackUsed: providerResult.fallbackUsed,
     totalFilesModified,
     successfulVerifications,
+    gateStatus,
+    gateReason,
+    branchName,
+    commitSha,
+    applyCommand,
+    verificationJobs,
     startedAt,
     completedAt: new Date().toISOString(),
   };
 
-  // Save to history
   await saveFixHistory(historyEntry);
-
-  // Send Discord notification
+  await updateLedgerForBatch(historyEntry);
   await sendFixDiagnosisNotification(historyEntry);
 
-  console.log(`[Fix] Completed batch ${batchId}: ${items.length} items, ${totalFilesModified} files modified`);
+  console.log(
+    `[Fix] Completed batch ${batchId}: ${items.length} items, ${totalFilesModified} files modified, gate=${gateStatus}`
+  );
 
   return historyEntry;
 }
 
-/**
- * Create the fix worker
- */
 function createFixWorker(): Worker<FixJobData, FixHistoryEntry> {
   const worker = new Worker<FixJobData, FixHistoryEntry>(
     FIX_QUEUE_NAME,
     processFixJob,
     {
       connection: workerConnection,
-      concurrency: 1,  // Only one diagnosis at a time
+      concurrency: 1,
     }
   );
 
@@ -356,34 +520,17 @@ function createFixWorker(): Worker<FixJobData, FixHistoryEntry> {
   return worker;
 }
 
-/**
- * Start the fix worker
- *
- * Only starts if FIX_ENABLED is true.
- */
 export async function startFixWorker(): Promise<void> {
   if (!env.FIX_ENABLED) {
     console.log('[Fix] Fix worker disabled (FIX_ENABLED=false)');
     return;
   }
 
-  // Check if Claude CLI is available
-  try {
-    const { execSync } = await import('node:child_process');
-    execSync(`${env.CLAUDE_CLI_PATH} --version`, { stdio: 'pipe' });
-  } catch {
-    console.error(`[Fix] Claude CLI not found at ${env.CLAUDE_CLI_PATH}`);
-    console.error('[Fix] Fix worker will not start');
-    return;
-  }
-
+  await conversionQueueEvents.waitUntilReady();
   fixWorkerInstance = createFixWorker();
   console.log(`[Fix] Fix worker started for queue '${FIX_QUEUE_NAME}'`);
 }
 
-/**
- * Stop the fix worker gracefully
- */
 export async function stopFixWorker(): Promise<void> {
   if (isShuttingDown) return;
   isShuttingDown = true;
@@ -392,5 +539,11 @@ export async function stopFixWorker(): Promise<void> {
     console.log('[Fix] Stopping fix worker...');
     await fixWorkerInstance.close();
     console.log('[Fix] Fix worker stopped');
+  }
+
+  try {
+    await conversionQueueEvents.close();
+  } catch {
+    // Ignore close errors.
   }
 }

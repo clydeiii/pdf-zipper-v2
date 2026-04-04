@@ -13,11 +13,14 @@ import { PDFDocument } from 'pdf-lib';
 import { env } from '../../config/env.js';
 import { conversionQueue } from '../../queues/conversion.queue.js';
 import { getISOWeekNumber } from '../../media/organization.js';
-import { addPendingFixes, getFixHistory, getPendingCount } from '../../fix/pending.js';
+import { addPendingFixes, getFixBatch, getFixHistory, getPendingCount, updateFixBatch } from '../../fix/pending.js';
+import { getFixLedgerEntry, isInCooldown, updateFixOutcome } from '../../fix/ledger.js';
+import { classifyFailureMessage } from '../../fix/failure.js';
 import { notifyFixSubmitted } from '../../notifications/discord.js';
+import { requireApiToken } from '../auth.js';
+import { resolveWithinRoot } from '../../utils/paths.js';
 import type {
   FixJobContext,
-  FixRequestType,
   FixSubmitRequest,
   FixSubmitResponse,
   FixHistoryResponse,
@@ -57,7 +60,7 @@ async function extractUrlFromPdf(pdfPath: string): Promise<string | null> {
  * - 400 Bad Request if items array is missing or empty
  * - 503 Service Unavailable if fix feature is disabled
  */
-fixRouter.post('/submit', async (req: Request, res: Response): Promise<void> => {
+fixRouter.post('/submit', requireApiToken, async (req: Request, res: Response): Promise<void> => {
   // Check if fix feature is enabled
   if (!env.FIX_ENABLED) {
     res.status(503).json({
@@ -66,7 +69,12 @@ fixRouter.post('/submit', async (req: Request, res: Response): Promise<void> => 
     return;
   }
 
-  const { items } = req.body as FixSubmitRequest;
+  const {
+    items,
+    overrideCooldown: globalOverrideCooldown,
+    overrideReason: globalOverrideReason,
+    forceProvider: globalForceProvider,
+  } = req.body as FixSubmitRequest;
 
   if (!items || !Array.isArray(items) || items.length === 0) {
     res.status(400).json({
@@ -84,10 +92,10 @@ fixRouter.post('/submit', async (req: Request, res: Response): Promise<void> => 
 
       // Case 1: PDF file path provided (false positive)
       if (item.path && item.path.endsWith('.pdf')) {
-        const fullPath = path.resolve(dataDir, item.path);
+        const fullPath = resolveWithinRoot(dataDir, item.path);
 
         // Security check - must be within DATA_DIR
-        if (!fullPath.startsWith(dataDir)) {
+        if (!fullPath) {
           console.warn(`Fix rejected - path outside DATA_DIR: ${item.path}`);
           continue;
         }
@@ -111,6 +119,11 @@ fixRouter.post('/submit', async (req: Request, res: Response): Promise<void> => 
           pdfPath: fullPath,
           weekId,
           requestedAt: new Date().toISOString(),
+          requestedBy: 'manual',
+          overrideCooldown: item.overrideCooldown ?? globalOverrideCooldown,
+          overrideReason: item.overrideReason || globalOverrideReason,
+          forceProvider: item.forceProvider || globalForceProvider,
+          failureClass: 'quality_false_positive_suspected',
         };
 
         // Try to get quality info from BullMQ if job is still available
@@ -158,6 +171,11 @@ fixRouter.post('/submit', async (req: Request, res: Response): Promise<void> => 
           failureReason,
           weekId,
           requestedAt: new Date().toISOString(),
+          requestedBy: 'manual',
+          overrideCooldown: item.overrideCooldown ?? globalOverrideCooldown,
+          overrideReason: item.overrideReason || globalOverrideReason,
+          forceProvider: item.forceProvider || globalForceProvider,
+          failureClass: classifyFailureMessage(failureReason),
         };
       }
 
@@ -292,6 +310,7 @@ fixRouter.get('/status', async (_req: Request, res: Response): Promise<void> => 
     res.json({
       enabled: env.FIX_ENABLED,
       claudeCliPath: env.CLAUDE_CLI_PATH,
+      codexCliPath: env.CODEX_CLI_PATH,
       pending,
     });
   } catch (error) {
@@ -302,6 +321,158 @@ fixRouter.get('/status', async (_req: Request, res: Response): Promise<void> => 
 
     res.status(500).json({
       error: 'Failed to get fix status',
+    });
+  }
+});
+
+/**
+ * GET /ledger?url=... - View retry-memory ledger state for a URL
+ */
+fixRouter.get('/ledger', async (req: Request, res: Response): Promise<void> => {
+  const url = req.query.url as string | undefined;
+  if (!url) {
+    res.status(400).json({
+      error: 'url query parameter is required',
+    });
+    return;
+  }
+
+  try {
+    const [entry, cooldown] = await Promise.all([
+      getFixLedgerEntry(url),
+      isInCooldown(url),
+    ]);
+
+    res.json({
+      url,
+      entry,
+      cooldown,
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
+/**
+ * GET /batches/:batchId - Get a single fix batch
+ */
+fixRouter.get('/batches/:batchId', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const batch = await getFixBatch(req.params.batchId);
+    if (!batch) {
+      res.status(404).json({ error: 'Batch not found' });
+      return;
+    }
+    res.json(batch);
+  } catch (error) {
+    res.status(500).json({
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
+/**
+ * POST /batches/:batchId/reverify - Queue targeted replay checks
+ */
+fixRouter.post('/batches/:batchId/reverify', requireApiToken, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const batch = await getFixBatch(req.params.batchId);
+    if (!batch) {
+      res.status(404).json({ error: 'Batch not found' });
+      return;
+    }
+
+    const urls = Array.from(new Set(
+      batch.diagnoses.filter((d) => d.fixApplied).map((d) => d.context.url)
+    ));
+
+    if (urls.length === 0) {
+      res.status(400).json({
+        error: 'Batch has no fix-applied items to reverify',
+      });
+      return;
+    }
+
+    const jobs = [];
+    for (const url of urls) {
+      const job = await conversionQueue.add('convert-url', {
+        url,
+        originalUrl: url,
+      });
+      jobs.push({ url, jobId: job.id });
+    }
+
+    batch.gateStatus = 'verifying';
+    batch.gateReason = undefined;
+    batch.verificationJobs = jobs.map((j) => j.jobId!).filter(Boolean);
+    await updateFixBatch(batch);
+
+    res.json({
+      batchId: batch.batchId,
+      queued: jobs.length,
+      jobs,
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
+
+/**
+ * POST /batches/:batchId/apply - Mark a ready batch as applied
+ */
+fixRouter.post('/batches/:batchId/apply', requireApiToken, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const batch = await getFixBatch(req.params.batchId);
+    if (!batch) {
+      res.status(404).json({ error: 'Batch not found' });
+      return;
+    }
+
+    if (batch.gateStatus !== 'ready') {
+      res.status(400).json({
+        error: `Batch is not ready (current state: ${batch.gateStatus})`,
+      });
+      return;
+    }
+
+    const appliedBy = req.header('x-operator') || 'operator';
+    const appliedAt = new Date().toISOString();
+
+    batch.gateStatus = 'applied';
+    batch.appliedAt = appliedAt;
+    batch.appliedBy = appliedBy;
+
+    await updateFixBatch(batch);
+
+    await Promise.all(
+      batch.diagnoses.map((diagnosis) =>
+        updateFixOutcome({
+          url: diagnosis.context.url,
+          outcome: 'applied',
+          provider: diagnosis.provider,
+          batchId: batch.batchId,
+          failureClass: diagnosis.context.failureClass,
+          details: { appliedAt, appliedBy },
+        })
+      )
+    );
+
+    res.json({
+      batchId: batch.batchId,
+      gateStatus: batch.gateStatus,
+      branchName: batch.branchName,
+      commitSha: batch.commitSha,
+      applyCommand: batch.applyCommand,
+      appliedAt,
+      appliedBy,
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: error instanceof Error ? error.message : String(error),
     });
   }
 });

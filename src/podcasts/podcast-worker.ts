@@ -23,6 +23,8 @@ import { getWeeklyBinPath, ensureWeeklyBinExists } from '../media/organization.j
 import { env } from '../config/env.js';
 import { sendDiscordNotification } from '../notifications/discord.js';
 import type { PodcastJobData, PodcastJobResult, PodcastMetadata } from './types.js';
+import { writeAudioMetadata } from '../metadata/audio-tags.js';
+import { enrichDocumentMetadata } from '../metadata/enrichment.js';
 
 // Sanitize filename helper
 import { createRequire } from 'node:module';
@@ -72,12 +74,18 @@ function buildWhisperHints(metadata: PodcastMetadata): string | null {
 function getPodcastBaseFilename(metadata: PodcastMetadata): string {
   const podcastSlug = sanitizeFilename(metadata.podcastName)
     .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, '')
     .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
     .substring(0, 30);
 
   const episodeSlug = sanitizeFilename(metadata.episodeTitle)
     .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, '')
     .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
     .substring(0, 50);
 
   return `${podcastSlug}-${episodeSlug}`;
@@ -203,6 +211,37 @@ export async function startPodcastWorker(): Promise<void> {
         // Copy audio file to archive (then cleanup temp)
         await copyFile(tempAudioPath, audioPath);
         await unlink(tempAudioPath);
+
+        // Step 6: Enrich metadata using AI + write to audio file + generate .md companion
+        await job.updateProgress(95);
+        await job.log('Enriching metadata and writing tags...');
+
+        let summary: string | undefined;
+        let tags: string[] | undefined;
+        try {
+          // Use AI to extract summary/tags from transcript
+          const enriched = await enrichDocumentMetadata(
+            formattedTranscript.text.slice(0, 8000),
+            metadata.episodeUrl,
+            metadata.episodeTitle
+          );
+          summary = enriched.summary;
+          tags = enriched.tags;
+
+          // Write ID3 tags to MP3 (includes full transcript in USLT lyrics frame)
+          writeAudioMetadata(audioPath, {
+            podcastMetadata: metadata,
+            summary,
+            tags,
+            transcriptLength: formattedTranscript.text.length,
+            transcriptText: formattedTranscript.text,
+          });
+
+          await job.log(`Metadata enriched: [${tags?.join(', ')}]`);
+        } catch (error) {
+          // Non-fatal: continue without enrichment
+          console.warn('Podcast metadata enrichment failed:', error instanceof Error ? error.message : error);
+        }
 
         const totalTime = Date.now() - startTime;
 

@@ -12,6 +12,7 @@ import { writeFile, mkdir, unlink } from 'node:fs/promises';
 import * as path from 'node:path';
 import { createRequire } from 'node:module';
 import { PDFDocument } from 'pdf-lib';
+import { setInfoDictFields } from '../utils/pdf-info-dict.js';
 import { workerConnection } from '../config/redis.js';
 import { QUEUE_NAME } from '../queues/conversion.queue.js';
 import { env } from '../config/env.js';
@@ -23,6 +24,12 @@ import { scoreScreenshotQuality } from '../quality/scorer.js';
 import { analyzePdfContent } from '../quality/pdf-content.js';
 import { getISOWeekNumber } from '../media/organization.js';
 import { notifyJobComplete, notifyJobFailed, isDiscordEnabled } from '../notifications/discord.js';
+import { addPendingFixes } from '../fix/pending.js';
+import { classifyFailureMessage } from '../fix/failure.js';
+import { shouldAutoTriggerFix } from '../fix/trigger-policy.js';
+import { updateFixOutcome } from '../fix/ledger.js';
+import { addJobToWeekIndex } from '../jobs/week-index.js';
+import { enrichDocumentMetadata, type EnrichedMetadata } from '../metadata/enrichment.js';
 
 // Import CommonJS module using require
 const require = createRequire(import.meta.url);
@@ -32,27 +39,59 @@ const sanitizeFilename = require('sanitize-filename') as (input: string) => stri
 let isShuttingDown = false;
 
 /**
- * Embed source URL and metadata in PDF document properties
- * Uses pdf-lib to modify the PDF's metadata fields:
- * - Subject: Original source URL (used for rerun feature)
- * - Producer: pdf-zipper with timestamp
+ * Embed source URL and enriched metadata in PDF document properties.
+ *
+ * Standard PDF Info Dict fields:
+ *   Title, Author, Subject, Keywords, Creator, Producer, CreationDate
+ *
+ * Custom Info Dict fields (via getInfoDict):
+ *   Summary, Language, Publication, PublishDate, Tags, Translation, EnrichedAt
+ *
+ * All metadata lives inside the PDF — no sidecar files.
  */
-async function embedPdfMetadata(pdfBuffer: Buffer, sourceUrl: string, originalUrl?: string): Promise<Buffer> {
+async function embedPdfMetadata(
+  pdfBuffer: Buffer,
+  sourceUrl: string,
+  originalUrl?: string,
+  metadata?: EnrichedMetadata
+): Promise<Buffer> {
   try {
     const pdfDoc = await PDFDocument.load(pdfBuffer);
 
+    // Standard fields from enrichment
+    if (metadata) {
+      if (metadata.title) pdfDoc.setTitle(metadata.title);
+      if (metadata.author) pdfDoc.setAuthor(metadata.author);
+      if (metadata.tags.length > 0) pdfDoc.setKeywords(metadata.tags);
+      if (metadata.publication) pdfDoc.setCreator(`${metadata.publication} via pdf-zipper v2`);
+      if (metadata.publishDate) {
+        const pubDate = new Date(metadata.publishDate);
+        if (!isNaN(pubDate.getTime())) pdfDoc.setCreationDate(pubDate);
+      }
+    }
+
     // Store the original URL (with www preserved) in Subject field for rerun feature
-    // Fall back to sourceUrl if originalUrl not provided
     pdfDoc.setSubject(originalUrl || sourceUrl);
 
     // Add producer info with capture timestamp
     pdfDoc.setProducer(`pdf-zipper v2 - captured ${new Date().toISOString()}`);
 
-    // Save and return modified PDF
+    // Custom fields via Info Dict (for data that doesn't map to standard fields)
+    if (metadata) {
+      setInfoDictFields(pdfDoc, {
+        Summary: metadata.summary,
+        Language: metadata.language,
+        Publication: metadata.publication,
+        PublishDate: metadata.publishDate,
+        Tags: metadata.tags.length > 0 ? metadata.tags.join(', ') : undefined,
+        Translation: metadata.translation,
+        EnrichedAt: new Date().toISOString(),
+      });
+    }
+
     const modifiedPdf = await pdfDoc.save();
     return Buffer.from(modifiedPdf);
   } catch (error) {
-    // If metadata embedding fails, return original PDF
     console.warn(`Failed to embed PDF metadata for ${sourceUrl}:`, error);
     return pdfBuffer;
   }
@@ -150,10 +189,11 @@ async function savePdfToWeeklyBin(
   title?: string,
   bookmarkedAt?: string,
   originalUrl?: string,
-  isXArticle?: boolean
+  isXArticle?: boolean,
+  enrichedMetadata?: EnrichedMetadata
 ): Promise<string> {
-  // Embed source URL in PDF metadata for rerun feature
-  const pdfWithMetadata = await embedPdfMetadata(pdfBuffer, url, originalUrl);
+  // Embed source URL and enriched metadata in PDF
+  const pdfWithMetadata = await embedPdfMetadata(pdfBuffer, url, originalUrl, enrichedMetadata);
 
   // Use bookmarkedAt or current date for week calculation
   const date = bookmarkedAt ? new Date(bookmarkedAt) : new Date();
@@ -223,7 +263,7 @@ async function savePdfToWeeklyBin(
   const filename = `${baseName}.pdf`;
   const filePath = path.join(pdfDir, filename);
 
-  // Write PDF with embedded metadata to disk
+  // Write PDF with all metadata embedded directly
   await writeFile(filePath, pdfWithMetadata);
 
   return filePath;
@@ -290,6 +330,8 @@ async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Pro
   const title = jobTitle || (result.success ? result.pageTitle : undefined);
   // Track if this was an X Article capture (for filename generation)
   const isXArticle = result.success ? result.isXArticle : undefined;
+  // Use expanded URL for filename generation (so t.co links get real domain names)
+  const filenameUrl = (result.success ? result.expandedUrl : undefined) || url;
 
   // Update progress
   await job.updateProgress(50);
@@ -371,10 +413,22 @@ async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Pro
     throw new Error(`truncated: ${contentResult.reason}`);
   }
 
+  // Enrich metadata using AI (after quality checks pass to avoid wasting time on bad PDFs)
+  let enrichedMetadata: EnrichedMetadata | undefined;
+  if (contentResult.extractedText && contentResult.extractedText.length > 100) {
+    try {
+      enrichedMetadata = await enrichDocumentMetadata(contentResult.extractedText, url, title);
+      console.log(`Metadata enriched for ${url}: "${enrichedMetadata.title}" by ${enrichedMetadata.author || 'unknown'} [${enrichedMetadata.language}]`);
+    } catch (error) {
+      console.warn(`Metadata enrichment failed for ${url}:`, error instanceof Error ? error.message : error);
+      // Non-fatal: continue without enrichment
+    }
+  }
+
   await job.updateProgress(90);
 
   // Only save PDF after quality check passes
-  const pdfPath = await savePdfToWeeklyBin(result.pdfBuffer, url, title, bookmarkedAt, originalUrl, isXArticle);
+  const pdfPath = await savePdfToWeeklyBin(result.pdfBuffer, filenameUrl, title, bookmarkedAt, originalUrl, isXArticle, enrichedMetadata);
   console.log(`PDF saved to: ${pdfPath}`);
 
   if (oldFilePath) await deleteOldFileIfDifferent(oldFilePath, pdfPath);
@@ -382,16 +436,65 @@ async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Pro
   // Final progress
   await job.updateProgress(100);
 
-  // Return success result with quality data
+  // Return success result with quality data and enrichment
   return {
     pdfPath,
-
     pdfSize: result.size,
     completedAt: new Date().toISOString(),
     url,
     qualityScore: qualityResult.score.score,
     qualityReasoning: qualityResult.score.reasoning,
+    summary: enrichedMetadata?.summary || undefined,
+    language: enrichedMetadata?.language || undefined,
   };
+}
+
+/**
+ * Auto-submit retryable final failures to the fix diagnosis queue.
+ */
+async function maybeQueueAutoFix(
+  job: Job<ConversionJobData, ConversionJobResult>,
+  error: Error
+): Promise<void> {
+  if (!env.FIX_ENABLED) return;
+
+  const failureClass = classifyFailureMessage(error.message);
+  const decision = shouldAutoTriggerFix(failureClass);
+
+  if (!decision.allowed) {
+    await updateFixOutcome({
+      url: job.data.originalUrl || job.data.url,
+      outcome: 'skipped',
+      failureClass,
+      details: {
+        reason: decision.reason,
+        source: 'conversion_final_failure',
+      },
+    });
+    return;
+  }
+
+  const week = getISOWeekNumber(new Date(job.timestamp));
+  const weekId = `${week.year}-W${week.week.toString().padStart(2, '0')}`;
+  const queued = await addPendingFixes([
+    {
+      originalJobId: job.id!,
+      url: job.data.originalUrl || job.data.url,
+      requestType: 'false_negative',
+      status: 'failed',
+      debugPdfPath: path.join(env.DATA_DIR, 'debug', `${job.id}.pdf`),
+      failureReason: error.message,
+      weekId,
+      requestedAt: new Date().toISOString(),
+      requestedBy: 'automatic',
+      failureClass,
+      triggerReason: decision.reason,
+    },
+  ]);
+
+  if (queued > 0) {
+    console.log(`[Fix] Auto-queued failure for diagnosis: ${job.data.url} (${failureClass})`);
+  }
 }
 
 /**
@@ -420,6 +523,15 @@ conversionWorker.on('active', (job) => {
  */
 conversionWorker.on('completed', async (job: Job<ConversionJobData, ConversionJobResult>) => {
   console.log(`Job ${job.id} completed successfully`);
+
+  const jobWeek = getISOWeekNumber(new Date(job.timestamp));
+  const weekId = `${jobWeek.year}-W${jobWeek.week.toString().padStart(2, '0')}`;
+  await addJobToWeekIndex({
+    weekId,
+    kind: 'completed',
+    jobId: job.id!,
+    scoreTimestampMs: job.finishedOn || Date.now(),
+  });
 
   // Send Discord notification
   const result = job.returnvalue;
@@ -468,6 +580,15 @@ conversionWorker.on('failed', async (job: Job<ConversionJobData, ConversionJobRe
 
   // Send Discord notification (only on final failure, not retries)
   if (job && job.attemptsMade >= (job.opts?.attempts ?? 3)) {
+    const jobWeek = getISOWeekNumber(new Date(job.timestamp));
+    const weekId = `${jobWeek.year}-W${jobWeek.week.toString().padStart(2, '0')}`;
+    await addJobToWeekIndex({
+      weekId,
+      kind: 'failed',
+      jobId: job.id!,
+      scoreTimestampMs: job.finishedOn || Date.now(),
+    });
+
     // Extract failure reason from error message prefix
     const reasonMatch = error.message.match(/^(\w+):/);
     const reason = reasonMatch ? reasonMatch[1] : undefined;
@@ -480,6 +601,13 @@ conversionWorker.on('failed', async (job: Job<ConversionJobData, ConversionJobRe
       attemptsMade: job.attemptsMade,
       maxAttempts: job.opts?.attempts ?? 3,
     });
+
+    // Selective autonomous self-healing trigger (manual Fix Selected still available for all classes)
+    try {
+      await maybeQueueAutoFix(job, error);
+    } catch (autoFixError) {
+      console.error('[Fix] Failed to auto-queue diagnosis:', autoFixError);
+    }
   }
 });
 

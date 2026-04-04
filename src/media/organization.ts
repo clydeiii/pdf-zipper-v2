@@ -107,8 +107,13 @@ export function getMediaFilename(item: MediaItem): string {
     }
   }
 
-  // Sanitize the base name
-  baseName = sanitizeFilename(baseName);
+  // Sanitize the base name: lowercase, strip punctuation, dashes instead of spaces
+  baseName = sanitizeFilename(baseName)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, '')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
 
   // Determine file extension from enclosure MIME type
   let extension = '';

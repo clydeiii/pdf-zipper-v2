@@ -70,6 +70,7 @@ export async function analyzeImageWithOllama(
         images: [imageBase64],
       },
     ],
+    options: { num_ctx: 8192 },
   });
 
   return response.message.content;

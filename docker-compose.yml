@@ -18,9 +18,9 @@ services:
 
       # Ollama (on mac.mini)
       - OLLAMA_HOST=http://mac.mini:11434
-      - OLLAMA_MODEL=gemma3:4b
-      # Use larger model for transcript formatting (better quality)
-      - TRANSCRIPT_FORMAT_MODEL=gemma3:12b
+      - OLLAMA_MODEL=gemma4:e4b
+      # Use larger model for transcript formatting + metadata enrichment
+      - TRANSCRIPT_FORMAT_MODEL=gemma4:26b
 
       # Whisper ASR (on 10.0.0.81, faster_whisper engine)
       - WHISPER_HOST=http://10.0.0.81:9002
@@ -52,6 +52,8 @@ services:
       # AI Self-Healing Fix System
       - FIX_ENABLED=true
       - CLAUDE_CLI_PATH=/home/clyde/.local/share/claude/versions/2.1.27
+      - CODEX_CLI_PATH=codex
+      - FIX_PROVIDER_TIMEOUT_MINUTES=30
       - HOME=/home/clyde
 
     ports:
@@ -63,7 +65,9 @@ services:
       - /home/clyde/.claude:/home/clyde/.claude
       # Project source at same path for Claude Code to edit
       - /home/clyde/pdf-zipper-v2:/home/clyde/pdf-zipper-v2
-    shm_size: "1gb"
+    shm_size: "512m"
+    mem_limit: 1536m
+    memswap_limit: 2048m
     networks:
       - proxy-network
       - default
@@ -72,4 +76,3 @@ services:
 networks:
   proxy-network:
     external: true
-

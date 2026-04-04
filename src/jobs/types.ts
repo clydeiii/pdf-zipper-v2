@@ -53,6 +53,10 @@ export interface ConversionJobResult {
   qualityReasoning?: string;
   /** If quality check failed, the issue type */
   qualityIssue?: QualityIssue;
+  /** AI-generated document summary */
+  summary?: string;
+  /** Detected document language (ISO 639-1) */
+  language?: string;
 }
 
 /**
