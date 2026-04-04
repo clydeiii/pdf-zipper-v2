@@ -272,6 +272,14 @@ tbody tr.failed:hover {
   background: #e9ecef;
 }
 
+/* Checkboxes — larger hit target for easier clicking */
+input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: #007bff;
+}
+
 /* Column widths */
 .col-checkbox {
   width: 50px;
@@ -754,4 +762,30 @@ footer {
   border-radius: 3px;
   font-size: 0.9em;
   margin: 1px 2px;
+}
+
+/* "New since export" indicators */
+.badge-new {
+  display: inline-block;
+  padding: 1px 5px;
+  background: #28a745;
+  color: white;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  vertical-align: middle;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+tbody tr.new-since-export {
+  border-left: 3px solid #28a745;
+}
+
+/* Export status in filter bar */
+.export-status {
+  color: #6c757d;
+  font-size: 0.85rem;
+  margin-left: auto;
+  white-space: nowrap;
 }

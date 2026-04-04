@@ -11,6 +11,23 @@ let currentFilter = '';   // Current filter string
 let filterDebounceTimer = null;
 let apiToken = localStorage.getItem('pdfzipperApiToken') || '';
 
+// Export tracking — remembers last ZIP download per week
+function getLastExportTime(weekId) {
+  const exports = JSON.parse(localStorage.getItem('pdfzipperExports') || '{}');
+  return exports[weekId] || null;
+}
+function setLastExportTime(weekId, isoDate) {
+  const exports = JSON.parse(localStorage.getItem('pdfzipperExports') || '{}');
+  exports[weekId] = isoDate;
+  localStorage.setItem('pdfzipperExports', JSON.stringify(exports));
+}
+function isNewSinceExport(item) {
+  if (!currentWeekId) return false;
+  const lastExport = getLastExportTime(currentWeekId);
+  if (!lastExport) return true; // Never exported = everything is new
+  return new Date(item.modified) > new Date(lastExport);
+}
+
 // DOM elements
 const weeksView = document.getElementById('weeks-view');
 const filesView = document.getElementById('files-view');
@@ -30,6 +47,8 @@ const filterClear = document.getElementById('filter-clear');
 const filterStatus = document.getElementById('filter-status');
 const fixCenterButton = document.getElementById('fix-center-btn');
 const apiTokenButton = document.getElementById('api-token-btn');
+const selectNewButton = document.getElementById('select-new-button');
+const exportStatus = document.getElementById('export-status');
 
 // Initialize app on page load
 document.addEventListener('DOMContentLoaded', () => {
@@ -50,6 +69,7 @@ function setupEventListeners() {
   fixButton.addEventListener('click', fixSelected);
   filterInput.addEventListener('input', handleFilterInput);
   filterClear.addEventListener('click', clearFilter);
+  selectNewButton.addEventListener('click', selectNewSinceExport);
   if (fixCenterButton) {
     fixCenterButton.addEventListener('click', openFixCenterModal);
   }
@@ -218,8 +238,13 @@ function renderFileRow(file, index) {
     }
   }
 
+  // "New since export" indicator
+  const isNew = isNewSinceExport(file);
+  const newBadge = isNew ? '<span class="badge-new" title="New since last export">new</span> ' : '';
+  const rowClass = isNew ? ' class="new-since-export"' : '';
+
   return `
-    <tr>
+    <tr${rowClass}>
       <td class="col-checkbox">
         <input
           type="checkbox"
@@ -229,7 +254,7 @@ function renderFileRow(file, index) {
         >
       </td>
       <td class="col-name">
-        <a href="${escapeHtml(fileUrl)}" target="_blank" class="file-link">${escapeHtml(file.name)}</a>${sourceLink}${relatedLink}${metaLine}
+        ${newBadge}<a href="${escapeHtml(fileUrl)}" target="_blank" class="file-link">${escapeHtml(file.name)}</a>${sourceLink}${relatedLink}${metaLine}
       </td>
       <td class="col-type">${typeBadge}</td>
       <td class="col-size">${formatFileSize(file.size)}</td>
@@ -466,9 +491,10 @@ function renderFilteredItems() {
     filterStatus.textContent = '';
   }
 
-  // Update checkbox states
+  // Update checkbox states and export info
   updateSelectAllState();
   updateDownloadButtonState();
+  updateExportStatus();
 }
 
 /**
@@ -507,6 +533,72 @@ function updateDownloadButtonState() {
 }
 
 /**
+ * Select all files that are new since the last ZIP export for this week
+ */
+function selectNewSinceExport() {
+  const lastExport = getLastExportTime(currentWeekId);
+  const filtered = getFilteredItems();
+  let count = 0;
+
+  // Clear current selection first
+  selectedFiles.clear();
+
+  filtered.forEach((item, index) => {
+    const isNew = !lastExport || new Date(item.modified) > new Date(lastExport);
+    if (isNew && !item.isFailed) {
+      const key = item.path || item.url;
+      selectedFiles.add(key);
+      count++;
+    }
+  });
+
+  restoreSelectionState();
+  updateSelectAllState();
+  updateDownloadButtonState();
+
+  if (count === 0) {
+    showStatus('No new files since last export', 'info');
+  } else {
+    showStatus(`Selected ${count} new file${count !== 1 ? 's' : ''} since last export`, 'success');
+  }
+}
+
+/**
+ * Update the export status display showing when the last export was
+ */
+function updateExportStatus() {
+  if (!exportStatus || !currentWeekId) return;
+  const lastExport = getLastExportTime(currentWeekId);
+  if (lastExport) {
+    const date = new Date(lastExport);
+    const relative = getRelativeTime(date);
+    exportStatus.textContent = `Last export: ${relative}`;
+    exportStatus.title = date.toLocaleString();
+  } else {
+    exportStatus.textContent = 'Never exported';
+    exportStatus.title = '';
+  }
+}
+
+/**
+ * Get a human-readable relative time string
+ */
+function getRelativeTime(date) {
+  const now = new Date();
+  const diffMs = now - date;
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMs / 3600000);
+  const diffDays = Math.floor(diffMs / 86400000);
+
+  if (diffMins < 1) return 'just now';
+  if (diffMins < 60) return `${diffMins}m ago`;
+  if (diffHours < 24) return `${diffHours}h ago`;
+  if (diffDays === 1) return 'yesterday';
+  if (diffDays < 7) return `${diffDays}d ago`;
+  return date.toLocaleDateString();
+}
+
+/**
  * Download selected files as ZIP
  *
  * Uses a hidden form POST to trigger download. This approach works
@@ -522,6 +614,14 @@ function downloadSelected() {
   if (filePaths.length === 0) {
     showStatus('No downloadable files selected (failed items have no file)', 'error');
     return;
+  }
+
+  // Record export timestamp for this week
+  if (currentWeekId) {
+    setLastExportTime(currentWeekId, new Date().toISOString());
+    updateExportStatus();
+    // Re-render to update "new" indicators
+    renderFilteredItems();
   }
 
   showStatus('Starting download...', 'info');
