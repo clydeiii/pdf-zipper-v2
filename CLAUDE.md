@@ -501,12 +501,32 @@ infoDict.set(PDFName.of('Summary'), PDFHexString.fromText(summary));
 - **.md companion files:** NOT generated here — consuming system handles wiki generation from the enriched files
 All metadata is designed for extraction by `grep`, `ffprobe`, `pdf-lib`, or `node-id3` from another system.
 
+**50. ArXiv Abstract → PDF Rewrite**
+**Problem:** Bookmarking `arxiv.org/abs/2506.12345` captured the abstract HTML page, not the research paper PDF
+**Solution:** `isPdfUrl()` now detects `/abs/` and `/html/` arxiv paths. New `rewriteToPdfUrl()` converts them to `/pdf/` before pass-through download.
+**Files:** `src/converters/pdf.ts` (isPdfUrl, rewriteToPdfUrl), `src/workers/conversion.worker.ts`
+
+**51. PDF Pass-Through and Karakeep PDF Asset Enrichment**
+**Problem:** Direct PDF downloads (arxiv, .pdf URLs) and Karakeep PDF assets were saved without metadata enrichment
+**Cause:** Pass-through path skipped quality checks AND enrichment; collection worker only enriched videos
+**Solution:**
+1. Pass-through PDFs: extract text via `analyzePdfContent()`, run `enrichDocumentMetadata()`, embed in Info Dict
+2. Karakeep PDF assets: same enrichment pipeline added to `collection-worker.ts` after download
+**Result:** All three PDF paths (conversion, pass-through, Karakeep asset) now produce Karpathy-compliant PDFs
+**Files:** `src/workers/conversion.worker.ts`, `src/media/collection-worker.ts`
+
+**52. Shared PDF Info Dict Helper**
+**Problem:** `(pdfDoc as any).getInfoDict()` cast duplicated in 3 files
+**Solution:** Extracted `setInfoDictFields()`, `setInfoDictField()`, `readInfoDictField()` to `src/utils/pdf-info-dict.ts`
+**Files:** `src/utils/pdf-info-dict.ts` (new), `src/workers/conversion.worker.ts`, `src/metadata/transcript-pdf.ts`, `src/api/routes/files.ts`
+
 ## Common Commands (Development)
 
 ```bash
 # Development (non-Docker)
 npm run dev          # Start with hot reload
 npm run build        # TypeScript compile
+npm test             # Build + run all unit tests (53 tests)
 
 # Server runs on port 3002
 # Bull Board: http://localhost:3002/admin/queues
