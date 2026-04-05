@@ -65,6 +65,78 @@
   }
 
   // ============================================================
+  // Selection handling — when user has text selected, we capture only
+  // that portion by hiding every DOM node outside the selection's
+  // common-ancestor lineage. The selection HTML is also used directly
+  // for Markdown extraction (no Readability — keep exactly what the
+  // user highlighted).
+  // ============================================================
+  const selectionHiddenElements = [];
+
+  function getSelectionRange() {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null;
+    const range = sel.getRangeAt(0);
+    if (range.toString().trim().length < 3) return null; // ignore trivial/accidental selections
+    return range;
+  }
+
+  /**
+   * Walk up from the selection's common ancestor, hiding every sibling
+   * at each level. Result: only the subtree containing the selection
+   * stays visible for printToPDF.
+   */
+  function hideOutsideSelection(range) {
+    let container = range.commonAncestorContainer;
+    if (container.nodeType === Node.TEXT_NODE) container = container.parentElement;
+    if (!container || !container.parentElement) return false;
+
+    selectionHiddenElements.length = 0;
+    let node = container;
+    while (node && node.parentElement && node !== document.documentElement) {
+      const parent = node.parentElement;
+      for (let i = 0; i < parent.children.length; i++) {
+        const sibling = parent.children[i];
+        if (sibling !== node && !sibling.classList.contains('pdfzipper-hide')) {
+          sibling.classList.add('pdfzipper-hide');
+          selectionHiddenElements.push(sibling);
+        }
+      }
+      node = parent;
+    }
+    return true;
+  }
+
+  function restoreOutsideSelection() {
+    for (const el of selectionHiddenElements) {
+      el.classList.remove('pdfzipper-hide');
+    }
+    selectionHiddenElements.length = 0;
+  }
+
+  /** Turn a selection range into clean Markdown via Turndown (no Readability). */
+  function selectionToMarkdown(range) {
+    if (typeof TurndownService === 'undefined') return null;
+    try {
+      const fragment = range.cloneContents();
+      const wrapper = document.createElement('div');
+      wrapper.appendChild(fragment);
+      const td = new TurndownService({
+        headingStyle: 'atx',
+        codeBlockStyle: 'fenced',
+        bulletListMarker: '-',
+        emDelimiter: '_',
+        strongDelimiter: '**',
+      });
+      td.addRule('lineBreak', { filter: 'br', replacement: () => '  \n' });
+      return td.turndown(wrapper.innerHTML);
+    } catch (e) {
+      console.warn('[pdfzipper] selectionToMarkdown failed:', e);
+      return null;
+    }
+  }
+
+  // ============================================================
   // Floating element cleanup (marks for CSS to hide)
   // ============================================================
   const markedElements = [];
@@ -156,6 +228,29 @@
   // ============================================================
   function prepareCapture() {
     document.documentElement.classList.add('pdfzipper-capturing');
+
+    // Selection path: user highlighted some text → capture ONLY that
+    const selRange = getSelectionRange();
+    if (selRange) {
+      const hidOk = hideOutsideSelection(selRange);
+      if (hidOk) {
+        const selMarkdown = selectionToMarkdown(selRange);
+        const selText = selRange.toString().trim();
+        // Don't hide floating elements — in selection mode, outside-selection is already hidden
+        return {
+          url: location.href,
+          title: getBestTitle(),
+          originalUrl: getOriginalUrl(),
+          markdown: selMarkdown,
+          readability: null,
+          captureScope: 'selection',
+          selectionChars: selText.length,
+          selectionPreview: selText.slice(0, 120),
+        };
+      }
+    }
+
+    // Full-page path
     hideFloatingElements();
     const { markdown, readability } = extractMarkdown();
     return {
@@ -164,10 +259,12 @@
       originalUrl: getOriginalUrl(),
       markdown,
       readability,
+      captureScope: 'page',
     };
   }
 
   function finishCapture() {
+    restoreOutsideSelection();
     restoreFloatingElements();
     document.documentElement.classList.remove('pdfzipper-capturing');
   }

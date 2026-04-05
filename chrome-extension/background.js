@@ -21,6 +21,31 @@
 const SERVER_ENDPOINT = 'https://pdf.clydeplex.com/api/manual-capture';
 
 // ============================================================
+// Context menu registration
+// ============================================================
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({
+      id: 'pdfzipper-capture-page',
+      title: 'Capture page to PDF Zipper',
+      contexts: ['page', 'frame'],
+    });
+    chrome.contextMenus.create({
+      id: 'pdfzipper-capture-selection',
+      title: 'Capture selection to PDF Zipper',
+      contexts: ['selection'],
+    });
+  });
+});
+
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (!tab) return;
+  if (info.menuItemId === 'pdfzipper-capture-page' || info.menuItemId === 'pdfzipper-capture-selection') {
+    captureTab(tab);
+  }
+});
+
+// ============================================================
 // Toolbar click handler + keyboard shortcut
 // ============================================================
 chrome.action.onClicked.addListener((tab) => captureTab(tab));
@@ -34,7 +59,13 @@ chrome.commands.onCommand.addListener(async (command) => {
 async function captureTab(tab) {
   if (!tab.id) return;
   const tabUrl = tab.url || '';
-  console.log('[pdfzipper v3.1.0] captureTab called. tab.url =', JSON.stringify(tabUrl), 'tab.id =', tab.id);
+  console.log('[pdfzipper v3.2.1] captureTab called. tab.url =', JSON.stringify(tabUrl), 'tab.id =', tab.id);
+
+  // Clear any stale badge from the previous capture before we start.
+  // (MV3 service worker termination can strand setTimeout-based clears,
+  // so we don't rely on scheduled clears — clear at next click instead.)
+  chrome.action.setBadgeText({ text: '' }).catch(() => {});
+  chrome.action.setTitle({ title: 'Capture to PDF Zipper (Alt+Shift+Z)' }).catch(() => {});
 
   // Only http/https pages can be captured. chrome://, chrome-extension://, about:,
   // view-source:, file:, devtools:, etc. all fail when injecting content scripts.
@@ -118,6 +149,9 @@ async function captureTab(tab) {
       pdfBase64: pdfResult.data,
       markdown: pageInfo.markdown || undefined,
       readability: pageInfo.readability || undefined,
+      captureScope: pageInfo.captureScope || 'page',
+      selectionChars: pageInfo.selectionChars,
+      selectionPreview: pageInfo.selectionPreview,
       extensionVersion: chrome.runtime.getManifest().version,
     });
 
@@ -129,9 +163,12 @@ async function captureTab(tab) {
       const lang = uploadResult.metadata?.language && uploadResult.metadata.language !== 'en'
         ? ` [${uploadResult.metadata.language}]`
         : '';
+      const scope = pageInfo.captureScope === 'selection'
+        ? ` · selection (${pageInfo.selectionChars} chars)`
+        : '';
       await notify(
         'PDF Zipper: saved ✓',
-        `${uploadResult.filename}${lang}${removed}`,
+        `${uploadResult.filename}${lang}${scope}${removed}`,
         'success'
       );
     } else {
@@ -264,27 +301,20 @@ async function setBadgeTitle(title) {
   try { await chrome.action.setTitle({ title }); } catch (e) { /* ignore */ }
 }
 
-async function clearBadgeAfter(ms) {
-  setTimeout(() => {
-    chrome.action.setBadgeText({ text: '' }).catch(() => {});
-    chrome.action.setTitle({ title: 'Capture to PDF Zipper' }).catch(() => {});
-  }, ms);
-}
-
 async function notify(title, message, kind = 'info') {
   // Log loudly — user can always check service worker console
   const prefix = kind === 'error' ? '[pdfzipper ERROR]' : kind === 'success' ? '[pdfzipper OK]' : '[pdfzipper]';
   console.log(`${prefix} ${title}: ${message}`);
 
-  // Badge indicator (always visible on toolbar)
+  // Badge indicator. Persists until next capture starts (clears on next click).
+  // MV3 service worker termination makes setTimeout-based clears unreliable,
+  // so we don't schedule fades — each new capture wipes the previous badge.
   if (kind === 'success') {
     await setBadge('✓', '#22c55e');
     await setBadgeTitle(`${title} — ${message}`);
-    clearBadgeAfter(5000);
   } else if (kind === 'error') {
     await setBadge('!', '#ef4444');
     await setBadgeTitle(`${title} — ${message}`);
-    clearBadgeAfter(15000);
   } else if (kind === 'progress') {
     await setBadge('…', '#3b82f6');
     await setBadgeTitle(`${title} — ${message}`);

@@ -51,8 +51,14 @@ interface ManualCaptureBody {
   markdown?: string;
   /** Metadata from Mozilla Readability — title, byline, siteName, lang, publishedTime, excerpt, length */
   readability?: ReadabilityInfo;
-  /** Chrome extension version string (e.g., "3.1.0") — embedded in PDF Creator */
+  /** Chrome extension version string (e.g., "3.2.0") — embedded in PDF Creator */
   extensionVersion?: string;
+  /** "page" (whole page) or "selection" (user highlighted a portion) */
+  captureScope?: 'page' | 'selection';
+  /** For selection scope: number of chars in the selected text */
+  selectionChars?: number;
+  /** For selection scope: first ~120 chars of the selection for reference */
+  selectionPreview?: string;
 }
 
 function isValidUrl(urlString: string): boolean {
@@ -165,12 +171,33 @@ manualCaptureRouter.post(
         );
       }
 
+      // Archive wrapper handling: when the user captures an archive.is URL,
+      // the extension sends originalUrl = the real article URL (e.g. ft.com).
+      // Use that real URL for filename generation so the saved PDF reflects
+      // the article, not the archive wrapper. Archive wrapper URL is
+      // preserved in Info Dict `ViaArchive` for reference.
+      let urlForSave = body.url;
+      let archiveWrapperUrl: string | undefined;
+      if (body.originalUrl && body.originalUrl !== body.url) {
+        try {
+          const viewed = new URL(body.url).hostname;
+          const original = new URL(body.originalUrl).hostname;
+          if (viewed !== original) {
+            archiveWrapperUrl = body.url;
+            urlForSave = body.originalUrl;
+          }
+        } catch { /* invalid URL, skip swap */ }
+      }
+
       // Assemble extra Info Dict fields from client-side extraction
       const extraFields: Record<string, string | undefined> = {};
+      const captureScope = body.captureScope === 'selection' ? 'selection' : 'page';
+      extraFields.CaptureScope = captureScope;
+      if (archiveWrapperUrl) extraFields.ViaArchive = archiveWrapperUrl;
       if (body.markdown && typeof body.markdown === 'string' && body.markdown.length > 0) {
         extraFields.Markdown = body.markdown;
         extraFields.MarkdownLength = String(body.markdown.length);
-        extraFields.MarkdownExtractedBy = 'readability+turndown';
+        extraFields.MarkdownExtractedBy = captureScope === 'selection' ? 'selection+turndown' : 'readability+turndown';
       }
       if (body.readability) {
         const r = body.readability;
@@ -180,6 +207,27 @@ manualCaptureRouter.post(
         if (r.excerpt) extraFields.ReadabilityExcerpt = r.excerpt;
         if (r.lang) extraFields.ReadabilityLang = r.lang;
       }
+      if (captureScope === 'selection') {
+        if (body.selectionChars) extraFields.SelectionChars = String(body.selectionChars);
+        if (body.selectionPreview) extraFields.SelectionPreview = body.selectionPreview;
+      }
+
+      // Selection captures get a distinct filename suffix so they don't overwrite
+      // the full-page capture (and so multiple selections from the same URL don't
+      // overwrite each other). Slug derived from first few words of selection.
+      let filenameSuffix: string | undefined;
+      if (captureScope === 'selection' && body.selectionPreview) {
+        const slug = body.selectionPreview
+          .toLowerCase()
+          .replace(/['']/g, '')
+          .replace(/[^a-z0-9\s-]/g, ' ')
+          .split(/\s+/)
+          .filter((w) => w.length > 1)
+          .slice(0, 6)
+          .join('-')
+          .substring(0, 40);
+        filenameSuffix = slug ? `-selection-${slug}` : '-selection';
+      }
 
       // Compose Creator tag with extension-reported version (e.g. pdf-zipper-v2-chrome-plugin-v3.1.0)
       const versionSuffix =
@@ -188,22 +236,30 @@ manualCaptureRouter.post(
           : '-v3';
       const creatorTag = `${CREATOR_PREFIX}${versionSuffix}`;
 
-      // Save to weekly bin — overwrites on filename collision (per product decision)
+      // Save to weekly bin — overwrites on filename collision (per product decision).
+      // For archive.is captures, urlForSave == originalUrl (the real article URL),
+      // so both filename AND Subject field reflect the source article, not the wrapper.
       const filePath = await savePdfToWeeklyBin(pdfBuffer, {
-        url: body.url,
+        url: urlForSave,
         title: body.title,
-        originalUrl: body.originalUrl,
+        originalUrl: urlForSave,
         enrichedMetadata,
         creatorOverride: creatorTag,
         extraInfoDictFields: Object.keys(extraFields).length > 0 ? extraFields : undefined,
+        filenameSuffix,
       });
 
       // Compute weekId from the saved path
       const { year, week } = getISOWeekNumber(new Date());
       const weekId = `${year}-W${week.toString().padStart(2, '0')}`;
 
-      // Remove matching failed jobs so the web UI doesn't still show it as a failure
-      const removedFailedJobs = await removeMatchingFailedJobs(body.url);
+      // Remove matching failed jobs — check both the viewed URL (archive wrapper)
+      // and the original article URL, since the failed job could have been
+      // submitted under either
+      let removedFailedJobs = await removeMatchingFailedJobs(body.url);
+      if (archiveWrapperUrl) {
+        removedFailedJobs += await removeMatchingFailedJobs(urlForSave);
+      }
 
       const filename = path.basename(filePath);
       const durationMs = Date.now() - startMs;

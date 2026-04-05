@@ -128,6 +128,8 @@ export interface SavePdfOptions {
   creatorOverride?: string;
   /** Additional Info Dict fields to embed (e.g., Markdown from client-side extraction) */
   extraInfoDictFields?: Record<string, string | null | undefined>;
+  /** Optional suffix appended to the generated baseName before .pdf (e.g., "-selection-key-quote") */
+  filenameSuffix?: string;
 }
 
 /**
@@ -145,7 +147,7 @@ export async function savePdfToWeeklyBin(
   pdfBuffer: Buffer,
   options: SavePdfOptions
 ): Promise<string> {
-  const { url, title, bookmarkedAt, originalUrl, isXArticle, enrichedMetadata, creatorOverride, extraInfoDictFields } = options;
+  const { url, title, bookmarkedAt, originalUrl, isXArticle, enrichedMetadata, creatorOverride, extraInfoDictFields, filenameSuffix } = options;
 
   // Embed source URL and enriched metadata in PDF
   const pdfWithMetadata = await embedPdfMetadata(
@@ -216,8 +218,13 @@ export async function savePdfToWeeklyBin(
     baseName = 'document';
   }
 
+  // Apply optional suffix before sanitization (e.g., "-selection-quote-slug")
+  if (filenameSuffix) {
+    baseName = `${baseName}${filenameSuffix}`;
+  }
+
   // Sanitize and truncate filename
-  baseName = sanitizeFilename(baseName).substring(0, 100);
+  baseName = sanitizeFilename(baseName).substring(0, 140);
   const filename = `${baseName}.pdf`;
   const filePath = path.join(pdfDir, filename);
 
