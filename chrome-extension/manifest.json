@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PDF Zipper Capture",
-  "version": "3.2.1",
+  "version": "3.2.3",
   "description": "Capture current page as PDF + Markdown, sent to pdf-zipper-v2 with Karpathy metadata enrichment. Shortcut: Alt+Shift+Z (or click toolbar icon, or right-click → Capture). Select text first to capture only that portion.",
   "permissions": ["activeTab", "scripting", "debugger", "notifications", "contextMenus"],
   "host_permissions": [

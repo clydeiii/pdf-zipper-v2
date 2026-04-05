@@ -59,7 +59,7 @@ chrome.commands.onCommand.addListener(async (command) => {
 async function captureTab(tab) {
   if (!tab.id) return;
   const tabUrl = tab.url || '';
-  console.log('[pdfzipper v3.2.1] captureTab called. tab.url =', JSON.stringify(tabUrl), 'tab.id =', tab.id);
+  console.log('[pdfzipper v3.2.3] captureTab called. tab.url =', JSON.stringify(tabUrl), 'tab.id =', tab.id);
 
   // Clear any stale badge from the previous capture before we start.
   // (MV3 service worker termination can strand setTimeout-based clears,
@@ -255,6 +255,18 @@ function sendToContentScript(tabId, message) {
 }
 
 async function uploadCapture(payload) {
+  // MV3 service workers terminate after ~30s of idle — and our upload can
+  // take 25-30s because the server runs Ollama enrichment synchronously.
+  // Keep the SW alive by ping-looping a chrome.* API call every 20s. Any
+  // chrome.* API call resets the idle timer.
+  let keepAliveActive = true;
+  const keepAlive = (async () => {
+    while (keepAliveActive) {
+      try { await chrome.runtime.getPlatformInfo(); } catch (e) { break; }
+      await new Promise((r) => setTimeout(r, 20000));
+    }
+  })();
+
   let response;
   try {
     response = await fetch(SERVER_ENDPOINT, {
@@ -264,7 +276,11 @@ async function uploadCapture(payload) {
       body: JSON.stringify(payload),
     });
   } catch (error) {
+    keepAliveActive = false;
     throw new Error(`Network error: ${error.message}`);
+  } finally {
+    keepAliveActive = false;
+    await keepAlive; // drain
   }
 
   const contentType = response.headers.get('content-type') || '';
@@ -294,7 +310,12 @@ async function setBadge(text, color) {
   try {
     await chrome.action.setBadgeText({ text });
     if (color) await chrome.action.setBadgeBackgroundColor({ color });
-  } catch (e) { /* ignore */ }
+    // Diagnostic: read back what Chrome actually has for the badge now
+    const actual = await chrome.action.getBadgeText({});
+    console.log(`[pdfzipper badge] set to "${text}" (color ${color}) — Chrome reports "${actual}"`);
+  } catch (e) {
+    console.error(`[pdfzipper badge] setBadge("${text}") FAILED:`, e);
+  }
 }
 
 async function setBadgeTitle(title) {
@@ -310,13 +331,13 @@ async function notify(title, message, kind = 'info') {
   // MV3 service worker termination makes setTimeout-based clears unreliable,
   // so we don't schedule fades — each new capture wipes the previous badge.
   if (kind === 'success') {
-    await setBadge('✓', '#22c55e');
+    await setBadge('OK', '#22c55e');
     await setBadgeTitle(`${title} — ${message}`);
   } else if (kind === 'error') {
-    await setBadge('!', '#ef4444');
+    await setBadge('ERR', '#ef4444');
     await setBadgeTitle(`${title} — ${message}`);
   } else if (kind === 'progress') {
-    await setBadge('…', '#3b82f6');
+    await setBadge('...', '#3b82f6');
     await setBadgeTitle(`${title} — ${message}`);
   }
 
