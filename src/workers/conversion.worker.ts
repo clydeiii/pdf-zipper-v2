@@ -10,9 +10,7 @@
 import { Worker, Job } from 'bullmq';
 import { writeFile, mkdir, unlink } from 'node:fs/promises';
 import * as path from 'node:path';
-import { createRequire } from 'node:module';
-import { PDFDocument } from 'pdf-lib';
-import { setInfoDictFields } from '../utils/pdf-info-dict.js';
+import { savePdfToWeeklyBin } from '../utils/save-pdf.js';
 import { workerConnection } from '../config/redis.js';
 import { QUEUE_NAME } from '../queues/conversion.queue.js';
 import { env } from '../config/env.js';
@@ -31,71 +29,8 @@ import { updateFixOutcome } from '../fix/ledger.js';
 import { addJobToWeekIndex } from '../jobs/week-index.js';
 import { enrichDocumentMetadata, type EnrichedMetadata } from '../metadata/enrichment.js';
 
-// Import CommonJS module using require
-const require = createRequire(import.meta.url);
-const sanitizeFilename = require('sanitize-filename') as (input: string) => string;
-
 /** Flag to prevent multiple shutdown attempts */
 let isShuttingDown = false;
-
-/**
- * Embed source URL and enriched metadata in PDF document properties.
- *
- * Standard PDF Info Dict fields:
- *   Title, Author, Subject, Keywords, Creator, Producer, CreationDate
- *
- * Custom Info Dict fields (via getInfoDict):
- *   Summary, Language, Publication, PublishDate, Tags, Translation, EnrichedAt
- *
- * All metadata lives inside the PDF — no sidecar files.
- */
-async function embedPdfMetadata(
-  pdfBuffer: Buffer,
-  sourceUrl: string,
-  originalUrl?: string,
-  metadata?: EnrichedMetadata
-): Promise<Buffer> {
-  try {
-    const pdfDoc = await PDFDocument.load(pdfBuffer);
-
-    // Standard fields from enrichment
-    if (metadata) {
-      if (metadata.title) pdfDoc.setTitle(metadata.title);
-      if (metadata.author) pdfDoc.setAuthor(metadata.author);
-      if (metadata.tags.length > 0) pdfDoc.setKeywords(metadata.tags);
-      if (metadata.publication) pdfDoc.setCreator(`${metadata.publication} via pdf-zipper v2`);
-      if (metadata.publishDate) {
-        const pubDate = new Date(metadata.publishDate);
-        if (!isNaN(pubDate.getTime())) pdfDoc.setCreationDate(pubDate);
-      }
-    }
-
-    // Store the original URL (with www preserved) in Subject field for rerun feature
-    pdfDoc.setSubject(originalUrl || sourceUrl);
-
-    // Add producer info with capture timestamp
-    pdfDoc.setProducer(`pdf-zipper v2 - captured ${new Date().toISOString()}`);
-
-    // Custom fields via Info Dict (for data that doesn't map to standard fields)
-    if (metadata) {
-      setInfoDictFields(pdfDoc, {
-        Summary: metadata.summary,
-        Language: metadata.language,
-        Publication: metadata.publication,
-        PublishDate: metadata.publishDate,
-        Tags: metadata.tags.length > 0 ? metadata.tags.join(', ') : undefined,
-        Translation: metadata.translation,
-        EnrichedAt: new Date().toISOString(),
-      });
-    }
-
-    const modifiedPdf = await pdfDoc.save();
-    return Buffer.from(modifiedPdf);
-  } catch (error) {
-    console.warn(`Failed to embed PDF metadata for ${sourceUrl}:`, error);
-    return pdfBuffer;
-  }
-}
 
 /**
  * Save debug PDF for failed jobs
@@ -146,130 +81,6 @@ async function deleteOldFileIfDifferent(oldFilePath: string, newFilePath: string
 }
 
 /**
- * Save PDF to weekly bin directory
- * Path: {DATA_DIR}/media/{year}-W{week}/pdfs/{filename}.pdf
- *
- * Filename format: {hostname}{pathname}.pdf
- * - Slashes replaced with dashes
- * - Trailing dashes removed
- * - www. prefix stripped from hostname
- * Example: nytimes.com-2026-01-15-business-article.pdf
- */
-/**
- * Convert a title to a URL-safe slug
- * Lowercase, spaces to dashes, remove special characters
- */
-function slugifyTitle(title: string): string {
-  return title
-    .toLowerCase()
-    .replace(/['']/g, '')           // Remove apostrophes
-    .replace(/[^a-z0-9\s-]/g, '')   // Remove special characters
-    .replace(/\s+/g, '-')           // Spaces to dashes
-    .replace(/-+/g, '-')            // Collapse multiple dashes
-    .replace(/^-|-$/g, '')          // Trim leading/trailing dashes
-    .substring(0, 50);              // Limit length
-}
-
-/**
- * Check if URL is a Twitter/X URL
- */
-function isTwitterUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    const host = parsed.hostname.toLowerCase();
-    return host === 'x.com' || host === 'twitter.com' || host === 'www.x.com' || host === 'www.twitter.com';
-  } catch {
-    return false;
-  }
-}
-
-async function savePdfToWeeklyBin(
-  pdfBuffer: Buffer,
-  url: string,
-  title?: string,
-  bookmarkedAt?: string,
-  originalUrl?: string,
-  isXArticle?: boolean,
-  enrichedMetadata?: EnrichedMetadata
-): Promise<string> {
-  // Embed source URL and enriched metadata in PDF
-  const pdfWithMetadata = await embedPdfMetadata(pdfBuffer, url, originalUrl, enrichedMetadata);
-
-  // Use bookmarkedAt or current date for week calculation
-  const date = bookmarkedAt ? new Date(bookmarkedAt) : new Date();
-  const { year, week } = getISOWeekNumber(date);
-  const weekStr = week.toString().padStart(2, '0');
-
-  // Build directory path
-  const dataDir = env.DATA_DIR || './data';
-  const pdfDir = path.join(dataDir, 'media', `${year}-W${weekStr}`, 'pdfs');
-
-  // Ensure directory exists
-  await mkdir(pdfDir, { recursive: true });
-
-  // Generate filename from URL, with title fallback for non-descriptive paths
-  let baseName: string;
-  try {
-    const parsed = new URL(url);
-    // Strip www. prefix for cleaner names
-    let hostname = parsed.hostname;
-    if (hostname.startsWith('www.')) {
-      hostname = hostname.substring(4);
-    }
-    // Replace slashes with dashes, remove trailing dash
-    let pathname = parsed.pathname.replace(/\//g, '-');
-    if (pathname.endsWith('-')) {
-      pathname = pathname.slice(0, -1);
-    }
-    // Remove leading dash if present (from leading /)
-    if (pathname.startsWith('-')) {
-      pathname = pathname.substring(1);
-    }
-
-    // Check if pathname is non-descriptive (needs title fallback)
-    // Examples: HN "item", Reddit "comments", etc.
-    const nonDescriptivePaths = ['item', 'comments', 'post', 'p', 'a', 'article', 'story', 's'];
-    const isNonDescriptive = !pathname || nonDescriptivePaths.includes(pathname.toLowerCase());
-
-    // Use title for non-descriptive paths or empty paths
-    if (isNonDescriptive && title) {
-      const titleSlug = slugifyTitle(title);
-      if (titleSlug) {
-        baseName = `${hostname}-${titleSlug}`;
-      } else {
-        baseName = pathname ? `${hostname}-${pathname}` : hostname;
-      }
-    } else {
-      baseName = pathname ? `${hostname}-${pathname}` : hostname;
-    }
-
-    // For Twitter/X URLs, replace "status" with more descriptive term
-    // isXArticle = true: X Article (captured directly from X.com)
-    // isXArticle = false: regular tweet (captured via Nitter)
-    if (isTwitterUrl(url) && baseName.includes('-status-')) {
-      if (isXArticle === true) {
-        baseName = baseName.replace('-status-', '-article-');
-      } else if (isXArticle === false) {
-        baseName = baseName.replace('-status-', '-post-');
-      }
-      // if isXArticle is undefined, leave as "status" (shouldn't happen for Twitter URLs)
-    }
-  } catch {
-    baseName = 'document';
-  }
-
-  // Sanitize and truncate filename
-  baseName = sanitizeFilename(baseName).substring(0, 100);
-  const filename = `${baseName}.pdf`;
-  const filePath = path.join(pdfDir, filename);
-
-  // Write PDF with all metadata embedded directly
-  await writeFile(filePath, pdfWithMetadata);
-
-  return filePath;
-}
-
-/**
  * Process a conversion job
  *
  * Converts URL to PDF using Playwright browser.
@@ -317,15 +128,13 @@ async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Pro
     await job.updateProgress(80);
 
     // Save to weekly bin with enriched metadata
-    const filePath = await savePdfToWeeklyBin(
-      passthroughResult.pdfBuffer,
+    const filePath = await savePdfToWeeklyBin(passthroughResult.pdfBuffer, {
       url,
       title,
       bookmarkedAt,
       originalUrl,
-      undefined,
-      enrichedMetadata
-    );
+      enrichedMetadata,
+    });
 
     await job.updateProgress(100);
 
@@ -448,7 +257,14 @@ async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Pro
   await job.updateProgress(90);
 
   // Only save PDF after quality check passes
-  const pdfPath = await savePdfToWeeklyBin(result.pdfBuffer, filenameUrl, title, bookmarkedAt, originalUrl, isXArticle, enrichedMetadata);
+  const pdfPath = await savePdfToWeeklyBin(result.pdfBuffer, {
+    url: filenameUrl,
+    title,
+    bookmarkedAt,
+    originalUrl,
+    isXArticle,
+    enrichedMetadata,
+  });
   console.log(`PDF saved to: ${pdfPath}`);
 
   if (oldFilePath) await deleteOldFileIfDifferent(oldFilePath, pdfPath);

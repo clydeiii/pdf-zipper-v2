@@ -452,9 +452,9 @@ const fileName = bookmark.content.fileName || assetInfo?.fileName || `pdf-${asse
 **Problem:** Gemma 3 models (4b/12b) were underpowered for quality scoring and text tasks
 **Solution:** Upgraded to Gemma 4 models on M4 Mac Mini Pro (24GB, MLX):
 - `gemma3:4b` → `gemma4:e4b` (8B params, vision) for quality scoring
-- `gemma3:12b` → `gemma4:26b` (25.8B MoE, 3.8B active) for text tasks
-**Model memory (num_ctx=8192):** gemma4:e4b = 10.8GB, gemma4:26b = 20.4GB. At default 131K context, 26b balloons to ~31GB (always set num_ctx explicitly). Use e4b for quality scoring + metadata enrichment (no model swap overhead). Reserve 26b with `think: false` for transcript formatting only.
-**think: false:** Gemma 4 26b uses internal reasoning by default (~3000 tokens overhead per call). Setting `think: false` in the Ollama API cuts this to ~150 tokens and speeds up 26b by ~16x. Applied to transcript-formatter.ts. The e4b model doesn't use thinking so it's unaffected.
+- `gemma3:12b` → `gemma4:latest` (8B, Q4_K_M, ~9.6GB) for text tasks
+**Model memory:** gemma4:e4b ≈ 10.8GB, gemma4:latest ≈ 9.6GB. Originally ran gemma4:26b (~20GB) but it consumed nearly all of the Mac mini's 24GB unified memory and caused swapping/unresponsiveness under concurrent load. Downgraded to gemma4:latest (8B) which runs comfortably with headroom. Use e4b for quality scoring + metadata enrichment; gemma4:latest for transcript formatting.
+**think: false:** `think: false` is still set on the transcript-formatter Ollama call. It's a no-op for gemma4:latest (no internal reasoning) but kept in case a larger model is swapped back in.
 **New Feature:** AI metadata enrichment for every PDF:
 1. After quality checks pass, Ollama (e4b) extracts: title, author, publication, date, language, summary, tags
 2. Non-English docs get full English translation
@@ -520,6 +520,31 @@ All metadata is designed for extraction by `grep`, `ffprobe`, `pdf-lib`, or `nod
 **Solution:** Extracted `setInfoDictFields()`, `setInfoDictField()`, `readInfoDictField()` to `src/utils/pdf-info-dict.ts`
 **Files:** `src/utils/pdf-info-dict.ts` (new), `src/workers/conversion.worker.ts`, `src/metadata/transcript-pdf.ts`, `src/api/routes/files.ts`
 
+**53. Video Transcripts Were Raw Whisper Output (Wall of Text)**
+**Problem:** Video transcript PDFs (e.g. Marc Andreessen interview) were one massive paragraph with zero breaks, and proper nouns from the title ("OpenClaw", "Claude Code") were never corrected — whisper's "open claw" / "claw code" / "chat GPT" appeared uncleaned.
+**Cause:** `src/media/video-enrichment.ts` handed raw Whisper text directly to `generateTranscriptPdf` — it never called `formatTranscriptWithLLM`. The formatter was only wired up for Apple Podcasts.
+**Solution:** Added `formatTranscriptWithLLM(text, { episodeTitle: item.title })` step between Whisper and PDF generation. Video title is passed as the episode-title hint so the formatter can fix ASR mishearings that match title words.
+**Files:** `src/media/video-enrichment.ts`
+
+**54. Transcript Formatter Hallucinated Substitutions (01 → Gemini)**
+**Problem:** `gemma4` transcript formatter was rewriting uncertain ASR output with plausible-looking guesses. Example: Whisper misheard "o1" as "01"; the formatter replaced "01 hits" with "Gemini hits". This is dangerous because downstream systems (including another Claude Code agent) trust the transcript as ground truth.
+**Cause:** Original prompt said "Fix punctuation and capitalization where ASR got it wrong" without forbidding word substitution. The model interpreted obvious ASR errors as license to guess corrections.
+**Solution:** Rewrote prompt with explicit "ABSOLUTE RULES" framing: model is a FORMATTER not an editor/fact-checker. Explicitly forbids substituting words it can't identify, inventing content, or summarizing. Allows paragraph breaks, capitalization fixes for listed proper nouns, filler removal, and punctuation — nothing else. Added framing that the output feeds another AI that trusts it as ground truth.
+**Ablation result:** V2 prompt on gemma4:latest preserves "01" as-is (no Gemini hallucination), still fixes "open claw" → "OpenClaw" and "chat GPT" → "ChatGPT", keeps 100% of input content (vs 56% with old prompt). Paragraph breaks dropped from 33→19 per 15K chars but still readable. Trade-off: less aggressive filler removal (model leaves "you know" in place when unsure if it's filler vs meaningful).
+**Files:** `src/podcasts/transcript-formatter.ts`
+**Ablation artifacts:** `data/ablation/JUDGMENT.md`, `scripts/ablation-*.ts`
+
+**55. Chrome Plugin v3 — Manual Capture with Karpathy Metadata Parity**
+**Problem:** When the automated worker hits a paywall/captcha/bot wall, user needs to manually capture in their authenticated browser. Manual captures must be byte-compatible with auto-captures (same filename convention, same Info Dict metadata) to keep the Karpathy knowledge base consistent.
+**Solution:** Refactored `savePdfToWeeklyBin` + `embedPdfMetadata` out of `conversion.worker.ts` into `src/utils/save-pdf.ts` with an optional `creatorOverride`. New `POST /api/manual-capture` endpoint accepts base64 PDF + URL + title, runs the SAME `analyzePdfContent` → `enrichDocumentMetadata` → `savePdfToWeeklyBin` pipeline as the worker. Extension Creator tag is `pdf-zipper-v2-chrome-plugin-v3` for version tracking. On successful save, matching failed BullMQ jobs are removed (found via `normalizeBookmarkUrl` canonicalization).
+**Chrome extension (MV3, `chrome-extension/`):** Uses `chrome.debugger` + `Page.printToPDF` to generate clean PDFs in-browser (A4, 0.21" margins, scale 0.7 — matches Playwright settings). POSTs to `https://pdf.clydeplex.com/api/manual-capture` with `credentials: 'include'` — Cloudflare Access cookie sent automatically thanks to `host_permissions`. No API key / shared secret needed, CF Access IS the auth. Keyboard shortcut `Alt+Shift+Z`. Toolbar badge shows `…`/`✓`/`!` for visibility on macOS where notification permissions are often blocked.
+**Files:** `src/utils/save-pdf.ts` (new), `src/workers/conversion.worker.ts` (refactored), `src/api/routes/manual-capture.ts` (new), `src/api/server.ts`, `chrome-extension/` (new), `helper-chrome-plugins/pdf-zipper-capture-v3.zip`
+
+**56. Chrome Extension Debugger Conflict — Matter Plugin**
+**Problem:** `chrome.debugger.attach` in our plugin fails with `"Cannot access a chrome-extension:// URL of different extension"` when the Matter read-later extension is installed. Chrome only permits ONE extension to own the debugger per tab.
+**Cause:** Matter uses `chrome.debugger` itself (likely to snapshot rendered DOM for their reader view). When Matter auto-attaches first, our extension is locked out.
+**Resolution:** Disable or uninstall Matter. User migrated to Karakeep (self-hosted) so Matter is no longer needed anyway. Other extensions that commonly claim `chrome.debugger`: React/Vue/Redux DevTools, Lighthouse, Axe, automation recorders. If future conflicts appear, check for extensions using the debugger API.
+
 ## Common Commands (Development)
 
 ```bash
@@ -544,7 +569,7 @@ Key optional settings:
 - `DISCORD_WEBHOOK_URL` - Discord notifications for job events
 - `QUALITY_THRESHOLD` - Score 0-100, default 50
 - `OLLAMA_MODEL` - Vision model for quality scoring, default `gemma4:e4b`
-- `TRANSCRIPT_FORMAT_MODEL` - Text model for formatting + metadata enrichment, default `gemma4:26b`
+- `TRANSCRIPT_FORMAT_MODEL` - Text model for formatting + metadata enrichment, default `gemma4:latest`
 - `COOKIES_FILE` - Netscape cookies.txt for paywall bypass
 - `WHISPER_HOST` - Whisper ASR server URL, default `http://10.0.0.81:9000`
 - `PRIVACY_FILTER_TERMS` - Comma-separated terms to hide from PDF captures (names, handles)

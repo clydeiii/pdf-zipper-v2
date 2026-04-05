@@ -1,0 +1,49 @@
+/* Applied while capture is in progress (and also for normal @media print). */
+.pdfzipper-hide,
+.pdfzipper-capturing .pdfzipper-hide {
+  display: none !important;
+  height: 0 !important;
+  min-height: 0 !important;
+  max-height: 0 !important;
+  overflow: hidden !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: none !important;
+  visibility: hidden !important;
+}
+
+/* Clean page background during capture */
+.pdfzipper-capturing,
+.pdfzipper-capturing body {
+  background: white !important;
+  background-color: white !important;
+}
+
+/* Remove decorative shadows that look bad on paper */
+.pdfzipper-capturing * {
+  box-shadow: none !important;
+  text-shadow: none !important;
+}
+
+/* Archive.is specific chrome */
+.pdfzipper-capturing #HEADER,
+.pdfzipper-capturing div[id="HEADER"],
+.pdfzipper-capturing #DIVSHARE,
+.pdfzipper-capturing div[id="DIVSHARE"] {
+  display: none !important;
+  height: 0 !important;
+  overflow: hidden !important;
+}
+
+@media print {
+  .pdfzipper-hide {
+    display: none !important;
+  }
+  html, body {
+    background: white !important;
+  }
+  * {
+    box-shadow: none !important;
+    text-shadow: none !important;
+  }
+}

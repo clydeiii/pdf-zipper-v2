@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "PDF Zipper Capture",
+  "version": "3.1.0",
+  "description": "Manually capture a clean PDF of the current page and send it to pdf-zipper-v2 with full Karpathy metadata enrichment",
+  "permissions": ["activeTab", "scripting", "debugger", "notifications"],
+  "host_permissions": [
+    "https://pdf.clydeplex.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["*://*/*"],
+      "js": ["vendor/Readability.js", "vendor/turndown.js", "content.js"],
+      "css": ["print.css"],
+      "run_at": "document_end"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png"
+    },
+    "default_title": "Capture to PDF Zipper"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "commands": {
+    "capture-page": {
+      "suggested_key": {
+        "default": "Alt+Shift+Z"
+      },
+      "description": "Capture current page to PDF Zipper"
+    }
+  }
+}
