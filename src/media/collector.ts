@@ -38,11 +38,6 @@ function getAuthHeaders(url: string): Record<string, string> {
 }
 
 /**
- * Download timeout for large video files (5 minutes)
- */
-const DOWNLOAD_TIMEOUT_MS = 5 * 60 * 1000;
-
-/**
  * Download media file to weekly bin with streaming
  * Skips download if file already exists and has content
  *
@@ -86,7 +81,7 @@ export async function downloadMedia(item: MediaItem): Promise<MediaCollectionRes
 
     // Download with streaming using AbortController for timeout
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
+    const timeoutId = setTimeout(() => controller.abort(), env.MEDIA_DOWNLOAD_TIMEOUT_MS);
 
     try {
       // Get auth headers for protected endpoints (e.g., Karakeep assets)

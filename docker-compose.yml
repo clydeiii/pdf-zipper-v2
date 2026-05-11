@@ -5,6 +5,8 @@ services:
     restart: unless-stopped
     # Run as host user to avoid root-owned files in ./data
     user: "1000:1000"
+    env_file:
+      - .env
     environment:
       - NODE_ENV=production
       - PORT=3002
@@ -25,7 +27,7 @@ services:
       # llama.cpp OpenAI-compatible server for text-only round-robin/failover
       # (used by metadata enrichment only; vision + transcript formatting stay on Ollama)
       - LLAMACPP_HOST=http://10.0.0.81:8080
-      - LLAMACPP_API_KEY=dcdad5d979514618cc2372be87b96d4e
+      - LLAMACPP_API_KEY=${LLAMACPP_API_KEY:-}
       - LLAMACPP_MODEL=gemma4
 
       # Parakeet-TDT 0.6B MLX on Mac mini (was: Whisper ASR on 10.0.0.81:9002)
@@ -35,12 +37,12 @@ services:
       - WHISPER_HOST_FALLBACK=http://10.0.0.81:9003
 
       # Karakeep feed (container name on proxy-network)
-      - KARAKEEP_FEED_URL=http://karakeep-web-1:3000?token=ak2_c86c813aaabfe6d954a2_130ae1bf7f60523a6717aba6a6165bea
+      - KARAKEEP_FEED_URL=${KARAKEEP_FEED_URL:-}
       - FEED_POLL_INTERVAL_MINUTES=5
 
       # Karakeep API for retention cleanup (delete bookmarks older than KARAKEEP_RETENTION_DAYS)
       - KARAKEEP_API_BASE=http://karakeep-web-1:3000
-      - KARAKEEP_API_TOKEN=ak2_e3ac337eebc586a3633e_49d4fe2d1ba3f4b3c29b405391209c5d
+      - KARAKEEP_API_TOKEN=${KARAKEEP_API_TOKEN:-}
       - KARAKEEP_RETENTION_DAYS=90
 
       # pdf-zipper-v2 retention (delete data/media/YYYY-WWW dirs older than RETENTION_DAYS)
@@ -58,18 +60,18 @@ services:
       - PDF_TIMEOUT_MS=90000
 
       # Discord notifications
-      - DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/1465378270278057994/TQ25XzBXFYfSJOUeqMaaeRQ_GgzjPHYCEHJU0NqXOjyOGsh4DeTWHjrtPH-NLk0aHYR-
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
 
       # Cookies file for paywalls (general — substack, NYT, etc.)
       - COOKIES_FILE=/data/cookies.txt
-      # Dedicated YouTube cookies (work Google account: clyde.wright@ncsu-las.net).
-      # Only used as a fallback after an anonymous yt-dlp metadata fetch fails.
+      # Dedicated YouTube cookies. Only used as a fallback after an anonymous
+      # yt-dlp metadata fetch fails.
       # Kept distinct from COOKIES_FILE because the shared paywall cookies
-      # (personal Google account) trigger YouTube bot-detection.
-      - YT_DLP_COOKIES_FILE=/data/yt-cookies-ncsu-las.txt
+      # can trigger YouTube bot-detection.
+      - YT_DLP_COOKIES_FILE=${YT_DLP_COOKIES_FILE:-/data/yt-cookies.txt}
 
       # Privacy filter - hide elements containing these terms (comma-separated)
-      - PRIVACY_FILTER_TERMS=Clyde Wright,clydeiii
+      - PRIVACY_FILTER_TERMS=${PRIVACY_FILTER_TERMS:-}
 
       # AI Self-Healing Fix System
       - FIX_ENABLED=true
@@ -78,7 +80,18 @@ services:
       # Node 20.20 ESM (import.meta.url stays as the symlink path, so the bin
       # script can't find @openai/codex-linux-x64 in its sibling node_modules).
       - CODEX_CLI_PATH=/usr/lib/node_modules/@openai/codex/bin/codex.js
+      - CODEX_CLI_ARGS=${CODEX_CLI_ARGS:-}
       - FIX_PROVIDER_TIMEOUT_MINUTES=30
+      - API_AUTH_TOKEN=${API_AUTH_TOKEN:-}
+      - JSON_BODY_LIMIT=1mb
+      - COOKIES_BODY_LIMIT=5mb
+      - MANUAL_CAPTURE_BODY_LIMIT=50mb
+      - MAX_DIRECT_PDF_MB=100
+      - DIRECT_DOWNLOAD_TIMEOUT_MS=120000
+      - MEDIA_DOWNLOAD_TIMEOUT_MS=300000
+      - MAX_PODCAST_AUDIO_MB=750
+      - PODCAST_DOWNLOAD_TIMEOUT_MS=600000
+      - MAX_VIDEO_TRANSCRIBE_MB=500
       - HOME=/home/clyde
 
     ports:

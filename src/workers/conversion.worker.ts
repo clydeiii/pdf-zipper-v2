@@ -29,8 +29,8 @@ import { updateFixOutcome } from '../fix/ledger.js';
 import { addJobToWeekIndex } from '../jobs/week-index.js';
 import { enrichDocumentMetadata, type EnrichedMetadata } from '../metadata/enrichment.js';
 
-/** Flag to prevent multiple shutdown attempts */
-let isShuttingDown = false;
+/** Reference to the worker instance. Created explicitly by startWorker(). */
+let conversionWorker: Worker<ConversionJobData, ConversionJobResult> | null = null;
 
 /**
  * Save debug PDF for failed jobs
@@ -338,152 +338,101 @@ async function maybeQueueAutoFix(
   }
 }
 
-/**
- * BullMQ worker for processing conversion jobs
- *
- * Configuration:
- * - concurrency: 1 (vision model is CPU/memory intensive)
- * - connection: workerConnection (with maxRetriesPerRequest: null)
- */
-export const conversionWorker = new Worker<ConversionJobData, ConversionJobResult>(
-  QUEUE_NAME,
-  processJob,
-  {
-    connection: workerConnection,
-    concurrency: 1,
-  }
-);
+function createConversionWorker(): Worker<ConversionJobData, ConversionJobResult> {
+  const worker = new Worker<ConversionJobData, ConversionJobResult>(
+    QUEUE_NAME,
+    processJob,
+    {
+      connection: workerConnection,
+      concurrency: env.CONCURRENCY,
+    }
+  );
 
-// Debug: log when worker receives a job
-conversionWorker.on('active', (job) => {
-  console.log(`[DEBUG] Worker activated job: ${job.id}`);
-});
-
-/**
- * Handle successful job completion
- */
-conversionWorker.on('completed', async (job: Job<ConversionJobData, ConversionJobResult>) => {
-  console.log(`Job ${job.id} completed successfully`);
-
-  const jobWeek = getISOWeekNumber(new Date(job.timestamp));
-  const weekId = `${jobWeek.year}-W${jobWeek.week.toString().padStart(2, '0')}`;
-  await addJobToWeekIndex({
-    weekId,
-    kind: 'completed',
-    jobId: job.id!,
-    scoreTimestampMs: job.finishedOn || Date.now(),
+  worker.on('active', (job) => {
+    console.log(`[DEBUG] Worker activated job: ${job.id}`);
   });
 
-  // Send Discord notification
-  const result = job.returnvalue;
-  if (result) {
-    // Calculate duration from job timestamps
-    const duration = job.finishedOn && job.processedOn
-      ? job.finishedOn - job.processedOn
-      : undefined;
+  worker.on('completed', async (job: Job<ConversionJobData, ConversionJobResult>) => {
+    console.log(`Job ${job.id} completed successfully`);
 
-    await notifyJobComplete({
-      jobId: job.id!,
-      url: job.data.originalUrl || job.data.url,
-      pdfPath: result.pdfPath,
-      pdfSize: result.pdfSize,
-      qualityScore: result.qualityScore,
-      qualityReasoning: result.qualityReasoning,
-      duration,
-    });
-  }
-});
-
-/**
- * Handle job failure with structured error logging (CONV-04)
- *
- * Logs actionable error data including:
- * - jobId, url for identification
- * - attemptsMade and maxAttempts for retry context
- * - error message and stack for debugging
- * - timestamp for correlation
- */
-conversionWorker.on('failed', async (job: Job<ConversionJobData, ConversionJobResult> | undefined, error: Error) => {
-  const errorData = {
-    event: 'job_failed',
-    jobId: job?.id ?? 'unknown',
-    url: job?.data?.url ?? 'unknown',
-    attemptsMade: job?.attemptsMade ?? 0,
-    maxAttempts: job?.opts?.attempts ?? 3,
-    error: {
-      message: error.message,
-      stack: error.stack,
-    },
-    timestamp: new Date().toISOString(),
-  };
-
-  console.error('Job failed:', JSON.stringify(errorData, null, 2));
-
-  // Send Discord notification (only on final failure, not retries)
-  if (job && job.attemptsMade >= (job.opts?.attempts ?? 3)) {
     const jobWeek = getISOWeekNumber(new Date(job.timestamp));
     const weekId = `${jobWeek.year}-W${jobWeek.week.toString().padStart(2, '0')}`;
     await addJobToWeekIndex({
       weekId,
-      kind: 'failed',
+      kind: 'completed',
       jobId: job.id!,
       scoreTimestampMs: job.finishedOn || Date.now(),
     });
 
-    // Extract failure reason from error message prefix
-    const reasonMatch = error.message.match(/^(\w+):/);
-    const reason = reasonMatch ? reasonMatch[1] : undefined;
+    const result = job.returnvalue;
+    if (result) {
+      const duration = job.finishedOn && job.processedOn
+        ? job.finishedOn - job.processedOn
+        : undefined;
 
-    await notifyJobFailed({
-      jobId: job.id!,
-      url: job.data.originalUrl || job.data.url,
-      error: error.message,
-      reason,
-      attemptsMade: job.attemptsMade,
-      maxAttempts: job.opts?.attempts ?? 3,
-    });
-
-    // Selective autonomous self-healing trigger (manual Fix Selected still available for all classes)
-    try {
-      await maybeQueueAutoFix(job, error);
-    } catch (autoFixError) {
-      console.error('[Fix] Failed to auto-queue diagnosis:', autoFixError);
+      await notifyJobComplete({
+        jobId: job.id!,
+        url: job.data.originalUrl || job.data.url,
+        pdfPath: result.pdfPath,
+        pdfSize: result.pdfSize,
+        qualityScore: result.qualityScore,
+        qualityReasoning: result.qualityReasoning,
+        duration,
+      });
     }
-  }
-});
+  });
 
-/**
- * Handle unexpected worker-level errors
- */
-conversionWorker.on('error', (error: Error) => {
-  console.error(`Worker error: ${error.message}`);
-});
+  worker.on('failed', async (job: Job<ConversionJobData, ConversionJobResult> | undefined, error: Error) => {
+    const errorData = {
+      event: 'job_failed',
+      jobId: job?.id ?? 'unknown',
+      url: job?.data?.url ?? 'unknown',
+      attemptsMade: job?.attemptsMade ?? 0,
+      maxAttempts: job?.opts?.attempts ?? 3,
+      error: {
+        message: error.message,
+        stack: error.stack,
+      },
+      timestamp: new Date().toISOString(),
+    };
 
-/**
- * Graceful shutdown handler
- *
- * Waits for in-flight jobs to complete before exiting.
- * Prevents new jobs from being picked up during shutdown.
- * Closes browser after worker to ensure no jobs are mid-conversion.
- */
-async function gracefulShutdown(signal: string): Promise<void> {
-  if (isShuttingDown) return;
-  isShuttingDown = true;
+    console.error('Job failed:', JSON.stringify(errorData, null, 2));
 
-  console.log(`${signal} received, closing worker gracefully...`);
+    if (job && job.attemptsMade >= (job.opts?.attempts ?? 3)) {
+      const jobWeek = getISOWeekNumber(new Date(job.timestamp));
+      const weekId = `${jobWeek.year}-W${jobWeek.week.toString().padStart(2, '0')}`;
+      await addJobToWeekIndex({
+        weekId,
+        kind: 'failed',
+        jobId: job.id!,
+        scoreTimestampMs: job.finishedOn || Date.now(),
+      });
 
-  try {
-    await conversionWorker.close();
-    console.log('Worker closed');
+      const reasonMatch = error.message.match(/^(\w+):/);
+      const reason = reasonMatch ? reasonMatch[1] : undefined;
 
-    // Close browser after worker (no more jobs can start)
-    await closeBrowser();
-    console.log('Browser closed');
-  } catch (error) {
-    console.error('Error during shutdown:', error);
-  }
+      await notifyJobFailed({
+        jobId: job.id!,
+        url: job.data.originalUrl || job.data.url,
+        error: error.message,
+        reason,
+        attemptsMade: job.attemptsMade,
+        maxAttempts: job.opts?.attempts ?? 3,
+      });
 
-  process.exit(0);
+      try {
+        await maybeQueueAutoFix(job, error);
+      } catch (autoFixError) {
+        console.error('[Fix] Failed to auto-queue diagnosis:', autoFixError);
+      }
+    }
+  });
+
+  worker.on('error', (error: Error) => {
+    console.error(`Worker error: ${error.message}`);
+  });
+
+  return worker;
 }
 
 /**
@@ -496,6 +445,11 @@ async function gracefulShutdown(signal: string): Promise<void> {
  * 4. Log that the worker is ready for jobs
  */
 export async function startWorker(): Promise<void> {
+  if (conversionWorker) {
+    console.log(`Worker already started for queue '${QUEUE_NAME}'`);
+    return;
+  }
+
   // Initialize browser before starting worker
   await initBrowser();
 
@@ -510,11 +464,8 @@ export async function startWorker(): Promise<void> {
     console.log(`Ollama healthy, available models: ${ollamaHealth.models?.join(', ') ?? 'unknown'}`);
   }
 
-  // Register signal handlers
-  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-
-  console.log(`Worker started for queue '${QUEUE_NAME}' with concurrency 1`);
+  conversionWorker = createConversionWorker();
+  console.log(`Worker started for queue '${QUEUE_NAME}' with concurrency ${env.CONCURRENCY}`);
 }
 
 /**
@@ -526,7 +477,10 @@ export async function startWorker(): Promise<void> {
  */
 export async function stopWorker(): Promise<void> {
   console.log('Stopping worker...');
-  await conversionWorker.close();
+  if (conversionWorker) {
+    await conversionWorker.close();
+    conversionWorker = null;
+  }
   await closeBrowser();
   console.log('Worker stopped');
 }

@@ -35,10 +35,17 @@ let isShuttingDown = false;
 /** Reference to the worker instance */
 let fixWorkerInstance: Worker<FixJobData, FixHistoryEntry> | null = null;
 
-/** Shared queue-events for conversion replay verification */
-const conversionQueueEvents = new QueueEvents(QUEUE_NAME, {
-  connection: createConnection({ maxRetriesPerRequest: null }),
-});
+/** Shared queue-events for conversion replay verification. Created lazily on startup. */
+let conversionQueueEvents: QueueEvents | null = null;
+
+function getConversionQueueEvents(): QueueEvents {
+  if (!conversionQueueEvents) {
+    conversionQueueEvents = new QueueEvents(QUEUE_NAME, {
+      connection: createConnection({ maxRetriesPerRequest: null }),
+    });
+  }
+  return conversionQueueEvents;
+}
 
 interface CommandResult {
   success: boolean;
@@ -261,7 +268,7 @@ async function runReplayGate(urls: string[]): Promise<{
 
   for (const job of jobs) {
     try {
-      await job.waitUntilFinished(conversionQueueEvents, 12 * 60 * 1000);
+      await job.waitUntilFinished(getConversionQueueEvents(), 12 * 60 * 1000);
       successful++;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -526,7 +533,7 @@ export async function startFixWorker(): Promise<void> {
     return;
   }
 
-  await conversionQueueEvents.waitUntilReady();
+  await getConversionQueueEvents().waitUntilReady();
   fixWorkerInstance = createFixWorker();
   console.log(`[Fix] Fix worker started for queue '${FIX_QUEUE_NAME}'`);
 }
@@ -542,7 +549,8 @@ export async function stopFixWorker(): Promise<void> {
   }
 
   try {
-    await conversionQueueEvents.close();
+    await conversionQueueEvents?.close();
+    conversionQueueEvents = null;
   } catch {
     // Ignore close errors.
   }

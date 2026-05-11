@@ -11,7 +11,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { writeFile, unlink, mkdir, readFile, rename } from 'node:fs/promises';
+import { writeFile, unlink, mkdir, rename } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { promisify } from 'node:util';
 import * as path from 'node:path';
@@ -23,8 +23,10 @@ import { enrichDocumentMetadata } from '../metadata/enrichment.js';
 import { generateTranscriptPdf } from '../metadata/transcript-pdf.js';
 import { formatTranscriptWithLLM } from '../podcasts/transcript-formatter.js';
 import { resolveWhisperHost } from '../utils/whisper-host.js';
+import { createMultipartFileBody } from '../utils/multipart.js';
 import { sendDiscordNotification } from '../notifications/discord.js';
 import { fetchYouTubeMetadata } from './youtube-metadata.js';
+import { env } from '../config/env.js';
 import type { MediaItem } from './types.js';
 
 const require = createRequire(import.meta.url);
@@ -65,9 +67,6 @@ const whisperAgent = new Agent({
   connectTimeout: 5 * 60 * 1000,
 });
 
-/** Skip transcription for files larger than this (too expensive) */
-const MAX_TRANSCRIBE_SIZE_MB = 500;
-
 /**
  * Extract audio from an MP4 file as WAV for Whisper
  * Uses ffmpeg to demux audio stream
@@ -92,7 +91,6 @@ async function extractAudio(mp4Path: string): Promise<string> {
  * Send audio to Whisper ASR and get both text and VTT output
  */
 async function transcribeForVideo(audioPath: string): Promise<{ text: string; vtt: string }> {
-  const audioBuffer = await readFile(audioPath);
   const filename = path.basename(audioPath);
 
   // Pick the active ASR host once; both /asr calls (text + VTT) share it so
@@ -103,15 +101,21 @@ async function transcribeForVideo(audioPath: string): Promise<{ text: string; vt
   const textUrl = new URL('/asr', host);
   textUrl.searchParams.set('output', 'txt');
 
-  const textForm = new FormData();
-  textForm.append('audio_file', new Blob([audioBuffer]), filename);
+  const textForm = await createMultipartFileBody({
+    filePath: audioPath,
+    filename,
+  });
 
   const textResp = await fetch(textUrl.toString(), {
     method: 'POST',
-    body: textForm,
-    // @ts-expect-error - dispatcher is valid for undici
+    headers: {
+      'Content-Type': textForm.contentType,
+      'Content-Length': String(textForm.contentLength),
+    },
+    body: textForm.body,
+    duplex: 'half',
     dispatcher: whisperAgent,
-  });
+  } as unknown as RequestInit & { duplex: 'half'; dispatcher: Agent });
   if (!textResp.ok) throw new Error(`Whisper text error: ${textResp.status}`);
   const text = await textResp.text();
 
@@ -119,15 +123,21 @@ async function transcribeForVideo(audioPath: string): Promise<{ text: string; vt
   const vttUrl = new URL('/asr', host);
   vttUrl.searchParams.set('output', 'vtt');
 
-  const vttForm = new FormData();
-  vttForm.append('audio_file', new Blob([audioBuffer]), filename);
+  const vttForm = await createMultipartFileBody({
+    filePath: audioPath,
+    filename,
+  });
 
   const vttResp = await fetch(vttUrl.toString(), {
     method: 'POST',
-    body: vttForm,
-    // @ts-expect-error - dispatcher is valid for undici
+    headers: {
+      'Content-Type': vttForm.contentType,
+      'Content-Length': String(vttForm.contentLength),
+    },
+    body: vttForm.body,
+    duplex: 'half',
     dispatcher: whisperAgent,
-  });
+  } as unknown as RequestInit & { duplex: 'half'; dispatcher: Agent });
   if (!vttResp.ok) throw new Error(`Whisper VTT error: ${vttResp.status}`);
   const vtt = await vttResp.text();
 
@@ -184,8 +194,8 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
   const stats = statSync(mp4Path);
   const sizeMB = stats.size / (1024 * 1024);
 
-  if (sizeMB > MAX_TRANSCRIBE_SIZE_MB) {
-    console.log(`Skipping transcription for ${mp4Path} (${Math.round(sizeMB)}MB > ${MAX_TRANSCRIBE_SIZE_MB}MB limit)`);
+  if (sizeMB > env.MAX_VIDEO_TRANSCRIBE_MB) {
+    console.log(`Skipping transcription for ${mp4Path} (${Math.round(sizeMB)}MB > ${env.MAX_VIDEO_TRANSCRIBE_MB}MB limit)`);
     // Still write basic metadata even without transcript
     result.metadataWritten = await enrichVideoFile(mp4Path, {
       title: item.title || undefined,

@@ -32,9 +32,12 @@ function isVideoOnlyUrl(url: string): boolean {
  * 3. Filters out duplicate URLs (cross-feed dedup)
  * 4. Queues new items for metadata extraction
  */
-export const feedPollWorker = new Worker<FeedPollJobData>(
-  FEED_QUEUE_NAME,
-  async (job: Job<FeedPollJobData>) => {
+let feedPollWorker: Worker<FeedPollJobData> | null = null;
+
+function createFeedPollWorker(): Worker<FeedPollJobData> {
+  const worker = new Worker<FeedPollJobData>(
+    FEED_QUEUE_NAME,
+    async (job: Job<FeedPollJobData>) => {
     const { feedUrl, source } = job.data;
     const startTime = Date.now();
 
@@ -175,19 +178,36 @@ export const feedPollWorker = new Worker<FeedPollJobData>(
     } finally {
       await redis.quit();
     }
-  },
-  {
-    connection: workerConnection,
-    concurrency: 1, // Process one feed at a time
+    },
+    {
+      connection: workerConnection,
+      concurrency: 1, // Process one feed at a time
+    }
+  );
+
+  worker.on('completed', (job) => {
+    console.log(`Feed poll completed: ${job.data.source}`);
+  });
+
+  worker.on('failed', (job, err) => {
+    console.error(`Feed poll failed: ${job?.data.source}`, err.message);
+  });
+
+  return worker;
+}
+
+export async function startFeedPollWorker(): Promise<void> {
+  if (feedPollWorker) {
+    console.log(`Feed poll worker already started for queue '${FEED_QUEUE_NAME}'`);
+    return;
   }
-);
+  feedPollWorker = createFeedPollWorker();
+  console.log(`Feed poll worker started for queue '${FEED_QUEUE_NAME}'`);
+}
 
-feedPollWorker.on('completed', (job) => {
-  console.log(`Feed poll completed: ${job.data.source}`);
-});
-
-feedPollWorker.on('failed', (job, err) => {
-  console.error(`Feed poll failed: ${job?.data.source}`, err.message);
-});
-
-console.log(`Feed poll worker started for queue '${FEED_QUEUE_NAME}'`);
+export async function stopFeedPollWorker(): Promise<void> {
+  if (!feedPollWorker) return;
+  await feedPollWorker.close();
+  feedPollWorker = null;
+  console.log('Feed poll worker stopped');
+}

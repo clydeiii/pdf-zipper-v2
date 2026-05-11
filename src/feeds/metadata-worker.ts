@@ -63,9 +63,12 @@ function isKarakeepAssetUrl(url: string): boolean {
   return url.includes('/api/assets/');
 }
 
-export const metadataWorker = new Worker<MetadataJobData>(
-  METADATA_QUEUE_NAME,
-  async (job: Job<MetadataJobData>) => {
+let metadataWorker: Worker<MetadataJobData> | null = null;
+
+function createMetadataWorker(): Worker<MetadataJobData> {
+  const worker = new Worker<MetadataJobData>(
+    METADATA_QUEUE_NAME,
+    async (job: Job<MetadataJobData>) => {
     const { url, canonicalUrl, source, feedMetadata } = job.data;
 
     // Skip web metadata extraction for Karakeep asset URLs (they're not web pages)
@@ -212,19 +215,36 @@ export const metadataWorker = new Worker<MetadataJobData>(
       metadata: enrichedItem,
       conversionJobId: conversionJob.id,
     };
-  },
-  {
-    connection: workerConnection,
-    concurrency: 2, // Limit parallel extractions to reduce CPU load
+    },
+    {
+      connection: workerConnection,
+      concurrency: 2, // Limit parallel extractions to reduce CPU load
+    }
+  );
+
+  worker.on('completed', (job) => {
+    console.log(`Metadata extraction completed: ${job.data.url}`);
+  });
+
+  worker.on('failed', (job, err) => {
+    console.error(`Metadata extraction failed: ${job?.data.url}`, err.message);
+  });
+
+  return worker;
+}
+
+export async function startMetadataWorker(): Promise<void> {
+  if (metadataWorker) {
+    console.log(`Metadata worker already started for queue '${METADATA_QUEUE_NAME}'`);
+    return;
   }
-);
+  metadataWorker = createMetadataWorker();
+  console.log(`Metadata worker started for queue '${METADATA_QUEUE_NAME}'`);
+}
 
-metadataWorker.on('completed', (job) => {
-  console.log(`Metadata extraction completed: ${job.data.url}`);
-});
-
-metadataWorker.on('failed', (job, err) => {
-  console.error(`Metadata extraction failed: ${job?.data.url}`, err.message);
-});
-
-console.log(`Metadata worker started for queue '${METADATA_QUEUE_NAME}'`);
+export async function stopMetadataWorker(): Promise<void> {
+  if (!metadataWorker) return;
+  await metadataWorker.close();
+  metadataWorker = null;
+  console.log('Metadata worker stopped');
+}

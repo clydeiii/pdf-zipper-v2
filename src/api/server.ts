@@ -13,6 +13,7 @@
 import express, { Request, Response } from 'express';
 import { fileURLToPath } from 'node:url';
 import * as path from 'node:path';
+import type { Server } from 'node:http';
 import { jobsRouter } from './routes/jobs.js';
 import { filesRouter } from './routes/files.js';
 import { downloadRouter } from './routes/download.js';
@@ -34,13 +35,12 @@ const __dirname = path.dirname(__filename);
  */
 export const app = express();
 
-// Middleware
-// Increase JSON body limit for:
-// - cookies.txt uploads (~1-2MB)
-// - Chrome plugin manual-capture (base64 PDF + markdown, can reach 20-30MB for long articles)
-// Safe to allow large payloads since server is behind Cloudflare Access
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+// Route-specific parsers keep the default API surface small while allowing
+// intentionally large Chrome-plugin uploads and cookies.txt imports.
+const defaultJsonParser = express.json({ limit: env.JSON_BODY_LIMIT });
+const defaultUrlencodedParser = express.urlencoded({ extended: true, limit: env.JSON_BODY_LIMIT });
+const cookiesJsonParser = express.json({ limit: env.COOKIES_BODY_LIMIT });
+const manualCaptureJsonParser = express.json({ limit: env.MANUAL_CAPTURE_BODY_LIMIT });
 
 // Static file serving from public/ directory
 const publicPath = path.join(__dirname, '..', '..', 'public');
@@ -56,14 +56,16 @@ app.get('/health', (_req: Request, res: Response) => {
 });
 
 // Mount API routes
+app.use('/api/manual-capture', manualCaptureJsonParser, manualCaptureRouter);
+app.use('/api/cookies', cookiesJsonParser, cookiesRouter);
+app.use(defaultJsonParser);
+app.use(defaultUrlencodedParser);
 app.use('/api/jobs', jobsRouter);
 app.use('/api/files', filesRouter);
 app.use('/api/download', downloadRouter);
-app.use('/api/cookies', cookiesRouter);
 app.use('/api/debug', debugRouter);
 app.use('/api/fix', fixRouter);
 app.use('/api/telemetry', telemetryRouter);
-app.use('/api/manual-capture', manualCaptureRouter);
 app.use('/api', serveRouter);
 
 // Mount Bull Board dashboard
@@ -77,10 +79,10 @@ app.get('/', (_req: Request, res: Response) => {
 /**
  * Start the HTTP server
  */
-export function startServer(): void {
+export function startServer(): Server {
   const port = env.PORT;
 
-  app.listen(port, () => {
+  return app.listen(port, () => {
     console.log(`Server listening on port ${port}`);
     console.log(`Bull Board available at http://localhost:${port}/admin/queues`);
   });

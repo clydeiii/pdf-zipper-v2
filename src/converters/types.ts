@@ -4,6 +4,8 @@
 export interface PDFOptions {
   /** Navigation timeout in ms (default: 30000) */
   timeout?: number;
+  /** PDF generation timeout in ms (default: 90000) */
+  pdfTimeout?: number;
   /** Wait time after domcontentloaded for JS rendering in ms (default: 1000) */
   waitAfterLoad?: number;
   /** Page format (default: 'A4') */

@@ -3,6 +3,45 @@ import { loadCookies } from '../browsers/cookies.js';
 import { env } from '../config/env.js';
 import type { PDFOptions, PDFResult, PDFPassthroughResult } from './types.js';
 
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timeoutId: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
+async function readResponseBufferWithLimit(response: Response, maxBytes: number): Promise<Buffer> {
+  if (!response.body) {
+    throw new Error('Response body is empty');
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      throw new Error(`Download exceeded ${maxBytes} byte limit`);
+    }
+    chunks.push(Buffer.from(value));
+  }
+
+  return Buffer.concat(chunks, total);
+}
+
 /**
  * Check if a URL points directly to a PDF file
  * Checks URL path extension and known PDF URL patterns
@@ -81,6 +120,7 @@ export async function downloadPdfDirect(url: string): Promise<PDFPassthroughResu
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       },
+      signal: AbortSignal.timeout(env.DIRECT_DOWNLOAD_TIMEOUT_MS),
     });
 
     if (!response.ok) {
@@ -103,8 +143,17 @@ export async function downloadPdfDirect(url: string): Promise<PDFPassthroughResu
       };
     }
 
-    const arrayBuffer = await response.arrayBuffer();
-    const pdfBuffer = Buffer.from(arrayBuffer);
+    const contentLength = response.headers.get('content-length');
+    if (contentLength && parseInt(contentLength, 10) > env.MAX_DIRECT_PDF_BYTES) {
+      return {
+        success: false,
+        url,
+        error: `PDF too large: ${contentLength} bytes exceeds ${env.MAX_DIRECT_PDF_BYTES}`,
+        reason: 'download_failed',
+      };
+    }
+
+    const pdfBuffer = await readResponseBufferWithLimit(response, env.MAX_DIRECT_PDF_BYTES);
 
     // Try to extract title from Content-Disposition header
     let suggestedFilename: string | undefined;
@@ -429,7 +478,8 @@ export async function convertUrlToPDF(
   // Extract options with defaults
   // Note: 60s timeout for SPA-heavy sites (OpenAI, etc)
   const {
-    timeout = 60000,
+    timeout = env.NAV_TIMEOUT_MS,
+    pdfTimeout = env.PDF_TIMEOUT_MS,
     waitAfterLoad = 1000,
     format = 'A4',
     margin = { top: '20px', right: '20px', bottom: '20px', left: '20px' }
@@ -830,13 +880,13 @@ export async function convertUrlToPDF(
           type: 'png',
           fullPage: false,
         });
-        const pdfBuffer = await directPage.pdf({
+        const pdfBuffer = await withTimeout(directPage.pdf({
           format,
           printBackground: true,
           margin,
           preferCSSPageSize: false,
           scale: 0.7
-        });
+        }), pdfTimeout, 'PDF generation');
         return {
           success: true,
           pdfBuffer: Buffer.from(pdfBuffer),
@@ -1119,13 +1169,13 @@ export async function convertUrlToPDF(
 
     // Generate PDF with scale to fit wide content on A4
     // 1280px viewport → 595pt A4 width requires ~0.8 scale
-    const pdfBuffer = await page.pdf({
+    const pdfBuffer = await withTimeout(page.pdf({
       format,
       printBackground: true,
       margin,
       preferCSSPageSize: false,
       scale: 0.7
-    });
+    }), pdfTimeout, 'PDF generation');
 
     // For Twitter URLs that went through Nitter, mark as NOT an X Article
     // (X Articles are captured directly from X.com and have isXArticle: true)

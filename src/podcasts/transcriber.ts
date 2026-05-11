@@ -12,9 +12,13 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { unlink, mkdir, writeFile } from 'node:fs/promises';
+import { unlink, mkdir } from 'node:fs/promises';
+import { pipeline } from 'node:stream/promises';
+import { Readable } from 'node:stream';
 import { Agent } from 'undici';
 import { resolveWhisperHost } from '../utils/whisper-host.js';
+import { createMultipartFileBody } from '../utils/multipart.js';
+import { env } from '../config/env.js';
 import type { WhisperResponse, TranscriptionResult } from './types.js';
 
 /**
@@ -65,17 +69,34 @@ export async function downloadAudio(
 
   const startTime = Date.now();
 
-  const response = await fetch(audioUrl);
+  const response = await fetch(audioUrl, {
+    signal: AbortSignal.timeout(env.PODCAST_DOWNLOAD_TIMEOUT_MS),
+  });
 
   if (!response.ok) {
     throw new Error(`Audio download failed: ${response.status} ${response.statusText}`);
   }
 
-  // Get array buffer and write to file
-  const arrayBuffer = await response.arrayBuffer();
-  await writeFile(filePath, Buffer.from(arrayBuffer));
+  const contentLength = response.headers.get('content-length');
+  if (contentLength && parseInt(contentLength, 10) > env.MAX_PODCAST_AUDIO_BYTES) {
+    throw new Error(`Audio download too large: ${contentLength} bytes exceeds ${env.MAX_PODCAST_AUDIO_BYTES}`);
+  }
+
+  if (!response.body) {
+    throw new Error('Audio download failed: response body is empty');
+  }
+
+  await pipeline(
+    Readable.fromWeb(response.body as any),
+    fs.createWriteStream(filePath)
+  );
 
   const stats = fs.statSync(filePath);
+  if (stats.size > env.MAX_PODCAST_AUDIO_BYTES) {
+    await unlink(filePath).catch(() => {});
+    throw new Error(`Audio download too large: ${stats.size} bytes exceeds ${env.MAX_PODCAST_AUDIO_BYTES}`);
+  }
+
   const downloadTime = Date.now() - startTime;
 
   console.log(JSON.stringify({
@@ -217,17 +238,13 @@ export async function transcribeAudio(
 
   const startTime = Date.now();
 
-  // Read file and create form data
-  const audioBuffer = fs.readFileSync(audioPath);
   const filename = path.basename(audioPath);
-
-  const formData = new FormData();
-  formData.append('audio_file', new Blob([audioBuffer]), filename);
 
   // Add initial_prompt if provided - helps Whisper with proper nouns and terms
   // Note: This only affects the first 30 seconds unless the ASR service has carry_initial_prompt=True
+  const fields: Record<string, string | undefined> = {};
   if (options?.initialPrompt) {
-    formData.append('initial_prompt', options.initialPrompt);
+    fields.initial_prompt = options.initialPrompt;
     console.log(JSON.stringify({
       event: 'whisper_initial_prompt',
       promptLength: options.initialPrompt.length,
@@ -236,14 +253,24 @@ export async function transcribeAudio(
     }));
   }
 
+  const multipart = await createMultipartFileBody({
+    filePath: audioPath,
+    filename,
+    fields,
+  });
+
   // Whisper transcription can take 5-15+ minutes for long podcasts with medium.en model
   // Use custom agent with extended timeouts (undici default is 5 min which is too short)
   const response = await fetch(url.toString(), {
     method: 'POST',
-    body: formData,
-    // @ts-expect-error - dispatcher is valid for undici but not in standard fetch types
+    headers: {
+      'Content-Type': multipart.contentType,
+      'Content-Length': String(multipart.contentLength),
+    },
+    body: multipart.body,
+    duplex: 'half',
     dispatcher: whisperAgent,
-  });
+  } as unknown as RequestInit & { duplex: 'half'; dispatcher: Agent });
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -329,8 +356,14 @@ export async function transcribePodcast(
   // Get audio file size
   const stats = fs.statSync(audioPath);
 
-  // Transcribe with optional hints
-  const transcript = await transcribeAudio(audioPath, options);
+  let transcript: WhisperResponse;
+  try {
+    // Transcribe with optional hints
+    transcript = await transcribeAudio(audioPath, options);
+  } catch (error) {
+    await cleanupAudioFile(audioPath);
+    throw error;
+  }
 
   // Return both transcript and audio path (caller will archive and cleanup)
   return {
