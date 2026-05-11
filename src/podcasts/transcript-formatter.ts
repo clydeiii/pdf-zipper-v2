@@ -40,9 +40,57 @@ function stripSrtFormatting(text: string): string {
 }
 
 /**
+ * Clean up Parakeet paragraph-grouping artifacts:
+ * 1. Period/comma at start of line (sentence-split alignment issue)
+ * 2. Orphan fragments < 80 chars that should merge with neighbors
+ * 3. Collapse excessive paragraph breaks
+ */
+function cleanParakeetArtifacts(text: string): string {
+  let cleaned = text
+    // Fix period/comma/question at start of a line — merge with previous line
+    // e.g. "Yeah\n. Most people" → "Yeah. Most people"
+    .replace(/\n([.?!,;:]) /g, '$1 ')
+    // Same across paragraph breaks: "Yeah\n\n. Most" → "Yeah.\n\nMost"
+    .replace(/\n\n([.?!]) /g, '$1\n\n');
+
+  // Merge orphan paragraphs (< 80 chars) with the next paragraph
+  const paragraphs = cleaned.split(/\n\n+/);
+  const merged: string[] = [];
+  let carry = '';
+
+  for (const para of paragraphs) {
+    const trimmed = para.trim();
+    if (!trimmed) continue;
+
+    if (carry) {
+      // Attach orphan to this paragraph
+      merged.push(carry + ' ' + trimmed);
+      carry = '';
+    } else if (trimmed.length < 80 && merged.length > 0) {
+      // Too short to be its own paragraph — try merging with previous
+      merged[merged.length - 1] += ' ' + trimmed;
+    } else if (trimmed.length < 80 && merged.length === 0) {
+      // First paragraph is short — carry forward
+      carry = trimmed;
+    } else {
+      merged.push(trimmed);
+    }
+  }
+  if (carry) {
+    if (merged.length > 0) {
+      merged[merged.length - 1] += ' ' + carry;
+    } else {
+      merged.push(carry);
+    }
+  }
+
+  return merged.join('\n\n');
+}
+
+/**
  * Format a transcript using LLM to create readable paragraphs
  *
- * @param rawTranscript - Raw transcript from Whisper (choppy paragraphs)
+ * @param rawTranscript - Raw transcript from ASR (Parakeet or Whisper)
  * @param context - Optional show notes to help with proper nouns and topics
  * @returns Formatted transcript with proper paragraph structure
  */
@@ -51,7 +99,10 @@ export async function formatTranscriptWithLLM(
   context?: FormattingContext
 ): Promise<string> {
   // Strip SRT formatting if present (old Whisper instances may return SRT)
-  const cleanedTranscript = stripSrtFormatting(rawTranscript);
+  let cleanedTranscript = stripSrtFormatting(rawTranscript);
+
+  // Clean Parakeet paragraph-grouping artifacts
+  cleanedTranscript = cleanParakeetArtifacts(cleanedTranscript);
 
   // For very short transcripts, skip LLM processing
   if (cleanedTranscript.length < 500) {
@@ -140,24 +191,31 @@ function buildSpellingCorrections(context?: FormattingContext): string {
 async function formatChunk(text: string, context?: FormattingContext): Promise<string> {
   const spellingHints = buildSpellingCorrections(context);
 
-  const prompt = `Reformat this podcast transcript into clean, readable prose.
+  // If no spelling hints, skip LLM entirely — Parakeet already produces
+  // punctuated, cased, paragraph-broken text. No point burning 13 min of
+  // Ollama time just to remove a few filler words.
+  if (!spellingHints) {
+    console.log(JSON.stringify({
+      event: 'transcript_format_skipped',
+      reason: 'no_spelling_hints',
+      textLength: text.length,
+      timestamp: new Date().toISOString(),
+    }));
+    return text;
+  }
 
-INPUT CONTEXT:
-- This is a podcast transcript (may be conversational or a narrated blog post)
-- It may contain ASR artifacts from speech-to-text: "Subtitle", "Heading", "Subheading" are structural markers spoken aloud — remove them
-- Image/figure descriptions ("There's an image here...") should be condensed to just the figure number and caption
-${spellingHints ? `- Proper nouns to correct: ${spellingHints}` : ''}
+  const prompt = `Fix proper noun spellings in this transcript. You are a PROOFREADER, not an editor. This output feeds another AI that trusts it as ground truth — hallucinated substitutions corrupt the record.
+
+PROPER NOUNS TO FIX (case-insensitive match): ${spellingHints}
 
 RULES:
-1. Group related sentences into paragraphs of 3-5 sentences. Break at topic shifts.
-2. Remove TTS artifacts: "Subtitle", "Heading", "Subheading", "There's a heading here"
-3. For figure references, keep only: [Figure N: caption text]
-4. Remove verbal filler: "um", "uh", "you know", "I mean", "sort of", "kind of" (as filler)
-5. Fix punctuation and capitalization where ASR got it wrong
-6. Preserve ALL substantive content — do not summarize or skip anything
-7. Output plain text only. No markdown formatting, no headers, no commentary.
+- Replace words that phonetically or textually match the proper nouns above with the correct spelling (e.g. "open claw" → "OpenClaw", "chat GPT" → "ChatGPT").
+- Remove standalone verbal filler: "um", "uh", "you know", "I mean", "sort of", "kind of" — only when filler, not when meaningful.
+- DO NOT change any other words. If you see something unfamiliar (e.g. "01"), leave it exactly as is.
+- DO NOT add, remove, reorder, or summarize sentences. Output must be the same length as input.
+- Preserve all existing paragraph breaks (blank lines).
 
-Return ONLY the cleaned transcript:
+Output plain text only. Return ONLY the corrected transcript:
 
 ${text}`;
 
@@ -180,9 +238,9 @@ ${text}`;
       ],
       think: false,       // Disable internal reasoning (saves ~3000 tokens per call)
       options: {
-        temperature: 0.3, // Low temperature for consistent formatting
+        temperature: 0.2, // Low temperature — this is proofreading, not creative
         num_predict: -1,  // No limit on output tokens
-        num_ctx: 32768,   // 32K context for long transcript chunks
+        num_ctx: 16384,   // 16K — prompt is much shorter now (just proper-noun fix)
       },
     });
 

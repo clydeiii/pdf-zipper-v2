@@ -232,9 +232,14 @@ async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Pro
     };
   }
 
-  // Check PDF content for truncation (catches paywalls that screenshot check misses)
-  const contentResult = await analyzePdfContent(result.pdfBuffer);
-  console.log(`PDF content analysis for ${url}: ${contentResult.charCount} chars, ${contentResult.pageCount} pages, ${contentResult.charsPerKb} chars/KB`);
+  // Check PDF content for truncation (catches paywalls that screenshot check misses).
+  // Lenient mode for Nitter tweet captures (isXArticle === false): a tweet
+  // with no replies legitimately has very little body text, so we only fail
+  // when the PDF is truly blank. X Articles (isXArticle === true) are full
+  // essays and get the strict checks like other articles.
+  const lenient = isXArticle === false;
+  const contentResult = await analyzePdfContent(result.pdfBuffer, { lenient });
+  console.log(`PDF content analysis for ${url}: ${contentResult.charCount} chars, ${contentResult.pageCount} pages, ${contentResult.charsPerKb} chars/KB${lenient ? ' [lenient: tweet]' : ''}`);
 
   if (!contentResult.passed) {
     // Save debug PDF before failing

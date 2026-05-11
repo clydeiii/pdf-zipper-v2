@@ -95,6 +95,41 @@ const ERROR_PAGE_PATTERNS = [
 ];
 
 /**
+ * "Stripped page" patterns — site nav/footer chrome rendered without the
+ * article body. Reuters' Akamai protection serves a content-less skeleton to
+ * automated browsers (no explicit bot wall, no 404), so the vision scorer
+ * sees a real page with text and gives it a passing score. The text content
+ * is identical across articles (~1700 chars of nav links + boilerplate),
+ * which is what these patterns key on. Only checked when char count is low.
+ */
+const STRIPPED_PAGE_PATTERNS = [
+  // Reuters: this exact phrase only appears in the global footer, never in
+  // article copy. Combined with low char count it's a reliable failure signal.
+  /reuters,?\s+the\s+news\s+and\s+media\s+division\s+of\s+thomson\s+reuters/i,
+];
+
+/**
+ * Site-template markers that indicate the article body has ended (related
+ * articles, author bio, "Most Popular" widget, etc.). Used to detect stealth
+ * paywalls — sites that show the lede + 1-2 paragraphs, then drop into the
+ * end-of-page boilerplate. No explicit "subscribe to continue" text, so the
+ * vision scorer + paywall regex both pass; a real article body would push
+ * these markers much further down the page.
+ */
+const END_OF_ARTICLE_MARKERS = [
+  /\babout\s+the\s+author\b/i,
+  /\blatest\s+in\s+\w[\w\s]{0,30}\b/i,    // "Latest in Crypto", "Latest in Tech"
+  /\bmost\s+popular\b/i,
+  /\brecommended\s+(stories|articles|reading)\b/i,
+  /\brelated\s+(stories|articles|posts)\b/i,
+];
+
+/** Char index before which an end-of-article marker is suspicious (= truncation) */
+const TRUNCATED_BODY_PREFIX = 2500;
+/** Total char count above which we trust the document is a real full article */
+const TRUNCATED_BODY_CEILING = 8000;
+
+/**
  * Firewall/WAF patterns - if any of these appear, the page was blocked by a firewall
  * Common on sites using Cloudflare, Akamai, AWS WAF, etc.
  */
@@ -132,6 +167,9 @@ const HARD_PAYWALL_PATTERNS = [
   // Explicit "continue reading" gates
   /continue\s+reading\s+(your\s+)?(article|story)\s+with\s+a/i,
   /subscribe\s+to\s+(continue|keep)\s+reading/i,
+  // "Subscribe to <site name> to continue reading" — e.g. The Verge, Wired.
+  // Bounded & non-greedy so the site-name gap can't span sentences.
+  /subscribe\s+to\s+[^.!?]{1,60}?\s+to\s+(continue|keep)\s+reading/i,
   /sign\s+up\s+to\s+(continue|keep)\s+reading/i,
   /create\s+(a\s+)?free\s+account\s+to\s+(continue|read)/i,
   /already\s+a\s+subscriber\?\s*sign\s+in/i,
@@ -184,13 +222,30 @@ const SOFT_PAYWALL_PATTERNS = [
 ];
 
 /**
+ * Options for `analyzePdfContent`.
+ */
+export interface AnalyzePdfContentOptions {
+  /**
+   * Skip body-length / truncation checks. Hostile-page checks (firewall,
+   * 404, hard paywall) still run. Used for content where short body is
+   * legitimate (Nitter tweet captures with no replies, single-status posts) —
+   * those should only fail when the PDF is truly blank.
+   */
+  lenient?: boolean;
+}
+
+/**
  * Extract and analyze text content from a PDF buffer
  * Detects truncated articles by checking text-to-size ratio
  *
  * @param pdfBuffer - The PDF file as a Buffer
+ * @param options - Optional analysis flags (e.g. lenient for tweets)
  * @returns Analysis result with pass/fail and metrics
  */
-export async function analyzePdfContent(pdfBuffer: Buffer): Promise<PdfContentResult> {
+export async function analyzePdfContent(
+  pdfBuffer: Buffer,
+  options: AnalyzePdfContentOptions = {}
+): Promise<PdfContentResult> {
   const pdfSize = pdfBuffer.length;
 
   try {
@@ -252,6 +307,17 @@ export async function analyzePdfContent(pdfBuffer: Buffer): Promise<PdfContentRe
           };
         }
       }
+
+      // Stripped page: footer chrome rendered without article body.
+      for (const pattern of STRIPPED_PAGE_PATTERNS) {
+        if (pattern.test(normalizedText)) {
+          return {
+            ...baseResult,
+            passed: false,
+            reason: `Stripped page: only nav/footer rendered (${charCount} chars). Article body missing — likely silently bot-throttled.`,
+          };
+        }
+      }
     }
 
     // Check 0.75: Paywall detection (two tiers)
@@ -275,7 +341,7 @@ export async function analyzePdfContent(pdfBuffer: Buffer): Promise<PdfContentRe
     // These could legitimately appear in article text (e.g., a blog post mentioning
     // "subscribe to my newsletter for $7/month").
     const MAX_CHARS_FOR_SOFT_PAYWALL = 5000;
-    if (charCount < MAX_CHARS_FOR_SOFT_PAYWALL) {
+    if (!options.lenient && charCount < MAX_CHARS_FOR_SOFT_PAYWALL) {
       for (const pattern of SOFT_PAYWALL_PATTERNS) {
         if (pattern.test(normalizedText)) {
           const match = normalizedText.match(pattern)?.[0];
@@ -288,18 +354,44 @@ export async function analyzePdfContent(pdfBuffer: Buffer): Promise<PdfContentRe
       }
     }
 
-    // Check 1: Very little text overall
-    if (charCount < MIN_ARTICLE_CHARS) {
+    // Check 0.9: Stealth paywall via early end-of-article markers.
+    // Some sites (Fortune, etc.) silently truncate the article body and drop
+    // straight into "Recommended Video → About the Author → Latest in X →
+    // Most Popular" boilerplate. No "subscribe" text, so the paywall regex
+    // misses it and the vision scorer sees a real-looking page. Heuristic:
+    // when an end-of-article marker appears very early in a short doc, the
+    // body got cut off. Skipped above the ceiling so legit medium-length
+    // articles aren't flagged.
+    if (!options.lenient && charCount < TRUNCATED_BODY_CEILING) {
+      for (const pattern of END_OF_ARTICLE_MARKERS) {
+        const match = pattern.exec(normalizedText);
+        if (match && match.index < TRUNCATED_BODY_PREFIX) {
+          return {
+            ...baseResult,
+            passed: false,
+            reason: `Truncated body: site-template marker "${match[0]}" appears at char ${match.index} (before normal article-body length). Likely stealth paywall.`,
+          };
+        }
+      }
+    }
+
+    // Check 1: Very little text overall.
+    // Lenient mode (Nitter tweet captures) only fails when truly blank —
+    // a status with no replies legitimately has very little body text.
+    const minChars = options.lenient ? 1 : MIN_ARTICLE_CHARS;
+    if (charCount < minChars) {
       return {
         ...baseResult,
         passed: false,
-        reason: `PDF has only ${charCount} characters of text (minimum: ${MIN_ARTICLE_CHARS}). Content appears truncated.`,
+        reason: options.lenient
+          ? `PDF is blank (0 chars of text).`
+          : `PDF has only ${charCount} characters of text (minimum: ${MIN_ARTICLE_CHARS}). Content appears truncated.`,
       };
     }
 
     // Check 2: Large PDF with suspiciously little text
     // This catches the "big hero image but truncated article" case
-    if (pdfSize > LARGE_PDF_THRESHOLD && charCount < MIN_CHARS_FOR_LARGE_PDF) {
+    if (!options.lenient && pdfSize > LARGE_PDF_THRESHOLD && charCount < MIN_CHARS_FOR_LARGE_PDF) {
       return {
         ...baseResult,
         passed: false,
@@ -316,7 +408,7 @@ export async function analyzePdfContent(pdfBuffer: Buffer): Promise<PdfContentRe
     const hasSufficientChars = charCount >= SUFFICIENT_CHARS_BYPASS_RATIO;
     const hasSufficientCharsPerPage = charsPerPage >= MIN_CHARS_PER_PAGE_BYPASS;
 
-    if (pageCount > 1 && charsPerKb < MIN_CHARS_PER_KB && !hasSufficientChars && !hasSufficientCharsPerPage) {
+    if (!options.lenient && pageCount > 1 && charsPerKb < MIN_CHARS_PER_KB && !hasSufficientChars && !hasSufficientCharsPerPage) {
       return {
         ...baseResult,
         passed: false,

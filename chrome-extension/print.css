@@ -47,3 +47,14 @@
     text-shadow: none !important;
   }
 }
+
+/* Force-clip oversized decorative blobs during capture.
+   These are large round elements used by newsletters (beehiiv, Substack, etc.)
+   that break out of their container in print/PDF mode. */
+.pdfzipper-capturing [style*="border-radius: 50%"],
+.pdfzipper-capturing [style*="border-radius:50%"],
+.pdfzipper-capturing [style*="border-radius: 9999"],
+.pdfzipper-capturing [style*="border-radius:9999"] {
+  overflow: hidden !important;
+  clip-path: inset(0) !important;
+}

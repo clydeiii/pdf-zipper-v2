@@ -39,6 +39,11 @@ export interface MetadataJobData {
 export interface MediaCollectionJobData {
   item: MediaItem;
   retryCount?: number;  // Track retries for transcript polling
+  /**
+   * If set, skip download and re-run enrichment on this existing file.
+   * Used by the "rerun" UI for videos/PDFs that are already on disk.
+   */
+  existingFilePath?: string;
 }
 
 /**

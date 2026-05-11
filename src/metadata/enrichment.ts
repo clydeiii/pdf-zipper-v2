@@ -9,26 +9,8 @@
  * - Full English translation (for non-English documents)
  */
 
-import { Ollama } from 'ollama';
-import { Agent } from 'undici';
 import { env } from '../config/env.js';
-
-/**
- * Dedicated Ollama client for enrichment tasks with extended timeout.
- * Model swaps (e.g., e4b→26b) + generation on large texts can take minutes.
- */
-const enrichmentAgent = new Agent({
-  headersTimeout: 10 * 60 * 1000,  // 10 minutes
-  bodyTimeout: 10 * 60 * 1000,
-  connectTimeout: 30 * 1000,
-});
-
-const ollama = new Ollama({
-  host: env.OLLAMA_HOST,
-  fetch: ((url: string | URL | Request, init?: RequestInit) => {
-    return fetch(url, { ...init, dispatcher: enrichmentAgent } as RequestInit);
-  }) as typeof fetch,
-});
+import { chatText } from '../utils/llm-chat.js';
 
 /**
  * Enriched metadata extracted from document content
@@ -96,13 +78,14 @@ ${pageTitle ? `Page title: ${pageTitle}` : ''}
 Article text:
 ${truncatedText}`;
 
-  const response = await ollama.chat({
+  const content = await chatText({
     model: env.OLLAMA_MODEL,
     messages: [{ role: 'user', content: prompt }],
-    options: { temperature: 0.2, num_ctx: 8192 },
+    temperature: 0.2,
+    numCtx: 8192,
   });
 
-  return parseMetadataResponse(response.message.content, url, pageTitle);
+  return parseMetadataResponse(content, url, pageTitle);
 }
 
 /**
@@ -159,13 +142,15 @@ async function translateToEnglish(text: string, sourceLanguage: string): Promise
 
 ${text}`;
 
-  const response = await ollama.chat({
+  const content = await chatText({
     model: env.OLLAMA_MODEL,
     messages: [{ role: 'user', content: prompt }],
-    options: { temperature: 0.3, num_predict: -1, num_ctx: 16384 },
+    temperature: 0.3,
+    numPredict: -1,
+    numCtx: 16384,
   });
 
-  return response.message.content.trim();
+  return content.trim();
 }
 
 /**

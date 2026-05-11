@@ -141,42 +141,80 @@ export async function startPodcastWorker(): Promise<void> {
 
         // Step 2: Download and transcribe audio
         await job.updateProgress(20);
-        await job.log('Downloading audio and transcribing with Whisper...');
-        await job.log('(This may take a while for long podcasts)');
+        await job.log('Downloading audio and transcribing with Parakeet...');
 
-        // Build initial_prompt for Whisper from show notes to help with proper nouns
-        // NOTE: initial_prompt can cause issues with some faster_whisper configs - disabled for now
-        // const whisperHints = buildWhisperHints(metadata);
-        // if (whisperHints) {
-        //   await job.log(`Whisper hints: ${whisperHints.substring(0, 100)}...`);
-        // }
+        const durationMin = Math.round(metadata.duration / 60000);
+        await sendDiscordNotification({
+          type: 'info',
+          title: '🎙️ Parakeet: transcribing',
+          description: `"${metadata.episodeTitle}"`,
+          fields: [
+            { name: 'Show', value: metadata.podcastName, inline: true },
+            { name: 'Duration', value: `${durationMin} min`, inline: true },
+          ],
+        });
 
+        const transcribeStart = Date.now();
         const transcriptionResult = await transcribePodcast(
           metadata.audioUrl,
           metadata.audioExtension
-          // whisperHints ? { initialPrompt: whisperHints } : undefined  // Disabled - causes truncation
         );
 
         const { transcript, audioPath: tempAudioPath, audioSize } = transcriptionResult;
+        const transcribeElapsed = Math.round((Date.now() - transcribeStart) / 1000);
 
         await job.log(`Transcription complete: ${transcript.text.length.toLocaleString()} characters`);
         await job.log(`Audio file: ${Math.round(audioSize / 1024 / 1024 * 10) / 10} MB`);
-        if (transcript.language) {
-          await job.log(`Detected language: ${transcript.language}`);
-        }
+
+        await sendDiscordNotification({
+          type: 'success',
+          title: '🎙️ Parakeet: done',
+          description: `"${metadata.episodeTitle}"`,
+          fields: [
+            { name: 'Time', value: `${transcribeElapsed}s`, inline: true },
+            { name: 'Speed', value: `${((durationMin * 60) / transcribeElapsed).toFixed(0)}x realtime`, inline: true },
+            { name: 'Chars', value: transcript.text.length.toLocaleString(), inline: true },
+          ],
+        });
 
         // Step 3: Format transcript with LLM for readability
         await job.updateProgress(60);
-        await job.log('Formatting transcript with LLM...');
-        if (metadata.showNotes?.links?.length) {
-          await job.log(`Using ${metadata.showNotes.links.length} show note links as context hints`);
+
+        const hasHints = !!(metadata.showNotes?.links?.length || metadata.episodeTitle);
+        if (hasHints) {
+          await job.log('Formatting transcript with Gemma4 (proper-noun correction)...');
+          await sendDiscordNotification({
+            type: 'info',
+            title: '🧠 Gemma4: formatting',
+            description: `"${metadata.episodeTitle}"`,
+            fields: [
+              { name: 'Chunks', value: `~${Math.ceil(transcript.text.length / 15000)}`, inline: true },
+              { name: 'Input', value: `${transcript.text.length.toLocaleString()} chars`, inline: true },
+            ],
+          });
+        } else {
+          await job.log('No spelling hints — skipping LLM formatting (Parakeet output is clean)');
         }
 
+        const formatStart = Date.now();
         const formattedText = await formatTranscriptWithLLM(transcript.text, {
           showNotes: metadata.showNotes,
           episodeTitle: metadata.episodeTitle,
         });
         const formattedTranscript = { ...transcript, text: formattedText };
+        const formatElapsed = Math.round((Date.now() - formatStart) / 1000);
+
+        if (hasHints) {
+          await sendDiscordNotification({
+            type: 'success',
+            title: '🧠 Gemma4: done',
+            description: `"${metadata.episodeTitle}"`,
+            fields: [
+              { name: 'Time', value: `${formatElapsed}s`, inline: true },
+              { name: 'Output', value: `${formattedText.length.toLocaleString()} chars`, inline: true },
+            ],
+          });
+        }
 
         await job.log(`Formatted: ${formattedText.length.toLocaleString()} characters`);
 

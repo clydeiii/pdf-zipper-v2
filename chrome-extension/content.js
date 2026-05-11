@@ -148,13 +148,52 @@
     for (let i = 0; i < all.length; i++) {
       const el = all[i];
       if (el === document.documentElement || el === document.body) continue;
-      let pos;
-      try { pos = getComputedStyle(el).position; } catch (e) { continue; }
-      if (pos !== 'fixed' && pos !== 'sticky') continue;
-      const rect = el.getBoundingClientRect();
-      if (rect.width * rect.height > viewportArea * 0.75) continue;
-      el.classList.add('pdfzipper-hide');
-      markedElements.push(el);
+
+      let style;
+      try { style = getComputedStyle(el); } catch (e) { continue; }
+
+      // 1) Fixed/sticky elements (nav bars, cookie banners, etc.)
+      if (style.position === 'fixed' || style.position === 'sticky') {
+        const rect = el.getBoundingClientRect();
+        // Skip full-page wrappers (some sites wrap everything in position:fixed for scroll effects)
+        if (rect.width * rect.height > viewportArea * 0.75) continue;
+        el.classList.add('pdfzipper-hide');
+        markedElements.push(el);
+        continue;
+      }
+
+      // 2) Large decorative blobs — elements with border-radius >= 50%, large
+      //    area, and no meaningful text content. Sites like beehiiv, Substack,
+      //    and many newsletters use enormous CSS circles/ellipses for visual
+      //    flair that render fine on-screen (overflow:hidden) but explode in
+      //    print/PDF, obscuring article content.
+      const br = style.borderRadius;
+      const isRound = br && (br.includes('50%') || br.includes('9999') || br === '100%');
+      if (isRound) {
+        const rect = el.getBoundingClientRect();
+        const area = rect.width * rect.height;
+        const textLen = (el.textContent || '').trim().length;
+        // Large (>25% viewport), round, and no text → decorative blob
+        if (area > viewportArea * 0.25 && textLen < 20) {
+          el.classList.add('pdfzipper-hide');
+          markedElements.push(el);
+          continue;
+        }
+      }
+
+      // 3) Absolutely-positioned oversized decorative elements (catches blobs
+      //    without border-radius, e.g. rotated squares, gradient overlays).
+      //    Must be: absolute/fixed, larger than viewport, mostly empty.
+      if (style.position === 'absolute') {
+        const rect = el.getBoundingClientRect();
+        const area = rect.width * rect.height;
+        const textLen = (el.textContent || '').trim().length;
+        if (area > viewportArea * 1.5 && textLen < 20) {
+          el.classList.add('pdfzipper-hide');
+          markedElements.push(el);
+          continue;
+        }
+      }
     }
 
     if (isArchiveSite()) {
@@ -175,51 +214,87 @@
   }
 
   // ============================================================
-  // Readability + Turndown → Markdown extraction
-  // (Obsidian Web Clipper pattern: reader-mode HTML → clean Markdown)
+  // Readability extraction — used for both Markdown and reader-mode
+  // DOM swap (clean PDF capture without decorative cruft)
   // ============================================================
-  function extractMarkdown() {
-    if (typeof Readability === 'undefined' || typeof TurndownService === 'undefined') {
-      return { markdown: null, readability: null };
-    }
+  function parseReadability() {
+    if (typeof Readability === 'undefined') return null;
     try {
-      // Readability mutates the document it parses, so clone first
       const docClone = document.cloneNode(true);
       const article = new Readability(docClone).parse();
-      if (!article || !article.content) {
-        return { markdown: null, readability: null };
-      }
+      if (!article || !article.content) return null;
+      return article;
+    } catch (error) {
+      console.warn('[pdfzipper] Readability parse failed:', error);
+      return null;
+    }
+  }
 
+  function articleToMarkdown(articleHtml) {
+    if (typeof TurndownService === 'undefined') return null;
+    try {
       const td = new TurndownService({
-        headingStyle: 'atx',       // # H1, ## H2 (not underline style)
-        codeBlockStyle: 'fenced',  // ```lang vs indent
+        headingStyle: 'atx',
+        codeBlockStyle: 'fenced',
         bulletListMarker: '-',
         emDelimiter: '_',
         strongDelimiter: '**',
       });
-
-      // Keep line breaks inside paragraphs rather than collapsing
-      td.addRule('lineBreak', {
-        filter: 'br',
-        replacement: () => '  \n',
-      });
-
-      const markdown = td.turndown(article.content);
-      return {
-        markdown,
-        readability: {
-          title: article.title || null,
-          byline: article.byline || null,
-          siteName: article.siteName || null,
-          lang: article.lang || null,
-          publishedTime: article.publishedTime || null,
-          excerpt: article.excerpt || null,
-          length: article.length || 0,
-        },
-      };
+      td.addRule('lineBreak', { filter: 'br', replacement: () => '  \n' });
+      return td.turndown(articleHtml);
     } catch (error) {
-      console.warn('[pdfzipper] Readability/Turndown failed:', error);
-      return { markdown: null, readability: null };
+      console.warn('[pdfzipper] Turndown failed:', error);
+      return null;
+    }
+  }
+
+  function readabilityMeta(article) {
+    return {
+      title: article.title || null,
+      byline: article.byline || null,
+      siteName: article.siteName || null,
+      lang: article.lang || null,
+      publishedTime: article.publishedTime || null,
+      excerpt: article.excerpt || null,
+      length: article.length || 0,
+    };
+  }
+
+  // ============================================================
+  // Reader-mode DOM swap — replace page body with clean article
+  // so Page.printToPDF captures ONLY article text + images. No
+  // decorative blobs, navs, ads, sidebars, cookie banners, etc.
+  // ============================================================
+  let savedBodyHTML = null;
+  let savedBodyClass = null;
+
+  function enterReaderMode(article) {
+    savedBodyHTML = document.body.innerHTML;
+    savedBodyClass = document.body.className;
+
+    // Escape title for safe insertion
+    const escTitle = (article.title || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const escByline = (article.byline || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    document.body.className = '';
+    document.body.innerHTML = [
+      '<div style="max-width:720px; margin:0 auto; padding:40px 20px; font-family:Georgia,Times,serif; font-size:16px; line-height:1.7; color:#1a1a1a;">',
+      `  <h1 style="font-family:-apple-system,Helvetica,Arial,sans-serif; font-size:28px; line-height:1.3; margin:0 0 8px;">${escTitle}</h1>`,
+      escByline ? `  <p style="color:#666; font-size:14px; margin:0 0 24px;">${escByline}</p>` : '',
+      '  <article>',
+      article.content,
+      '  </article>',
+      '</div>',
+    ].join('\n');
+    return true;
+  }
+
+  function exitReaderMode() {
+    if (savedBodyHTML !== null) {
+      document.body.innerHTML = savedBodyHTML;
+      document.body.className = savedBodyClass || '';
+      savedBodyHTML = null;
+      savedBodyClass = null;
     }
   }
 
@@ -236,7 +311,6 @@
       if (hidOk) {
         const selMarkdown = selectionToMarkdown(selRange);
         const selText = selRange.toString().trim();
-        // Don't hide floating elements — in selection mode, outside-selection is already hidden
         return {
           url: location.href,
           title: getBestTitle(),
@@ -250,12 +324,16 @@
       }
     }
 
-    // Full-page path
+    // Full-page capture (default): hide floating/decorative elements, extract
+    // Markdown via Readability separately (the page DOM stays intact so images
+    // and layout are preserved in the PDF).
     hideFloatingElements();
-    const { markdown, readability } = extractMarkdown();
+    const article = parseReadability();
+    const markdown = article ? articleToMarkdown(article.content) : null;
+    const readability = article ? readabilityMeta(article) : null;
     return {
       url: location.href,
-      title: getBestTitle(),
+      title: (article && article.title) || getBestTitle(),
       originalUrl: getOriginalUrl(),
       markdown,
       readability,
@@ -264,6 +342,7 @@
   }
 
   function finishCapture() {
+    exitReaderMode();
     restoreOutsideSelection();
     restoreFloatingElements();
     document.documentElement.classList.remove('pdfzipper-capturing');

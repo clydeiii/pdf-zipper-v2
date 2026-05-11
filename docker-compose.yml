@@ -20,14 +20,31 @@ services:
       - OLLAMA_HOST=http://mac.mini:11434
       - OLLAMA_MODEL=gemma4:e4b
       # Use larger model for transcript formatting + metadata enrichment
-      - TRANSCRIPT_FORMAT_MODEL=gemma4:26b
+      - TRANSCRIPT_FORMAT_MODEL=gemma4:latest
 
-      # Whisper ASR (on 10.0.0.81, faster_whisper engine)
-      - WHISPER_HOST=http://10.0.0.81:9002
+      # llama.cpp OpenAI-compatible server for text-only round-robin/failover
+      # (used by metadata enrichment only; vision + transcript formatting stay on Ollama)
+      - LLAMACPP_HOST=http://10.0.0.81:8080
+      - LLAMACPP_API_KEY=dcdad5d979514618cc2372be87b96d4e
+      - LLAMACPP_MODEL=gemma4
+
+      # Parakeet-TDT 0.6B MLX on Mac mini (was: Whisper ASR on 10.0.0.81:9002)
+      - WHISPER_HOST=http://mac.mini:9003
+      # Parakeet-TDT 0.6B ONNX on Ubuntu M1 Pro (CPU, ~20x realtime). Used
+      # only when mac.mini fails a /health pre-flight check. Same API shape.
+      - WHISPER_HOST_FALLBACK=http://10.0.0.81:9003
 
       # Karakeep feed (container name on proxy-network)
       - KARAKEEP_FEED_URL=http://karakeep-web-1:3000?token=ak2_c86c813aaabfe6d954a2_130ae1bf7f60523a6717aba6a6165bea
       - FEED_POLL_INTERVAL_MINUTES=5
+
+      # Karakeep API for retention cleanup (delete bookmarks older than KARAKEEP_RETENTION_DAYS)
+      - KARAKEEP_API_BASE=http://karakeep-web-1:3000
+      - KARAKEEP_API_TOKEN=ak2_e3ac337eebc586a3633e_49d4fe2d1ba3f4b3c29b405391209c5d
+      - KARAKEEP_RETENTION_DAYS=90
+
+      # pdf-zipper-v2 retention (delete data/media/YYYY-WWW dirs older than RETENTION_DAYS)
+      - RETENTION_DAYS=90
 
       # Nitter for Twitter URLs (container name on proxy-network)
       - NITTER_HOST=http://nitter:8080
@@ -43,8 +60,13 @@ services:
       # Discord notifications
       - DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/1465378270278057994/TQ25XzBXFYfSJOUeqMaaeRQ_GgzjPHYCEHJU0NqXOjyOGsh4DeTWHjrtPH-NLk0aHYR-
 
-      # Cookies file for paywalls
+      # Cookies file for paywalls (general — substack, NYT, etc.)
       - COOKIES_FILE=/data/cookies.txt
+      # Dedicated YouTube cookies (work Google account: clyde.wright@ncsu-las.net).
+      # Only used as a fallback after an anonymous yt-dlp metadata fetch fails.
+      # Kept distinct from COOKIES_FILE because the shared paywall cookies
+      # (personal Google account) trigger YouTube bot-detection.
+      - YT_DLP_COOKIES_FILE=/data/yt-cookies-ncsu-las.txt
 
       # Privacy filter - hide elements containing these terms (comma-separated)
       - PRIVACY_FILTER_TERMS=Clyde Wright,clydeiii
@@ -52,7 +74,10 @@ services:
       # AI Self-Healing Fix System
       - FIX_ENABLED=true
       - CLAUDE_CLI_PATH=/home/clyde/.local/bin/claude
-      - CODEX_CLI_PATH=codex
+      # Direct path to the JS entrypoint — `/usr/bin/codex` symlink fails under
+      # Node 20.20 ESM (import.meta.url stays as the symlink path, so the bin
+      # script can't find @openai/codex-linux-x64 in its sibling node_modules).
+      - CODEX_CLI_PATH=/usr/lib/node_modules/@openai/codex/bin/codex.js
       - FIX_PROVIDER_TIMEOUT_MINUTES=30
       - HOME=/home/clyde
 
@@ -64,6 +89,10 @@ services:
       - /home/clyde/.local/share/claude:/home/clyde/.local/share/claude:ro
       - /home/clyde/.local/bin:/home/clyde/.local/bin:ro
       - /home/clyde/.claude:/home/clyde/.claude
+      # Codex CLI for AI self-healing fix system (npm-installed @openai/codex).
+      # CODEX_CLI_PATH points at the JS entry directly — no symlink wrapper needed.
+      - /usr/lib/node_modules/@openai/codex:/usr/lib/node_modules/@openai/codex:ro
+      - /home/clyde/.codex:/home/clyde/.codex
       # Project source at same path for Claude Code to edit
       - /home/clyde/pdf-zipper-v2:/home/clyde/pdf-zipper-v2
     shm_size: "512m"

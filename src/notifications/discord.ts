@@ -174,10 +174,19 @@ export async function notifyJobFailed(data: {
     });
   }
 
-  // Add archive.is link for convenience
+  // Add archive.is link for convenience. Strip query/fragment — archive.is
+  // keys archives by full URL, but article tracking/access tokens won't
+  // match a snapshot. encodeURIComponent the path so spaces etc. are safe.
+  let archivePath: string;
+  try {
+    const u = new URL(data.url);
+    archivePath = u.origin + u.pathname;
+  } catch {
+    archivePath = data.url.split('?')[0].split('#')[0];
+  }
   fields.push({
     name: 'Archive',
-    value: `[View on archive.is](https://archive.is/${encodeURIComponent(data.url)})`,
+    value: `[View on archive.is](https://archive.is/${encodeURIComponent(archivePath)})`,
     inline: true,
   });
 

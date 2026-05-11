@@ -7,6 +7,7 @@ import { mkdir } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { env } from '../config/env.js';
+import { isTwitterUrl, buildUrlBaseName } from '../utils/save-pdf.js';
 import type { MediaType, MediaItem } from './types.js';
 
 // Import CommonJS module using require
@@ -91,10 +92,16 @@ export async function ensureWeeklyBinExists(binPath: string): Promise<string> {
  * @returns Sanitized filename with appropriate extension
  */
 export function getMediaFilename(item: MediaItem): string {
-  // Use title if available, otherwise extract from URL
   let baseName: string;
 
-  if (item.title) {
+  // Twitter/X posts with attached media: use the URL-derived name so the MP4
+  // aligns with the tweet's PDF capture (e.g., `x.com-handle-post-12345.mp4`
+  // next to `x.com-handle-post-12345.pdf`). The downstream KB links them by
+  // shared base name. Media enclosures only come from tweets (X Articles are
+  // text-only) so isXArticle=false is safe.
+  if (isTwitterUrl(item.url)) {
+    baseName = buildUrlBaseName(item.url, { title: item.title, isXArticle: false });
+  } else if (item.title) {
     baseName = item.title;
   } else {
     // Fallback to URL hostname
@@ -107,13 +114,17 @@ export function getMediaFilename(item: MediaItem): string {
     }
   }
 
-  // Sanitize the base name: lowercase, strip punctuation, dashes instead of spaces
+  // Sanitize the base name: lowercase, strip punctuation, dashes instead of spaces.
+  // Dots are preserved (e.g. arxiv IDs like "2604.01007v2") but collapsed and trimmed.
+  // Underscores are preserved so Twitter handles like `dwarkesh_sp` match the PDF's
+  // filename (which goes through sanitize-filename and keeps `_`).
   baseName = sanitizeFilename(baseName)
     .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, '')
+    .replace(/[^a-z0-9_\s\-.]/g, '')
     .replace(/\s+/g, '-')
     .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '');
+    .replace(/\.+/g, '.')
+    .replace(/^[-.]+|[-.]+$/g, '');
 
   // Determine file extension from enclosure MIME type
   let extension = '';

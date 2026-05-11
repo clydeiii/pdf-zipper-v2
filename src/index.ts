@@ -41,6 +41,12 @@ import { startPodcastWorker, stopPodcastWorker } from './podcasts/podcast-worker
 import { initializeFixScheduler } from './queues/fix.queue.js';
 import { startFixWorker, stopFixWorker } from './workers/fix.worker.js';
 
+// Import retention sweeper (auto-deletes data/media weeks older than RETENTION_DAYS)
+import { startRetentionSweeper, stopRetentionSweeper } from './maintenance/retention-sweeper.js';
+
+// Import Karakeep cleaner (deletes Karakeep bookmarks older than KARAKEEP_RETENTION_DAYS via its API)
+import { startKarakeepCleaner, stopKarakeepCleaner } from './maintenance/karakeep-cleaner.js';
+
 console.log(`Environment: ${env.NODE_ENV}`);
 console.log(`Server port configured: ${env.PORT}`);
 
@@ -58,6 +64,9 @@ async function gracefulShutdown(signal: string): Promise<void> {
 
   try {
     // Close workers in reverse order of startup
+    stopKarakeepCleaner();
+    stopRetentionSweeper();
+
     console.log('Closing fix worker...');
     await stopFixWorker();
     console.log('Fix worker closed');
@@ -105,6 +114,12 @@ async function gracefulShutdown(signal: string): Promise<void> {
   await initializeFixScheduler();
   await startFixWorker();
   console.log('AI fix system initialized');
+
+  // Start daily retention sweeper (delete week dirs older than RETENTION_DAYS)
+  startRetentionSweeper();
+
+  // Start daily Karakeep cleaner (delete Karakeep bookmarks older than KARAKEEP_RETENTION_DAYS)
+  startKarakeepCleaner();
 
   // Register additional shutdown handlers for feed workers
   // Note: conversion worker registers its own handlers in startWorker()

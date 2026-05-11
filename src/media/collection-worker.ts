@@ -25,18 +25,39 @@ export async function startMediaWorker(): Promise<void> {
   worker = new Worker<MediaCollectionJobData, MediaCollectionResult>(
     'media-collection',
     async (job: Job<MediaCollectionJobData>) => {
-      const { item } = job.data;
+      const { item, existingFilePath } = job.data;
 
-      console.log(JSON.stringify({
-        event: 'media_download_start',
-        mediaType: item.mediaType,
-        url: item.url,
-        enclosureUrl: item.enclosure.url,
-        attempt: job.attemptsMade + 1,
-        timestamp: new Date().toISOString(),
-      }));
-
-      const result = await downloadMedia(item);
+      // Rerun path: skip download, synthesize a successful-download result
+      // from the on-disk file so the shared enrichment branches below run.
+      let result: MediaCollectionResult;
+      if (existingFilePath) {
+        console.log(JSON.stringify({
+          event: 'media_reenrich_start',
+          mediaType: item.mediaType,
+          existingFilePath,
+          timestamp: new Date().toISOString(),
+        }));
+        const { statSync } = await import('node:fs');
+        let fileSize = 0;
+        try { fileSize = statSync(existingFilePath).size; } catch { /* ignore */ }
+        result = {
+          success: true,
+          item,
+          filePath: existingFilePath,
+          fileSize,
+          downloadDuration: 0,
+        };
+      } else {
+        console.log(JSON.stringify({
+          event: 'media_download_start',
+          mediaType: item.mediaType,
+          url: item.url,
+          enclosureUrl: item.enclosure.url,
+          attempt: job.attemptsMade + 1,
+          timestamp: new Date().toISOString(),
+        }));
+        result = await downloadMedia(item);
+      }
 
       if (result.success === true) {
         console.log(JSON.stringify({
@@ -52,9 +73,13 @@ export async function startMediaWorker(): Promise<void> {
         if (item.mediaType === 'video' && result.filePath.endsWith('.mp4')) {
           try {
             const enrichResult = await enrichVideo(result.filePath, item);
+            // enrichVideo may rename the file to {channel}-{title}.mp4; reflect
+            // the final path in the event log + downstream result.
+            const finalFilePath = enrichResult.filePath || result.filePath;
+            if (enrichResult.filePath) result.filePath = enrichResult.filePath;
             console.log(JSON.stringify({
               event: 'video_enrichment_complete',
-              filePath: result.filePath,
+              filePath: finalFilePath,
               transcriptLength: enrichResult.transcriptLength,
               vttEmbedded: enrichResult.vttEmbedded,
               metadataWritten: enrichResult.metadataWritten,
@@ -85,6 +110,8 @@ export async function startMediaWorker(): Promise<void> {
               pdfDoc.setSubject(item.url);
               pdfDoc.setProducer(`pdf-zipper v2 - captured ${new Date().toISOString()}`);
 
+              // Karakeep PDF assets are typically uploaded papers/reports.
+              // Default to 'research' since we have no URL to classify by.
               setInfoDictFields(pdfDoc, {
                 Summary: metadata.summary,
                 Language: metadata.language,
@@ -92,6 +119,7 @@ export async function startMediaWorker(): Promise<void> {
                 PublishDate: metadata.publishDate,
                 Tags: metadata.tags.length > 0 ? metadata.tags.join(', ') : undefined,
                 Translation: metadata.translation,
+                DocType: 'research',
                 EnrichedAt: new Date().toISOString(),
               });
 

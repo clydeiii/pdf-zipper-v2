@@ -13,7 +13,7 @@ import type {
   iTunesEpisode,
   PodcastMetadata,
 } from './types.js';
-import { fetchShowNotes } from './rss-parser.js';
+import { fetchFeedData, fetchEpisodeFromRss } from './rss-parser.js';
 
 /**
  * Check if a URL is an Apple Podcasts URL
@@ -72,6 +72,55 @@ export function parseApplePodcastsUrl(url: string): ApplePodcastsUrl {
     country,
     podcastSlug,
   };
+}
+
+/**
+ * Scrape an Apple Podcasts episode page for the episode title.
+ *
+ * Apple server-renders a JSON shoebox embedding LegacyEpisodeLockup objects
+ * keyed by the iTunes track ID (adamId). We anchor on the episodeId so we
+ * extract the right title even when the page mentions many episodes.
+ *
+ * Used only when iTunes Lookup doesn't return the episode (200-result cap).
+ */
+async function scrapeAppleEpisodeTitle(
+  applePodcastsUrl: string,
+  episodeId: string,
+): Promise<string | undefined> {
+  try {
+    const response = await fetch(applePodcastsUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      },
+      redirect: 'follow',
+    });
+    if (!response.ok) return undefined;
+    const html = await response.text();
+
+    // Primary: LegacyEpisodeLockup with id matching this episode.
+    // Pattern: "id":"<episodeId>","title":"<...>"  (within ~500 chars of the id)
+    const lockupRe = new RegExp(
+      `"id":"${episodeId}","title":"((?:[^"\\\\]|\\\\.){1,400})"`,
+    );
+    const lockupMatch = html.match(lockupRe);
+    if (lockupMatch) return JSON.parse('"' + lockupMatch[1] + '"');
+
+    // Fallback: derive from the canonical pageUrl slug Apple includes for
+    // this episode (e.g. "/podcast/the-ai-models-smart-enough.../id...?i=<episodeId>").
+    const pageUrlRe = new RegExp(
+      `"pageUrl":"https://podcasts\\.apple\\.com/[^"]+/podcast/([^/"]+)/id\\d+\\?i=${episodeId}"`,
+    );
+    const pageMatch = html.match(pageUrlRe);
+    if (pageMatch) {
+      // Slug → words: hyphen → space (good enough for the title-match step
+      // since matchRssItem also lowercases & trims).
+      return pageMatch[1].replace(/-/g, ' ');
+    }
+
+    return undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -171,7 +220,8 @@ export async function getPodcastMetadata(applePodcastsUrl: string): Promise<Podc
   const episode = findEpisode(response.results, parsed.episodeId);
 
   if (!episode) {
-    // Episode might be older than the limit - try fetching more
+    // iTunes Lookup caps at ~200 results per podcast; older episodes get cut.
+    // Fall back to the RSS feed (typically holds the full archive).
     console.log(JSON.stringify({
       event: 'podcast_episode_not_in_first_batch',
       episodeId: parsed.episodeId,
@@ -179,10 +229,54 @@ export async function getPodcastMetadata(applePodcastsUrl: string): Promise<Podc
       timestamp: new Date().toISOString(),
     }));
 
-    throw new Error(
-      `Episode ${parsed.episodeId} not found in iTunes response. ` +
-      `It may be too old (fetched ${response.resultCount} recent episodes).`
-    );
+    if (!podcast.feedUrl) {
+      throw new Error(
+        `Episode ${parsed.episodeId} not found in iTunes response and podcast has no RSS feed.`
+      );
+    }
+
+    const episodeTitle = await scrapeAppleEpisodeTitle(applePodcastsUrl, parsed.episodeId);
+    if (!episodeTitle) {
+      throw new Error(
+        `Episode ${parsed.episodeId} not in iTunes response (fetched ${response.resultCount}); ` +
+        `couldn't scrape title from Apple Podcasts page for RSS fallback.`
+      );
+    }
+
+    const rssEpisode = await fetchEpisodeFromRss(podcast.feedUrl, episodeTitle);
+    if (!rssEpisode) {
+      throw new Error(
+        `Episode ${parsed.episodeId} ("${episodeTitle}") not found in iTunes ` +
+        `(fetched ${response.resultCount}) or in RSS feed at ${podcast.feedUrl}.`
+      );
+    }
+
+    console.log(JSON.stringify({
+      event: 'podcast_episode_resolved_via_rss',
+      episodeId: parsed.episodeId,
+      episodeTitle: rssEpisode.title,
+      audioUrl: rssEpisode.audioUrl,
+      durationMinutes: Math.round(rssEpisode.durationMs / 60000),
+      timestamp: new Date().toISOString(),
+    }));
+
+    return {
+      podcastName: podcast.collectionName,
+      podcastAuthor: podcast.artistName,
+      genre: podcast.primaryGenreName,
+      artworkUrl: podcast.artworkUrl600 || podcast.artworkUrl100,
+      feedChannelImage: rssEpisode.channelImage,
+      feedUrl: podcast.feedUrl,
+      episodeTitle: rssEpisode.title,
+      episodeUrl: applePodcastsUrl,
+      audioUrl: rssEpisode.audioUrl,
+      audioExtension: rssEpisode.audioExtension,
+      duration: rssEpisode.durationMs,
+      publishedAt: rssEpisode.publishedAt || '',
+      description: rssEpisode.description,
+      episodeGuid: rssEpisode.guid || '',
+      showNotes: rssEpisode.showNotes,
+    };
   }
 
   console.log(JSON.stringify({
@@ -194,26 +288,28 @@ export async function getPodcastMetadata(applePodcastsUrl: string): Promise<Podc
     timestamp: new Date().toISOString(),
   }));
 
-  // Fetch show notes from RSS feed (has links, iTunes API doesn't)
+  // Fetch show notes + channel image from RSS feed (one fetch, two payloads)
   let showNotes: PodcastMetadata['showNotes'] | undefined;
+  let feedChannelImage: string | undefined;
   if (podcast.feedUrl) {
-    const rssShowNotes = await fetchShowNotes(
+    const feedData = await fetchFeedData(
       podcast.feedUrl,
       episode.trackName,
       episode.episodeGuid
     );
-    if (rssShowNotes) {
+    if (feedData?.showNotes) {
       showNotes = {
-        summary: rssShowNotes.summary,
-        links: rssShowNotes.links,
-        footer: rssShowNotes.footer,
+        summary: feedData.showNotes.summary,
+        links: feedData.showNotes.links,
+        footer: feedData.showNotes.footer,
       };
       console.log(JSON.stringify({
         event: 'podcast_shownotes_fetched',
-        linkCount: rssShowNotes.links.length,
+        linkCount: feedData.showNotes.links.length,
         timestamp: new Date().toISOString(),
       }));
     }
+    feedChannelImage = feedData?.channelImage;
   }
 
   return {
@@ -222,6 +318,7 @@ export async function getPodcastMetadata(applePodcastsUrl: string): Promise<Podc
     podcastAuthor: podcast.artistName,
     genre: podcast.primaryGenreName,
     artworkUrl: podcast.artworkUrl600 || podcast.artworkUrl100,
+    feedChannelImage,
     feedUrl: podcast.feedUrl,
 
     // Episode info

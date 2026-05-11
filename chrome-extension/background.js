@@ -26,7 +26,7 @@ const SERVER_ENDPOINT = 'https://pdf.clydeplex.com/api/manual-capture';
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
-      id: 'pdfzipper-capture-page',
+      id: 'pdfzipper-capture-article',
       title: 'Capture page to PDF Zipper',
       contexts: ['page', 'frame'],
     });
@@ -40,7 +40,7 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (!tab) return;
-  if (info.menuItemId === 'pdfzipper-capture-page' || info.menuItemId === 'pdfzipper-capture-selection') {
+  if (info.menuItemId === 'pdfzipper-capture-article' || info.menuItemId === 'pdfzipper-capture-selection') {
     captureTab(tab);
   }
 });
@@ -59,7 +59,7 @@ chrome.commands.onCommand.addListener(async (command) => {
 async function captureTab(tab) {
   if (!tab.id) return;
   const tabUrl = tab.url || '';
-  console.log('[pdfzipper v3.2.3] captureTab called. tab.url =', JSON.stringify(tabUrl), 'tab.id =', tab.id);
+  console.log('[pdfzipper v3.3.4] captureTab called. tab.url =', JSON.stringify(tabUrl), 'tab.id =', tab.id);
 
   // Clear any stale badge from the previous capture before we start.
   // (MV3 service worker termination can strand setTimeout-based clears,
@@ -125,10 +125,11 @@ async function captureTab(tab) {
       }
     );
 
+    step = '3c: detach debugger';
     await chrome.debugger.detach({ tabId: tab.id });
     debuggerAttached = false;
 
-    // 4. Restore page (best-effort)
+    step = '4: restore page';
     try {
       await sendToContentScript(tab.id, { action: 'finish-capture' });
     } catch (e) {
@@ -139,7 +140,8 @@ async function captureTab(tab) {
       throw new Error('Page.printToPDF returned no data');
     }
 
-    // 5. POST to server
+    step = '5: upload to server';
+    console.log(`[pdfzipper] step ${step}`);
     await notify('Capturing…', `Uploading ${pageInfo.title || 'page'} to pdf-zipper-v2`, 'progress');
 
     const uploadResult = await uploadCapture({
@@ -259,11 +261,19 @@ async function uploadCapture(payload) {
   // take 25-30s because the server runs Ollama enrichment synchronously.
   // Keep the SW alive by ping-looping a chrome.* API call every 20s. Any
   // chrome.* API call resets the idle timer.
+  //
+  // Sleep must be cancellable: without clearTimeout, the finally block would
+  // block up to 20s waiting for an idle tick to drain, delaying the success
+  // notification by that long (avg ~10s per upload).
   let keepAliveActive = true;
+  let cancelSleep;
   const keepAlive = (async () => {
     while (keepAliveActive) {
       try { await chrome.runtime.getPlatformInfo(); } catch (e) { break; }
-      await new Promise((r) => setTimeout(r, 20000));
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 20000);
+        cancelSleep = () => { clearTimeout(timer); resolve(); };
+      });
     }
   })();
 
@@ -277,21 +287,42 @@ async function uploadCapture(payload) {
     });
   } catch (error) {
     keepAliveActive = false;
+    if (cancelSleep) cancelSleep();
     throw new Error(`Network error: ${error.message}`);
   } finally {
     keepAliveActive = false;
+    if (cancelSleep) cancelSleep();
     await keepAlive; // drain
   }
 
   const contentType = response.headers.get('content-type') || '';
 
-  // Cloudflare Access returns HTML (Google OAuth redirect) if unauthed
+  // Non-JSON response is either:
+  //   (a) Cloudflare Access OAuth login page (real auth failure)
+  //   (b) Cloudflare Tunnel error page (origin too slow / down — NOT auth)
+  //   (c) Something else
+  // CF Access redirects with 302 to cloudflareaccess.com or returns an HTML
+  // login page that explicitly says "sign in" / "authenticate" / "OAuth".
+  // CF Tunnel error pages return 5xx and contain "cloudflare" but no auth
+  // language. Distinguishing them avoids misleading the user.
   if (!contentType.includes('application/json')) {
     const text = await response.text();
-    if (/cloudflare|access|authenticate|sign in/i.test(text)) {
+    const status = response.status;
+    const lowered = text.toLowerCase();
+    const looksLikeAuth =
+      /cloudflareaccess\.com/i.test(text) ||
+      lowered.includes('sign in to') ||
+      lowered.includes('authenticate') ||
+      lowered.includes('oauth') ||
+      (status === 302 && /cloudflareaccess/i.test(response.headers.get('location') || ''));
+    if (looksLikeAuth) {
       throw new Error('AUTH_REQUIRED');
     }
-    throw new Error(`Unexpected response (${response.status}): ${text.slice(0, 200)}`);
+    // CF Tunnel/origin error: 5xx + "cloudflare" branding, or any other non-JSON
+    if (status >= 500) {
+      throw new Error(`Server error ${status} — origin may be overloaded or unreachable`);
+    }
+    throw new Error(`Unexpected response (${status}): ${text.slice(0, 200)}`);
   }
 
   const json = await response.json();

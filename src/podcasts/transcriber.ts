@@ -14,7 +14,7 @@ import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { unlink, mkdir, writeFile } from 'node:fs/promises';
 import { Agent } from 'undici';
-import { env } from '../config/env.js';
+import { resolveWhisperHost } from '../utils/whisper-host.js';
 import type { WhisperResponse, TranscriptionResult } from './types.js';
 
 /**
@@ -203,13 +203,14 @@ export async function transcribeAudio(
   audioPath: string,
   options?: TranscribeOptions
 ): Promise<WhisperResponse> {
-  const url = new URL('/asr', env.WHISPER_HOST);
+  const host = await resolveWhisperHost();
+  const url = new URL('/asr', host);
   url.searchParams.set('output', 'txt');  // Plain text transcript (not srt/vtt/json)
 
   console.log(JSON.stringify({
     event: 'transcription_start',
     audioPath,
-    whisperHost: env.WHISPER_HOST,
+    whisperHost: host,
     hasInitialPrompt: !!options?.initialPrompt,
     timestamp: new Date().toISOString(),
   }));

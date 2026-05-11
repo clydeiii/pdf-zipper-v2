@@ -24,10 +24,24 @@ interface EnvConfig {
   DATA_DIR: string;
   /** Path to Netscape cookies.txt file for authentication (default: DATA_DIR/cookies.txt) */
   COOKIES_FILE: string;
+  /**
+   * Optional separate cookies file for yt-dlp Google auth (age-gated /
+   * member-only videos). Kept distinct from COOKIES_FILE because the shared
+   * cookies (personal Google account) triggered YouTube bot-detection — using
+   * a dedicated work-account file is cleaner. Only consulted as a fallback
+   * after an anonymous metadata fetch fails.
+   */
+  YT_DLP_COOKIES_FILE?: string;
   /** Discord webhook URL for job notifications (optional) */
   DISCORD_WEBHOOK_URL?: string;
   /** Whisper ASR server URL for podcast transcription (default: http://10.0.0.81:9002) */
   WHISPER_HOST: string;
+  /**
+   * Optional fallback ASR endpoint. Pre-flight `/health` check picks whichever
+   * is up. Same API shape required (whisper-asr-webservice compat).
+   * Example: ubuntu-m1pro (ONNX Parakeet) backing up mac.mini (MLX Parakeet).
+   */
+  WHISPER_HOST_FALLBACK?: string;
   /** Nitter server URL for Twitter/X conversion (default: http://localhost:8080) */
   NITTER_HOST: string;
   /** Ollama model for transcript formatting - use larger model for better results (default: same as OLLAMA_MODEL) */
@@ -46,6 +60,12 @@ interface EnvConfig {
   API_AUTH_TOKEN?: string;
   /** Fix provider timeout in minutes (default: 30) */
   FIX_PROVIDER_TIMEOUT_MINUTES: number;
+  /** Optional llama.cpp OpenAI-compatible server for round-robin/failover on text-only LLM calls */
+  LLAMACPP_HOST?: string;
+  /** Bearer token for the llama.cpp server */
+  LLAMACPP_API_KEY?: string;
+  /** Model name to send to llama.cpp (default: gemma4) */
+  LLAMACPP_MODEL: string;
 }
 
 const requiredEnvVars = ['REDIS_HOST', 'REDIS_PORT', 'PORT'] as const;
@@ -92,14 +112,16 @@ export const env: EnvConfig = {
   DATA_DIR: process.env.DATA_DIR || './data',
   // Cookies file for authentication (defaults to DATA_DIR/cookies.txt)
   COOKIES_FILE: process.env.COOKIES_FILE || `${process.env.DATA_DIR || './data'}/cookies.txt`,
+  YT_DLP_COOKIES_FILE: process.env.YT_DLP_COOKIES_FILE,
   // Discord webhook for job notifications (optional)
   DISCORD_WEBHOOK_URL: process.env.DISCORD_WEBHOOK_URL,
   // Whisper ASR server for podcast transcription
   WHISPER_HOST: process.env.WHISPER_HOST || 'http://10.0.0.81:9002',
+  WHISPER_HOST_FALLBACK: process.env.WHISPER_HOST_FALLBACK,
   // Nitter server for Twitter/X conversion
   NITTER_HOST: process.env.NITTER_HOST || 'http://localhost:8080',
   // Ollama model for transcript formatting (larger = better quality, slower)
-  TRANSCRIPT_FORMAT_MODEL: process.env.TRANSCRIPT_FORMAT_MODEL || process.env.OLLAMA_MODEL || 'gemma4:26b',
+  TRANSCRIPT_FORMAT_MODEL: process.env.TRANSCRIPT_FORMAT_MODEL || process.env.OLLAMA_MODEL || 'gemma4:latest',
   // Privacy filter terms (comma-separated list of names/handles to hide from captures)
   PRIVACY_FILTER_TERMS: process.env.PRIVACY_FILTER_TERMS,
   // AI self-healing fix feature
@@ -109,4 +131,8 @@ export const env: EnvConfig = {
   CODEX_CLI_ARGS: process.env.CODEX_CLI_ARGS,
   API_AUTH_TOKEN: process.env.API_AUTH_TOKEN,
   FIX_PROVIDER_TIMEOUT_MINUTES: parseInt(process.env.FIX_PROVIDER_TIMEOUT_MINUTES || '30', 10),
+  // Optional llama.cpp failover/round-robin endpoint for text-only LLM calls
+  LLAMACPP_HOST: process.env.LLAMACPP_HOST,
+  LLAMACPP_API_KEY: process.env.LLAMACPP_API_KEY,
+  LLAMACPP_MODEL: process.env.LLAMACPP_MODEL || 'gemma4',
 };

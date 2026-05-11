@@ -538,8 +538,50 @@ export async function convertUrlToPDF(
     // Extra wait for heavy JS sites
     await page.waitForTimeout(2000);
 
-    // Scroll through page to trigger lazy-loaded images (especially for Nitter)
-    // Fast scroll with minimal delay - just need to trigger image loading
+    // For Nitter pages: rewrite broken /pic/ proxy URLs to direct Twitter CDN URLs.
+    // Nitter's image proxy is unreliable (rate-limited/broken), but pbs.twimg.com serves
+    // the same images directly and reliably.
+    // Mapping: /pic/media/... → https://pbs.twimg.com/media/...
+    //          /pic/profile_images/... → https://pbs.twimg.com/profile_images/...
+    //          /pic/video.twimg.com/... → https://video.twimg.com/...
+    try {
+      const rewriteCount = await page.evaluate(() => {
+        let count = 0;
+        document.querySelectorAll('img').forEach(img => {
+          const src = img.getAttribute('src');
+          if (src && src.includes('/pic/')) {
+            const match = src.match(/\/pic\/(.+)/);
+            if (match) {
+              let path: string;
+              try {
+                path = decodeURIComponent(match[1]);
+              } catch {
+                // Malformed percent-encoding — skip this image but keep iterating.
+                img.removeAttribute('loading');
+                return;
+              }
+              let newSrc: string;
+              if (path.startsWith('video.twimg.com/')) {
+                newSrc = `https://${path}`;
+              } else {
+                newSrc = `https://pbs.twimg.com/${path}`;
+              }
+              img.setAttribute('src', newSrc);
+              count++;
+            }
+          }
+          img.removeAttribute('loading');
+        });
+        return count;
+      });
+      if (rewriteCount > 0) {
+        console.log(`Rewrote ${rewriteCount} Nitter image URLs to direct Twitter CDN`);
+      }
+    } catch (err) {
+      console.warn('Nitter image rewrite failed:', err instanceof Error ? err.message : err);
+    }
+
+    // Scroll through page to trigger any remaining lazy-loaded content
     try {
       await Promise.race([
         page.evaluate(`(async () => {
@@ -567,8 +609,25 @@ export async function convertUrlToPDF(
       // Scroll failed, continue with PDF generation anyway
     }
 
-    // Brief wait for lazy-loaded images
-    await page.waitForTimeout(500);
+    // Wait for images to finish downloading (especially Nitter → Twitter CDN rewrites)
+    try {
+      await page.waitForFunction(() => {
+        const images = Array.from(document.querySelectorAll('img[src]:not([src=""])'));
+        return images.every(img => (img as HTMLImageElement).complete);
+      }, { timeout: 10000 });
+    } catch {
+      // Log which images didn't load
+      try {
+        const broken = await page.evaluate(() => {
+          return Array.from(document.querySelectorAll('img[src]:not([src=""])'))
+            .filter(img => !(img as HTMLImageElement).complete || (img as HTMLImageElement).naturalWidth === 0)
+            .map(img => img.getAttribute('src')?.substring(0, 100));
+        });
+        if (broken.length > 0) {
+          console.warn(`${broken.length} images failed to load:`, broken);
+        }
+      } catch { /* ignore */ }
+    }
 
     // Apply privacy filtering (hides elements containing configured terms)
     await applyPrivacyFilter(page);
@@ -639,6 +698,9 @@ export async function convertUrlToPDF(
         // as empty spacers (e.g., LessWrong's Header-headerHeight span)
         for (const el of document.querySelectorAll('*')) {
           const htmlEl = el as HTMLElement;
+          const tag = htmlEl.tagName.toLowerCase();
+          // Skip media elements — they have no children/text but ARE content
+          if (tag === 'img' || tag === 'video' || tag === 'svg' || tag === 'canvas' || tag === 'iframe') continue;
           // Only collapse elements that are visually empty but take up space
           if (htmlEl.offsetHeight > 100 && htmlEl.children.length === 0 &&
               (htmlEl.textContent?.trim().length || 0) === 0) {
@@ -647,37 +709,56 @@ export async function convertUrlToPDF(
           }
         }
 
-        // Phase 5: Remove large dark obscuring shapes (beehiiv black oval, etc.)
-        // These are typically image containers with dark backgrounds and heavy
-        // border-radius that render as giant ovals/circles when images fail to load
-        for (const el of document.querySelectorAll('figure, div, span')) {
+        // Phase 5: Remove large decorative shapes (beehiiv black ovals, gradient
+        // blobs, hero-image circles, newsletter badges, etc.)
+        //
+        // Pattern: sites like beehiiv use giant elements with border-radius: 50%
+        // as decorative backgrounds. They render fine on-screen (overflow: hidden)
+        // but explode in PDF, obscuring article text. We detect ANY large round
+        // element with little/no text and remove it regardless of background color.
+        const viewportArea = window.innerWidth * window.innerHeight;
+        for (const el of document.querySelectorAll('*')) {
           const htmlEl = el as HTMLElement;
+          const tag = htmlEl.tagName.toLowerCase();
+          // Don't touch content-bearing elements
+          if (['html', 'body', 'main', 'article', 'section', 'p', 'h1', 'h2',
+               'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'table', 'pre', 'code',
+               'blockquote', 'form', 'input', 'textarea'].includes(tag)) continue;
+
           const rect = htmlEl.getBoundingClientRect();
-          // Only check elements that are large enough to obscure content
-          if (rect.width < 200 || rect.height < 200) continue;
+          if (rect.width < 150 || rect.height < 150) continue;
 
           const style = window.getComputedStyle(htmlEl);
-          const bg = style.backgroundColor;
-          const borderRadius = parseInt(style.borderRadius) || 0;
-          const isRounded = borderRadius > 50 || style.borderRadius.includes('9999');
-          const isDark = bg === 'rgb(0, 0, 0)' || bg === 'rgba(0, 0, 0, 1)';
+          const br = style.borderRadius || '';
+          const brPx = parseInt(br) || 0;
+          const isRounded = br.includes('50%') || br.includes('9999') ||
+                            br.includes('100%') || brPx > 100;
 
-          // Remove large dark rounded elements (the beehiiv black oval pattern)
-          if (isDark && isRounded && rect.height > 200) {
+          const textLen = (htmlEl.textContent || '').trim().length;
+          const elArea = rect.width * rect.height;
+
+          // Large round elements with no meaningful text → decorative blob
+          if (isRounded && textLen < 50 && elArea > viewportArea * 0.1) {
             htmlEl.remove();
             count++;
             continue;
           }
 
-          // Also handle: large elements with dark background that cover >40% of viewport
-          // and contain only an image (failed hero image containers)
-          if (isDark && rect.height > 400) {
-            const children = htmlEl.children;
-            const hasOnlyImg = children.length <= 2 &&
-              htmlEl.querySelector('img') !== null &&
-              (htmlEl.textContent?.trim().length || 0) < 20;
-            if (hasOnlyImg) {
-              // Make background transparent instead of removing (keep the image if it loaded)
+          // Also clip-path any round element (even with text) to prevent
+          // overflow bleed in PDF rendering
+          if (isRounded && elArea > viewportArea * 0.2) {
+            htmlEl.style.overflow = 'hidden';
+            htmlEl.style.clipPath = 'inset(0)';
+          }
+
+          // Large dark elements covering >40% viewport with only an image
+          // (failed hero image containers with dark fallback background)
+          const bg = style.backgroundColor;
+          const isDark = bg === 'rgb(0, 0, 0)' || bg === 'rgba(0, 0, 0, 1)' ||
+                         bg === 'rgb(17, 17, 17)' || bg === 'rgb(24, 24, 24)';
+          if (isDark && elArea > viewportArea * 0.3 && textLen < 30) {
+            const imgs = htmlEl.querySelectorAll('img');
+            if (imgs.length <= 2) {
               htmlEl.style.backgroundColor = 'transparent';
               count++;
             }
@@ -818,8 +899,8 @@ export async function convertUrlToPDF(
           text-fill-color: currentColor !important;
         }
 
-        /* Ensure inline links display correctly */
-        a {
+        /* Ensure inline links display correctly (but NOT image/media wrappers) */
+        a:not(.still-image):not(.attachment) {
           display: inline !important;
           position: static !important;
         }
@@ -842,18 +923,22 @@ export async function convertUrlToPDF(
           height: auto !important;
         }
 
-        /* LessWrong: hide vote sidebar, nav, header chrome, ToC — but keep post title */
+        /* LessWrong: hide vote sidebar, nav, header chrome, ToC — but keep post title.
+           Use [class~=...] (whitespace-separated word match) for the site-chrome
+           class names below — substring [class*=...] also matches the article's
+           LWPostsPageHeader-root / -appBar / -headerHeight block, which contains
+           the title, author, and date. */
         [class*="PostsVoteDefault"], [class*="LWPostsPageTopHeaderVote"],
         [class*="PostsPageTopHeader-leftSection"],
         [class*="TableOfContents"], [class*="ToCColumn"],
         [class*="WelcomeBox"], [class*="welcomeBox"],
-        [class*="Header-root"], [class*="Header-appBar"],
+        [class~="Header-root"], [class~="Header-appBar"],
         [class*="headroom-wrapper"],
         [class*="Layout-searchResultsArea"] {
           display: none !important;
         }
         /* LessWrong: collapse the page wrapper height (wraps entire content) */
-        [class*="Header-headerHeight"] {
+        [class~="Header-headerHeight"] {
           display: block !important;
           height: auto !important;
           min-height: 0 !important;
@@ -898,17 +983,41 @@ export async function convertUrlToPDF(
           visibility: hidden !important;
         }
 
+        /* Force-clip elements with large border-radius to prevent decorative
+           blobs from overflowing their container in PDF render (beehiiv, newsletters) */
+        [style*="border-radius: 50%"],
+        [style*="border-radius:50%"],
+        [style*="border-radius: 9999"],
+        [style*="border-radius:9999"],
+        [style*="border-radius: 100%"],
+        [style*="border-radius:100%"] {
+          overflow: hidden !important;
+          clip-path: inset(0) !important;
+        }
+
+        /* beehiiv puts a Tailwind decorative shadow inside small icon buttons:
+           div.absolute.h-full.w-full.rounded-full.bg-black.opacity-10. Sized
+           off the parent button (28x28) via position:relative. Our rule below
+           that forces a:not(...) to position:static strips the anchor, so the
+           absolute child detaches to the viewport and renders as a 1280x800
+           black ellipse over page 1. Drop these decorative shadows entirely. */
+        .absolute.h-full.w-full.rounded-full {
+          display: none !important;
+        }
+
         /* Prevent content overflow */
         body, html {
           max-width: 100% !important;
           overflow-x: hidden !important;
         }
 
-        /* Ensure text wraps properly */
+        /* Text wrapping. Do NOT add max-width:100% here — beehiiv wraps small
+           round social icons in flex-column <div>s; max-width on the wrapper
+           makes the inner SVG explode to column width (giant black ellipse on
+           page 1). Wide content is already capped by the img/table/pre rule. */
         p, span, div, li, td, th, h1, h2, h3, h4, h5, h6, a {
           word-wrap: break-word !important;
           overflow-wrap: break-word !important;
-          max-width: 100% !important;
         }
 
         /* Prevent wide elements from overflowing */

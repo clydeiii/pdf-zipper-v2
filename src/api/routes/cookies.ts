@@ -6,12 +6,70 @@
  */
 
 import { Router, Request, Response } from 'express';
-import { writeFile, stat } from 'node:fs/promises';
+import { readFile, writeFile, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { env } from '../../config/env.js';
 import { requireApiToken } from '../auth.js';
 
 export const cookiesRouter = Router();
+
+/**
+ * Cookie identity in Netscape format = (domain, path, name).
+ * Two cookies with the same triple are the same cookie; the new value wins
+ * on collision so re-exporting a refreshed session updates rather than
+ * duplicates the entry.
+ */
+function cookieKey(line: string): string | null {
+  const parts = line.split('\t');
+  if (parts.length < 7) return null;
+  const [domain, , path, , , name] = parts;
+  return `${domain}\t${path || '/'}\t${name}`;
+}
+
+/**
+ * Merge uploaded cookies.txt content into the existing file, deduping by
+ * (domain, path, name). Existing entries keep their position in the file;
+ * new cookies are appended; collisions get the uploaded value.
+ *
+ * Returns counts and the merged content (with a single header block).
+ */
+function mergeNetscapeCookies(existing: string, uploaded: string): {
+  merged: string;
+  added: number;
+  updated: number;
+  total: number;
+} {
+  // Insertion-ordered Map: existing entries keep position; new ones append.
+  const byKey = new Map<string, string>();
+
+  for (const line of existing.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const key = cookieKey(trimmed);
+    if (key) byKey.set(key, trimmed);
+  }
+
+  let added = 0;
+  let updated = 0;
+  for (const line of uploaded.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const key = cookieKey(trimmed);
+    if (!key) continue;
+    if (byKey.has(key)) updated++;
+    else added++;
+    byKey.set(key, trimmed);
+  }
+
+  const header = '# Netscape HTTP Cookie File\n# Maintained by pdf-zipper-v2 (merged on upload)\n\n';
+  const body = Array.from(byKey.values()).join('\n');
+  return {
+    merged: header + body + '\n',
+    added,
+    updated,
+    total: byKey.size,
+  };
+}
 
 /**
  * POST /upload - Upload a new cookies.txt file
@@ -59,16 +117,24 @@ cookiesRouter.post('/upload', requireApiToken, async (req: Request, res: Respons
       return;
     }
 
-    // Write to cookies file
+    // Merge with existing cookies (preserves still-valid sessions across
+    // partial re-exports — e.g., user exports cookies for ft.com only, NYT
+    // session cookies should stay intact).
     const cookiesPath = env.COOKIES_FILE;
-    await writeFile(cookiesPath, content, 'utf-8');
+    const existing = existsSync(cookiesPath) ? await readFile(cookiesPath, 'utf-8') : '';
+    const { merged, added, updated, total } = mergeNetscapeCookies(existing, content);
+    await writeFile(cookiesPath, merged, 'utf-8');
 
-    console.log(`Cookies file updated: ${validLines.length} cookies saved to ${cookiesPath}`);
+    console.log(
+      `Cookies file merged: +${added} new, ${updated} updated, ${total} total → ${cookiesPath}`
+    );
 
     res.json({
       success: true,
-      cookieCount: validLines.length,
-      message: `Successfully uploaded ${validLines.length} cookies`,
+      cookieCount: total,
+      added,
+      updated,
+      message: `Merged ${validLines.length} uploaded cookies: ${added} new, ${updated} updated, ${total} total`,
     });
 
   } catch (error) {

@@ -7,6 +7,8 @@
  */
 
 import { PDFDocument, StandardFonts, rgb, PDFPage, PDFFont } from 'pdf-lib';
+import { tryEmbedRemoteImage } from '../utils/pdf-image.js';
+import { setInfoDictFields } from '../utils/pdf-info-dict.js';
 import type { PodcastMetadata, WhisperResponse, TranscriptSegment } from './types.js';
 
 /**
@@ -23,6 +25,9 @@ const FONT_SIZE_META = 10;
 const FONT_SIZE_BODY = 11;
 const LINE_HEIGHT_BODY = 16;
 const LINE_HEIGHT_META = 14;
+
+const ARTWORK_SIZE = 100;
+const ARTWORK_GAP = 14;
 
 /**
  * Sanitize text for WinAnsi encoding (used by pdf-lib StandardFonts)
@@ -230,8 +235,28 @@ export async function generateTranscriptPdf(
 
   // === HEADER SECTION ===
 
+  // Try episode/podcast artwork first; fall back to RSS channel image.
+  let artwork = await tryEmbedRemoteImage(pdfDoc, metadata.artworkUrl);
+  if (!artwork) {
+    artwork = await tryEmbedRemoteImage(pdfDoc, metadata.feedChannelImage);
+  }
+
+  // If artwork present, draw it top-right and narrow header text width.
+  let headerWidth = CONTENT_WIDTH;
+  if (artwork) {
+    const artX = PAGE_WIDTH - MARGIN - ARTWORK_SIZE;
+    const artY = PAGE_HEIGHT - MARGIN - ARTWORK_SIZE;
+    page.drawImage(artwork, {
+      x: artX,
+      y: artY,
+      width: ARTWORK_SIZE,
+      height: ARTWORK_SIZE,
+    });
+    headerWidth = CONTENT_WIDTH - ARTWORK_SIZE - ARTWORK_GAP;
+  }
+
   // Podcast name (title)
-  const podcastLines = wrapText(sanitizedMetadata.podcastName, fontBold, FONT_SIZE_TITLE, CONTENT_WIDTH);
+  const podcastLines = wrapText(sanitizedMetadata.podcastName, fontBold, FONT_SIZE_TITLE, headerWidth);
   for (const line of podcastLines) {
     y = drawText(page, line, MARGIN, y, fontBold, FONT_SIZE_TITLE);
     y -= FONT_SIZE_TITLE + 4;
@@ -239,7 +264,7 @@ export async function generateTranscriptPdf(
 
   // Episode title (subtitle)
   y -= 8;
-  const titleLines = wrapText(sanitizedMetadata.episodeTitle, fontBold, FONT_SIZE_SUBTITLE, CONTENT_WIDTH);
+  const titleLines = wrapText(sanitizedMetadata.episodeTitle, fontBold, FONT_SIZE_SUBTITLE, headerWidth);
   for (const line of titleLines) {
     y = drawText(page, line, MARGIN, y, fontBold, FONT_SIZE_SUBTITLE, rgb(0.2, 0.2, 0.2));
     y -= FONT_SIZE_SUBTITLE + 2;
@@ -258,9 +283,10 @@ export async function generateTranscriptPdf(
   drawText(page, metaLine2, MARGIN, y, fontRegular, FONT_SIZE_META, rgb(0.4, 0.4, 0.4));
   y -= LINE_HEIGHT_META;
 
-  // Metadata line 3: Source URL
+  // Metadata line 3: Source URL — full width once we're below the artwork
   const metaLine3 = `Source: ${sanitizedMetadata.episodeUrl}`;
-  const urlLines = wrapText(metaLine3, fontRegular, FONT_SIZE_META, CONTENT_WIDTH);
+  const urlWidth = artwork && y > PAGE_HEIGHT - MARGIN - ARTWORK_SIZE ? headerWidth : CONTENT_WIDTH;
+  const urlLines = wrapText(metaLine3, fontRegular, FONT_SIZE_META, urlWidth);
   for (const line of urlLines) {
     drawText(page, line, MARGIN, y, fontRegular, FONT_SIZE_META, rgb(0.3, 0.3, 0.6));
     y -= LINE_HEIGHT_META;
@@ -394,6 +420,9 @@ export async function generateTranscriptPdf(
   pdfDoc.setSubject(sanitizedMetadata.episodeUrl);  // For rerun feature
   pdfDoc.setProducer(`pdf-zipper v2 podcast transcriber - ${new Date().toISOString()}`);
   pdfDoc.setCreator('Whisper ASR + pdf-zipper');
+
+  // DocType=transcript marks this as derived from an MP3 (sibling file).
+  setInfoDictFields(pdfDoc, { DocType: 'transcript' });
 
   // Save PDF
   const pdfBytes = await pdfDoc.save();

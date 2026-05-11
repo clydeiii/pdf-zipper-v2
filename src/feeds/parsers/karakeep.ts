@@ -2,6 +2,33 @@ import { normalizeBookmarkUrl } from '../../urls/normalizer.js';
 import type { BookmarkItem } from '../types.js';
 
 /**
+ * Hosts where the URL itself is the video — bookmarking implies the user
+ * wants the media downloaded. Anywhere else, an embedded video is treated
+ * as supplemental content and ignored (only the article PDF is captured).
+ *
+ * Apple Podcasts isn't here because it routes through a separate queue
+ * (see metadata-worker), not the Karakeep video-enclosure path.
+ */
+const VIDEO_PRIMARY_HOSTS = new Set([
+  'youtube.com',
+  'www.youtube.com',
+  'm.youtube.com',
+  'youtu.be',
+  'x.com',
+  'www.x.com',
+  'twitter.com',
+  'www.twitter.com',
+]);
+
+function isVideoPrimaryHost(url: string): boolean {
+  try {
+    return VIDEO_PRIMARY_HOSTS.has(new URL(url).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Karakeep API bookmark structure
  */
 interface KarakeepBookmark {
@@ -138,9 +165,12 @@ export async function parseKarakeepFeed(
           bookmarkedAt: bookmark.createdAt,
         };
 
-        // Check for video asset
+        // Karakeep auto-extracts video assets from articles, but for non-video-
+        // primary URLs (BI, NYT, Verge, etc.) those embeds are usually unrelated
+        // supplemental content, not what the user wanted. Only forward the video
+        // enclosure when the bookmark URL itself is a video-primary host.
         const videoAsset = bookmark.assets?.find(a => a.assetType === 'video');
-        if (videoAsset && bookmark.content.videoAssetId) {
+        if (videoAsset && bookmark.content.videoAssetId && isVideoPrimaryHost(bookmarkUrl)) {
           // Karakeep serves assets at /api/assets/{assetId}
           bookmarkItem.enclosure = {
             url: `${baseUrl}/api/assets/${bookmark.content.videoAssetId}`,

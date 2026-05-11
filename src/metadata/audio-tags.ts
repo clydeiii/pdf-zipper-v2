@@ -74,6 +74,7 @@ export function writeAudioMetadata(filePath: string, options: AudioMetadataOptio
       } : {}),
       // TXXX (user-defined text) frames for custom metadata
       userDefinedText: [
+        { description: 'DOC_TYPE', value: 'podcast' },
         { description: 'SUMMARY', value: summary || '' },
         { description: 'TAGS', value: (tags || []).join(', ') },
         { description: 'SOURCE_URL', value: meta.episodeUrl },

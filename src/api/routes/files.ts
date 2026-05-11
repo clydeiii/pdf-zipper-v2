@@ -8,9 +8,11 @@
 
 import { Router, Request, Response } from 'express';
 import { readdir, stat, readFile } from 'node:fs/promises';
+import { Stats } from 'node:fs';
 import * as path from 'node:path';
 import { PDFDocument } from 'pdf-lib';
 import { readInfoDictField } from '../../utils/pdf-info-dict.js';
+import { readAudioMetadata, readVideoMetadata } from '../../metadata/media-tags-reader.js';
 import { env } from '../../config/env.js';
 import { conversionQueue } from '../../queues/conversion.queue.js';
 import { podcastQueue } from '../../podcasts/podcast.queue.js';
@@ -21,6 +23,8 @@ import { requireApiToken } from '../auth.js';
 import { resolveWithinRoot } from '../../utils/paths.js';
 import { getWeekIndexedJobIds } from '../../jobs/week-index.js';
 import type { PodcastJobData } from '../../podcasts/types.js';
+import { mediaCollectionQueue } from '../../feeds/monitor.js';
+import type { MediaItem } from '../../media/types.js';
 
 export const filesRouter = Router();
 
@@ -192,6 +196,104 @@ filesRouter.get('/weeks', async (_req: Request, res: Response): Promise<void> =>
 });
 
 /**
+ * Bounded-concurrency map. Runs `fn` over `items` with at most `limit` in
+ * flight at a time; preserves input order in the output array.
+ */
+async function withConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i]);
+    }
+  }
+  const workerCount = Math.min(limit, items.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
+}
+
+/**
+ * In-memory cache for parsed PDF info. Key = `${path}:${mtimeMs}` so any file
+ * modification (rerun, regen) naturally invalidates the entry. Capped to 10k
+ * entries; oldest 25% are evicted when the cap is hit. Cleared on container
+ * restart, so no need for time-based TTL.
+ */
+type PdfFileInfo = { sourceUrl?: string; metadata?: FileInfo['metadata'] };
+const pdfInfoCache = new Map<string, PdfFileInfo>();
+const PDF_INFO_CACHE_MAX = 10_000;
+
+function cachePdfInfo(key: string, info: PdfFileInfo): void {
+  if (pdfInfoCache.size >= PDF_INFO_CACHE_MAX) {
+    const evictCount = Math.floor(PDF_INFO_CACHE_MAX / 4);
+    let evicted = 0;
+    for (const k of pdfInfoCache.keys()) {
+      if (evicted++ >= evictCount) break;
+      pdfInfoCache.delete(k);
+    }
+  }
+  pdfInfoCache.set(key, info);
+}
+
+/**
+ * Read a PDF once and return both source URL and enriched metadata.
+ *
+ * Replaces the previous extractUrlFromPdf + extractEnrichedMetadata pair,
+ * which loaded each PDF twice. Cached by path+mtime so warm requests skip
+ * the parse entirely. Returns empty fields on any read/parse error.
+ */
+async function loadPdfFileInfo(
+  pdfPath: string,
+  mtimeMs: number
+): Promise<PdfFileInfo> {
+  const cacheKey = `${pdfPath}:${mtimeMs}`;
+  const cached = pdfInfoCache.get(cacheKey);
+  if (cached) return cached;
+
+  let info: PdfFileInfo = {};
+  try {
+    const pdfBytes = await readFile(pdfPath);
+    const pdfDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+
+    const subject = pdfDoc.getSubject();
+    const sourceUrl =
+      subject && (subject.startsWith('http://') || subject.startsWith('https://'))
+        ? subject
+        : undefined;
+
+    const summary = readInfoDictField(pdfDoc, 'Summary');
+    const language = readInfoDictField(pdfDoc, 'Language');
+
+    let metadata: FileInfo['metadata'] | undefined;
+    if (summary || language) {
+      const tagsStr = readInfoDictField(pdfDoc, 'Tags');
+      const translation = readInfoDictField(pdfDoc, 'Translation');
+      metadata = {
+        title: pdfDoc.getTitle() || undefined,
+        author: pdfDoc.getAuthor() || undefined,
+        publication: readInfoDictField(pdfDoc, 'Publication'),
+        summary: summary || undefined,
+        language: language || undefined,
+        tags: tagsStr ? tagsStr.split(', ').filter(Boolean) : undefined,
+        hasTranslation: !!translation,
+      };
+    }
+
+    info = { sourceUrl, metadata };
+  } catch {
+    info = {};
+  }
+
+  cachePdfInfo(cacheKey, info);
+  return info;
+}
+
+/**
  * GET /weeks/:weekId - List files in a specific week
  *
  * Returns: { weekId, files: [...] }
@@ -236,8 +338,6 @@ filesRouter.get('/weeks/:weekId', async (req: Request, res: Response): Promise<v
       throw error;
     }
 
-    const files: FileInfo[] = [];
-
     // Scan subdirectories for files
     const subdirs: Array<{ name: string; defaultType: 'video' | 'transcript' | 'pdf' | 'audio' }> = [
       { name: 'videos', defaultType: 'video' },
@@ -246,92 +346,127 @@ filesRouter.get('/weeks/:weekId', async (req: Request, res: Response): Promise<v
       { name: 'podcasts', defaultType: 'pdf' },  // Podcasts folder has PDFs and audio
     ];
 
-    // Track files by base name for linking related files (podcast PDF ↔ audio)
-    const filesByBaseName = new Map<string, FileInfo[]>();
+    // Phase 1: cheaply collect every file we'll process. Subdirs are walked in
+    // parallel; each subdir's stat() calls also fan out so we don't pay an N×stat
+    // serialization cost on weeks with hundreds of files.
+    type RawFile = {
+      entry: string;
+      filePath: string;
+      relativePath: string;
+      stats: Stats;
+      ext: string;
+      subdirName: string;
+      defaultType: 'video' | 'transcript' | 'pdf' | 'audio';
+    };
 
-    for (const subdir of subdirs) {
+    const subdirResults = await Promise.all(subdirs.map(async (subdir) => {
       const subdirPath = path.join(weekPath, subdir.name);
-
+      let entries: string[];
       try {
-        const entries = await readdir(subdirPath);
-
-        for (const entry of entries) {
-          const filePath = path.join(subdirPath, entry);
-          const stats = await stat(filePath);
-
-          if (stats.isFile()) {
-            // Path relative to DATA_DIR
-            const relativePath = path.relative(env.DATA_DIR, filePath);
-
-            // Determine file type by extension
-            const ext = path.extname(entry).toLowerCase();
-            let fileType: 'video' | 'transcript' | 'pdf' | 'audio' = subdir.defaultType;
-            if (ext === '.mp3' || ext === '.m4a' || ext === '.wav' || ext === '.ogg') {
-              fileType = 'audio';
-            } else if (ext === '.pdf') {
-              fileType = 'pdf';
-            } else if (ext === '.mp4' || ext === '.webm') {
-              fileType = 'video';
-            }
-
-            // Extract source URL from PDF metadata
-            let sourceUrl: string | undefined;
-            if (fileType === 'pdf') {
-              sourceUrl = await extractUrlFromPdf(filePath) || undefined;
-            }
-
-            // Load enriched metadata from PDF Info Dict custom fields
-            let metadata: FileInfo['metadata'];
-            if (fileType === 'pdf') {
-              try {
-                metadata = await extractEnrichedMetadata(filePath);
-              } catch {
-                // No enriched metadata - that's fine
-              }
-            }
-
-            const fileInfo: FileInfo = {
-              name: entry,
-              path: relativePath,
-              size: stats.size,
-              modified: stats.mtime.toISOString(),
-              type: fileType,
-              sourceUrl,
-              metadata,
-            };
-
-            files.push(fileInfo);
-
-            // Track by base name for podcasts folder (to link PDF ↔ audio)
-            if (subdir.name === 'podcasts') {
-              const baseName = path.basename(entry, ext);
-              if (!filesByBaseName.has(baseName)) {
-                filesByBaseName.set(baseName, []);
-              }
-              filesByBaseName.get(baseName)!.push(fileInfo);
-            }
-          }
-        }
+        entries = await readdir(subdirPath);
       } catch (error) {
-        // Subdirectory doesn't exist, skip
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-          throw error;
-        }
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+        throw error;
       }
+
+      const stats = await Promise.all(entries.map((entry) =>
+        stat(path.join(subdirPath, entry)).catch(() => null)
+      ));
+
+      const raws: RawFile[] = [];
+      for (let i = 0; i < entries.length; i++) {
+        const s = stats[i];
+        if (!s || !s.isFile()) continue;
+        const entry = entries[i];
+        const filePath = path.join(subdirPath, entry);
+        raws.push({
+          entry,
+          filePath,
+          relativePath: path.relative(env.DATA_DIR, filePath),
+          stats: s,
+          ext: path.extname(entry).toLowerCase(),
+          subdirName: subdir.name,
+          defaultType: subdir.defaultType,
+        });
+      }
+      return raws;
+    }));
+    const rawFiles: RawFile[] = subdirResults.flat();
+
+    // Phase 2: extract metadata in parallel with bounded concurrency. PDF parsing
+    // dominates wall time here, and 16 workers keeps memory under control on
+    // weeks with hundreds of multi-MB PDFs (1.5GB container limit).
+    const files: FileInfo[] = await withConcurrency(rawFiles, 16, async (raw) => {
+      const { entry, filePath, relativePath, stats, ext, defaultType } = raw;
+
+      let fileType: 'video' | 'transcript' | 'pdf' | 'audio' = defaultType;
+      if (ext === '.mp3' || ext === '.m4a' || ext === '.wav' || ext === '.ogg') {
+        fileType = 'audio';
+      } else if (ext === '.pdf') {
+        fileType = 'pdf';
+      } else if (ext === '.mp4' || ext === '.webm') {
+        fileType = 'video';
+      }
+
+      let sourceUrl: string | undefined;
+      let metadata: FileInfo['metadata'];
+
+      if (fileType === 'pdf') {
+        const info = await loadPdfFileInfo(filePath, stats.mtimeMs);
+        sourceUrl = info.sourceUrl;
+        metadata = info.metadata;
+      } else if (fileType === 'audio') {
+        try {
+          const m = await readAudioMetadata(filePath);
+          if (m) {
+            metadata = {
+              title: m.title, author: m.author, publication: m.publication,
+              summary: m.summary, tags: m.tags,
+            };
+            sourceUrl = m.sourceUrl;
+          }
+        } catch { /* ignore */ }
+      } else if (fileType === 'video') {
+        try {
+          const m = await readVideoMetadata(filePath);
+          if (m) {
+            metadata = {
+              title: m.title, author: m.author, publication: m.publication,
+              summary: m.summary, tags: m.tags,
+            };
+            sourceUrl = m.sourceUrl;
+          }
+        } catch { /* ignore */ }
+      }
+
+      return {
+        name: entry,
+        path: relativePath,
+        size: stats.size,
+        modified: stats.mtime.toISOString(),
+        type: fileType,
+        sourceUrl,
+        metadata,
+      };
+    });
+
+    // Phase 3: link podcast PDFs to their audio sibling. The podcasts/ subdir
+    // contains both PDF and MP3 with matching base names; cross-link them so
+    // the UI can render a single combined row.
+    const filesByBaseName = new Map<string, FileInfo[]>();
+    for (let i = 0; i < rawFiles.length; i++) {
+      if (rawFiles[i].subdirName !== 'podcasts') continue;
+      const baseName = path.basename(rawFiles[i].entry, rawFiles[i].ext);
+      if (!filesByBaseName.has(baseName)) filesByBaseName.set(baseName, []);
+      filesByBaseName.get(baseName)!.push(files[i]);
     }
-
-    // Link related files in podcasts folder (PDF ↔ audio)
-    for (const [_baseName, relatedFiles] of filesByBaseName) {
-      if (relatedFiles.length > 1) {
-        // Find the PDF and audio files
-        const pdfFile = relatedFiles.find(f => f.type === 'pdf');
-        const audioFile = relatedFiles.find(f => f.type === 'audio');
-
-        if (pdfFile && audioFile) {
-          // Link them to each other
-          pdfFile.relatedFiles = [audioFile.path];
-          audioFile.relatedFiles = [pdfFile.path];
-        }
+    for (const relatedFiles of filesByBaseName.values()) {
+      if (relatedFiles.length < 2) continue;
+      const pdfFile = relatedFiles.find(f => f.type === 'pdf');
+      const audioFile = relatedFiles.find(f => f.type === 'audio');
+      if (pdfFile && audioFile) {
+        pdfFile.relatedFiles = [audioFile.path];
+        audioFile.relatedFiles = [pdfFile.path];
       }
     }
 
@@ -472,39 +607,9 @@ async function extractUrlFromPdf(pdfPath: string): Promise<string | null> {
   }
 }
 
-// readInfoDictField imported from utils/pdf-info-dict.ts
-
-/**
- * Extract enriched metadata from PDF Info Dict custom fields
- * Returns undefined if no enrichment has been done on this PDF
- */
-async function extractEnrichedMetadata(pdfPath: string): Promise<FileInfo['metadata'] | undefined> {
-  try {
-    const pdfBytes = await readFile(pdfPath);
-    const pdfDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
-
-    const summary = readInfoDictField(pdfDoc, 'Summary');
-    const language = readInfoDictField(pdfDoc, 'Language');
-
-    // Only return metadata if enrichment was actually done
-    if (!summary && !language) return undefined;
-
-    const tagsStr = readInfoDictField(pdfDoc, 'Tags');
-    const translation = readInfoDictField(pdfDoc, 'Translation');
-
-    return {
-      title: pdfDoc.getTitle() || undefined,
-      author: pdfDoc.getAuthor() || undefined,
-      publication: readInfoDictField(pdfDoc, 'Publication'),
-      summary: summary || undefined,
-      language: language || undefined,
-      tags: tagsStr ? tagsStr.split(', ').filter(Boolean) : undefined,
-      hasTranslation: !!translation,
-    };
-  } catch {
-    return undefined;
-  }
-}
+// PDF info reads for the GET /weeks/:weekId path live in loadPdfFileInfo above
+// (single read for url + enriched metadata). The standalone extractUrlFromPdf
+// is still used by the rerun handlers below where only the URL is needed.
 
 /**
  * POST /weeks/:weekId/rerun - Rerun all URLs from a specific week
@@ -791,14 +896,15 @@ filesRouter.post('/delete-failures', requireApiToken, async (req: Request, res: 
  * - 500 Internal Server Error on failure
  */
 filesRouter.post('/rerun-selected', requireApiToken, async (req: Request, res: Response): Promise<void> => {
-  const { files, urls } = req.body as { files?: string[]; urls?: string[] };
+  const { files, urls, videos } = req.body as { files?: string[]; urls?: string[]; videos?: string[] };
 
   const hasFiles = files && Array.isArray(files) && files.length > 0;
   const hasUrls = urls && Array.isArray(urls) && urls.length > 0;
+  const hasVideos = videos && Array.isArray(videos) && videos.length > 0;
 
-  if (!hasFiles && !hasUrls) {
+  if (!hasFiles && !hasUrls && !hasVideos) {
     res.status(400).json({
-      error: 'files or urls array is required',
+      error: 'files, urls, or videos array is required',
     });
     return;
   }
@@ -841,6 +947,37 @@ filesRouter.post('/rerun-selected', requireApiToken, async (req: Request, res: R
 
     // Submit URLs for reprocessing
     const jobs = [];
+
+    // Video re-enrichment: read each MP4's embedded metadata, submit a re-enrich job
+    // that reuses the on-disk file (skips download).
+    if (hasVideos) {
+      for (const vidPath of videos!) {
+        if (!vidPath.toLowerCase().endsWith('.mp4')) continue;
+        const fullPath = resolveWithinRoot(dataDir, vidPath);
+        if (!fullPath) continue;
+
+        const videoMeta = await readVideoMetadata(fullPath);
+        const sourceUrl = videoMeta?.sourceUrl || `file://${fullPath}`;
+
+        // Construct the minimum MediaItem needed for enrichVideo to run
+        const item: MediaItem = {
+          url: sourceUrl,
+          canonicalUrl: sourceUrl,
+          guid: path.basename(fullPath),
+          source: 'karakeep',
+          mediaType: 'video',
+          enclosure: { url: sourceUrl, type: 'video/mp4' },
+          title: videoMeta?.title,
+        };
+
+        const job = await mediaCollectionQueue.add('reenrich-video', {
+          item,
+          existingFilePath: fullPath,
+        });
+        jobs.push({ jobId: job.id, url: sourceUrl, type: 'video-reenrich', path: vidPath });
+      }
+    }
+
     for (const url of urlsToRerun) {
       // Route podcast URLs to podcast queue, others to conversion queue
       if (isApplePodcastsUrl(url)) {
@@ -868,7 +1005,7 @@ filesRouter.post('/rerun-selected', requireApiToken, async (req: Request, res: R
     }));
 
     res.json({
-      submitted: urlsToRerun.length,
+      submitted: jobs.length,
       jobs,
     });
   } catch (error) {

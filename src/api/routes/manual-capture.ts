@@ -13,7 +13,6 @@
  */
 
 import { Router, Request, Response } from 'express';
-import express from 'express';
 import * as path from 'node:path';
 import { requireApiToken } from '../auth.js';
 import { savePdfToWeeklyBin } from '../../utils/save-pdf.js';
@@ -28,8 +27,13 @@ export const manualCaptureRouter = Router();
 /** Plugin creator tag embedded in PDF Creator field — includes extension-reported version. */
 const CREATOR_PREFIX = 'pdf-zipper-v2-chrome-plugin';
 
-/** Body size limit for the JSON payload (PDF is base64-encoded). 25MB = ~18MB raw PDF. */
-const BODY_LIMIT = '25mb';
+/**
+ * Hard ceiling for enrichment in the synchronous request path.
+ * Cloudflare Tunnel kills the upstream connection at ~100s, so enrichment
+ * must lose fast or the client sees a CF error page instead of our JSON.
+ * (Ollama keeps churning in the background; we just stop waiting.)
+ */
+const ENRICHMENT_DEADLINE_MS = 75 * 1000;
 
 interface ReadabilityInfo {
   title?: string | null;
@@ -71,12 +75,32 @@ function isValidUrl(urlString: string): boolean {
 }
 
 /**
+ * Strip query string and fragment, leaving origin + path. Used as a
+ * more-lenient fallback key for failed-job matching: when the user
+ * navigates to a cleaned URL (no share token, no access token, no utm)
+ * to manually capture, the canonical URL no longer matches the failed
+ * job's crufty URL — but origin+path almost always does.
+ */
+function stripQueryFragment(url: string): string {
+  try {
+    const u = new URL(url);
+    return u.origin + u.pathname;
+  } catch {
+    return url.split('?')[0].split('#')[0];
+  }
+}
+
+/**
  * Find and remove failed BullMQ jobs whose URL matches the captured URL.
- * Matches on canonical (normalized) URL so www./protocol/trailing-slash
- * differences don't prevent removal.
+ *
+ * Two-tier match:
+ *   1. canonical (normalized) URL — handles www./protocol/trailing-slash
+ *   2. origin+path (query stripped) — handles share/access/tracking tokens
+ *      that vary per visit (e.g. ?st=, ?accessToken=, ?reflink=)
  */
 async function removeMatchingFailedJobs(capturedUrl: string): Promise<number> {
   const targetCanonical = normalizeBookmarkUrl(capturedUrl);
+  const targetPath = stripQueryFragment(capturedUrl);
   let removed = 0;
 
   // Scan failed jobs (reasonable cap — BullMQ keeps ~2000 failed by default)
@@ -88,8 +112,15 @@ async function removeMatchingFailedJobs(capturedUrl: string): Promise<number> {
 
     const jobCanonical = normalizeBookmarkUrl(jobUrl);
     const jobOriginalCanonical = jobOriginalUrl ? normalizeBookmarkUrl(jobOriginalUrl) : null;
+    const jobPath = stripQueryFragment(jobUrl);
+    const jobOriginalPath = jobOriginalUrl ? stripQueryFragment(jobOriginalUrl) : null;
 
-    if (jobCanonical === targetCanonical || jobOriginalCanonical === targetCanonical) {
+    const canonicalMatch =
+      jobCanonical === targetCanonical || jobOriginalCanonical === targetCanonical;
+    const pathMatch =
+      jobPath === targetPath || jobOriginalPath === targetPath;
+
+    if (canonicalMatch || pathMatch) {
       try {
         await job.remove();
         removed++;
@@ -105,7 +136,6 @@ async function removeMatchingFailedJobs(capturedUrl: string): Promise<number> {
 
 manualCaptureRouter.post(
   '/',
-  express.json({ limit: BODY_LIMIT }),
   requireApiToken,
   async (req: Request, res: Response): Promise<void> => {
     const startMs = Date.now();
@@ -155,14 +185,30 @@ manualCaptureRouter.post(
           `[manual-capture] Content: ${contentResult.charCount} chars, ${contentResult.pageCount} pages`
         );
         if (contentResult.extractedText && contentResult.extractedText.length > 100) {
-          enrichedMetadata = await enrichDocumentMetadata(
+          const enrichPromise = enrichDocumentMetadata(
             contentResult.extractedText,
             body.url,
             body.title
           );
-          console.log(
-            `[manual-capture] Enriched: "${enrichedMetadata.title}" [${enrichedMetadata.language}]`
-          );
+          const timeoutSentinel = Symbol('enrichment-timeout');
+          const raced = await Promise.race([
+            enrichPromise,
+            new Promise<typeof timeoutSentinel>((resolve) =>
+              setTimeout(() => resolve(timeoutSentinel), ENRICHMENT_DEADLINE_MS)
+            ),
+          ]);
+          if (raced === timeoutSentinel) {
+            console.warn(
+              `[manual-capture] Enrichment exceeded ${ENRICHMENT_DEADLINE_MS}ms deadline (Ollama busy?) — saving without enrichment`
+            );
+            // Don't await — let the in-flight call settle in the background
+            enrichPromise.catch(() => { /* already logged via deadline */ });
+          } else {
+            enrichedMetadata = raced;
+            console.log(
+              `[manual-capture] Enriched: "${enrichedMetadata.title}" [${enrichedMetadata.language}]`
+            );
+          }
         }
       } catch (error) {
         console.warn(
@@ -191,7 +237,8 @@ manualCaptureRouter.post(
 
       // Assemble extra Info Dict fields from client-side extraction
       const extraFields: Record<string, string | undefined> = {};
-      const captureScope = body.captureScope === 'selection' ? 'selection' : 'page';
+      const validScopes = ['page', 'reader', 'selection'] as const;
+      const captureScope = validScopes.includes(body.captureScope as any) ? body.captureScope! : 'page';
       extraFields.CaptureScope = captureScope;
       if (archiveWrapperUrl) extraFields.ViaArchive = archiveWrapperUrl;
       if (body.markdown && typeof body.markdown === 'string' && body.markdown.length > 0) {

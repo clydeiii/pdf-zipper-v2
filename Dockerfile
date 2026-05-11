@@ -9,9 +9,9 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm install --omit=dev
 
-# Install Playwright OS deps + ffmpeg for video metadata/subtitles
+# Install Playwright OS deps + ffmpeg
 RUN npx playwright install-deps chromium && \
-    apt-get update && apt-get install -y --no-install-recommends ffmpeg && \
+    apt-get update && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Playwright browsers to a shared location accessible by non-root users
@@ -33,6 +33,14 @@ RUN npm install --save-dev typescript @types/node @types/express @types/archiver
 
 ENV NODE_ENV=production
 ENV PORT=3002
+
+# yt-dlp: kept in its own cache-bustable layer (after npm/build) so the weekly
+# refresh cron can pull a fresh binary without re-running the TypeScript compile.
+# Bump via: docker compose build --build-arg YT_DLP_CACHEBUST=$(date +%Y%m%d)
+ARG YT_DLP_CACHEBUST=initial
+RUN curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux -o /usr/local/bin/yt-dlp && \
+    chmod a+rx /usr/local/bin/yt-dlp && \
+    /usr/local/bin/yt-dlp --version
 
 EXPOSE 3002
 

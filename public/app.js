@@ -340,8 +340,12 @@ function renderFailedRow(failure, index) {
   // Determine failure type for badge
   const failureType = failure.isBotDetected ? 'bot blocked' : getFailureType(failure.failureReason);
 
-  // Use originalUrl for archive.is (preserves www subdomain), fallback to url
-  const archiveUrl = `https://archive.is/${failure.originalUrl || failure.url}`;
+  // Use originalUrl for archive.is (preserves www subdomain), fallback to url.
+  // Strip query string + fragment: archive.is keys archives by full URL, but
+  // article tracking/access tokens (?st=, ?accessToken=, ?utm_*, etc.) vary
+  // per visit so will never match an archived snapshot. Article identity
+  // lives in the path for paywalled news sites — the main archive use case.
+  const archiveUrl = `https://archive.is/${stripQueryAndFragment(failure.originalUrl || failure.url)}`;
 
   // Debug screenshot link (opens in new tab to view what the page looked like)
   const debugUrl = `/api/debug/${failure.jobId}`;
@@ -373,6 +377,20 @@ function renderFailedRow(failure, index) {
       <td class="col-date">${formatDate(failure.failedAt)}</td>
     </tr>
   `;
+}
+
+/**
+ * Strip query string and fragment from a URL — used when building archive.is
+ * lookup links, where tracking tokens (?st=, ?accessToken=, etc.) don't match
+ * archived snapshots. Falls back to the input if URL parsing fails.
+ */
+function stripQueryAndFragment(url) {
+  try {
+    const u = new URL(url);
+    return u.origin + u.pathname;
+  } catch {
+    return url.split('?')[0].split('#')[0];
+  }
 }
 
 /**
@@ -597,10 +615,11 @@ function selectNewSinceExport() {
   // Clear current selection first
   selectedFiles.clear();
 
-  filtered.forEach((item, index) => {
+  filtered.forEach((item) => {
     const isNew = !lastExport || new Date(item.modified) > new Date(lastExport);
     if (isNew && !item.isFailed) {
-      const key = item.path || item.url;
+      // Key format must match getItemKey() so restoreSelectionState() can find them
+      const key = item.path ? `file:${item.path}` : `failed:${item.url}`;
       selectedFiles.add(key);
       count++;
     }
@@ -799,27 +818,35 @@ async function rerunSelected() {
     return;
   }
 
-  // Separate files (PDFs) and failed items (URLs)
+  // Separate files (PDFs), videos (MP4s), and failed items (URLs)
   const pdfPaths = [];
+  const videoPaths = [];
   const failedUrls = [];
 
   checkboxes.forEach(cb => {
     if (cb.dataset.failed === 'true') {
       // Failed item - has URL directly
       failedUrls.push(cb.dataset.url);
-    } else if (cb.dataset.path && cb.dataset.path.endsWith('.pdf')) {
-      // PDF file - needs URL extraction
-      pdfPaths.push(cb.dataset.path);
+    } else if (cb.dataset.path) {
+      const p = cb.dataset.path.toLowerCase();
+      if (p.endsWith('.pdf')) {
+        pdfPaths.push(cb.dataset.path);        // PDF - extract URL from metadata and rerun conversion
+      } else if (p.endsWith('.mp4')) {
+        videoPaths.push(cb.dataset.path);      // MP4 - re-run enrichment on existing file
+      }
     }
   });
 
-  const totalCount = pdfPaths.length + failedUrls.length;
+  const totalCount = pdfPaths.length + videoPaths.length + failedUrls.length;
   if (totalCount === 0) {
-    showStatus('No PDF files or failed items selected to rerun', 'error');
+    showStatus('No PDF, MP4, or failed items selected to rerun', 'error');
     return;
   }
 
-  if (!confirm(`Re-capture ${totalCount} selected item(s)?\n\nExisting files will be overwritten with fresh captures.`)) {
+  const videoNote = videoPaths.length > 0
+    ? `\n\n${videoPaths.length} MP4(s) will be re-enriched in place (whisper + metadata + transcript PDF). Original MP4s are NOT re-downloaded.`
+    : '';
+  if (!confirm(`Re-capture ${totalCount} selected item(s)?\n\nExisting files will be overwritten with fresh captures.${videoNote}`)) {
     return;
   }
 
@@ -831,7 +858,7 @@ async function rerunSelected() {
     const response = await fetch('/api/files/rerun-selected', {
       method: 'POST',
       headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ files: pdfPaths, urls: failedUrls }),
+      body: JSON.stringify({ files: pdfPaths, urls: failedUrls, videos: videoPaths }),
     });
 
     if (!response.ok) {

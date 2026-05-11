@@ -62,7 +62,8 @@ export interface PodcastMetadata {
   podcastName: string;
   podcastAuthor: string;
   genre: string;
-  artworkUrl?: string;
+  artworkUrl?: string;          // Episode/podcast cover from iTunes API (preferred)
+  feedChannelImage?: string;    // Channel-level cover from RSS feed (fallback)
   feedUrl: string;
 
   // Episode info

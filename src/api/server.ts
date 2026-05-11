@@ -35,9 +35,12 @@ const __dirname = path.dirname(__filename);
 export const app = express();
 
 // Middleware
-// Increase JSON body limit for large cookies.txt uploads (can be ~1-2MB)
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// Increase JSON body limit for:
+// - cookies.txt uploads (~1-2MB)
+// - Chrome plugin manual-capture (base64 PDF + markdown, can reach 20-30MB for long articles)
+// Safe to allow large payloads since server is behind Cloudflare Access
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Static file serving from public/ directory
 const publicPath = path.join(__dirname, '..', '..', 'public');

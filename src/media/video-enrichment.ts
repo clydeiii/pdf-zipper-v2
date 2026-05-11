@@ -11,17 +11,48 @@
  */
 
 import { execFile } from 'node:child_process';
-import { writeFile, unlink, mkdir, readFile } from 'node:fs/promises';
+import { writeFile, unlink, mkdir, readFile, rename } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { promisify } from 'node:util';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Agent } from 'undici';
-import { env } from '../config/env.js';
+import { createRequire } from 'node:module';
 import { enrichVideoFile } from '../metadata/video-tags.js';
 import { enrichDocumentMetadata } from '../metadata/enrichment.js';
 import { generateTranscriptPdf } from '../metadata/transcript-pdf.js';
+import { formatTranscriptWithLLM } from '../podcasts/transcript-formatter.js';
+import { resolveWhisperHost } from '../utils/whisper-host.js';
+import { sendDiscordNotification } from '../notifications/discord.js';
+import { fetchYouTubeMetadata } from './youtube-metadata.js';
 import type { MediaItem } from './types.js';
+
+const require = createRequire(import.meta.url);
+const sanitizeFilename = require('sanitize-filename') as (input: string) => string;
+
+/**
+ * Build a `{channel}-{title}` base filename for a YouTube/Vimeo video, mirroring
+ * the podcast worker's `{podcast}-{episode}` convention so the KB groups
+ * each creator's media together. Returns null if either piece is missing.
+ *
+ * Slug rules match getPodcastBaseFilename for cross-format consistency: lower
+ * case, drop non-alphanumeric, collapse runs of dashes, cap at 30/50 chars.
+ */
+function buildVideoBaseName(channel: string | undefined, title: string | undefined): string | null {
+  if (!channel || !title) return null;
+  const slug = (s: string, max: number) =>
+    sanitizeFilename(s)
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, '')
+      .replace(/\s+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '')
+      .substring(0, max);
+  const channelSlug = slug(channel, 30);
+  const titleSlug = slug(title, 50);
+  if (!channelSlug || !titleSlug) return null;
+  return `${channelSlug}-${titleSlug}`;
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -64,8 +95,12 @@ async function transcribeForVideo(audioPath: string): Promise<{ text: string; vt
   const audioBuffer = await readFile(audioPath);
   const filename = path.basename(audioPath);
 
+  // Pick the active ASR host once; both /asr calls (text + VTT) share it so
+  // they hit the same backend on the same audio.
+  const host = await resolveWhisperHost();
+
   // Request text transcript
-  const textUrl = new URL('/asr', env.WHISPER_HOST);
+  const textUrl = new URL('/asr', host);
   textUrl.searchParams.set('output', 'txt');
 
   const textForm = new FormData();
@@ -81,7 +116,7 @@ async function transcribeForVideo(audioPath: string): Promise<{ text: string; vt
   const text = await textResp.text();
 
   // Request VTT subtitle format
-  const vttUrl = new URL('/asr', env.WHISPER_HOST);
+  const vttUrl = new URL('/asr', host);
   vttUrl.searchParams.set('output', 'vtt');
 
   const vttForm = new FormData();
@@ -100,6 +135,8 @@ async function transcribeForVideo(audioPath: string): Promise<{ text: string; vt
 }
 
 export interface VideoEnrichmentResult {
+  /** Final MP4 path — present when enrichment renamed the file (channel-prefix). */
+  filePath?: string;
   transcriptPath?: string;
   transcriptLength?: number;
   vttEmbedded?: boolean;
@@ -115,9 +152,32 @@ export interface VideoEnrichmentResult {
  * @param item - Media item metadata from feed
  * @returns Enrichment results
  */
-export async function enrichVideo(mp4Path: string, item: MediaItem): Promise<VideoEnrichmentResult> {
+export async function enrichVideo(initialMp4Path: string, item: MediaItem): Promise<VideoEnrichmentResult> {
+  let mp4Path = initialMp4Path;
   const result: VideoEnrichmentResult = {};
   const startTime = Date.now();
+
+  // Step 0: Resolve yt-dlp metadata + rename MP4 to {channel}-{title} format
+  // BEFORE the long transcribe step. Mirrors the podcast worker's convention
+  // (creator-prefixed) and avoids the file showing up under the Karakeep-
+  // derived name for ~15 min while transcription runs. Pays a ~2-3s yt-dlp
+  // latency cost up front. Best-effort: any failure keeps the original path.
+  const ytMeta = await fetchYouTubeMetadata(item.url);
+  const earlyBase = buildVideoBaseName(ytMeta?.channel, item.title || ytMeta?.title);
+  if (earlyBase) {
+    const dir = path.dirname(mp4Path);
+    const newMp4Path = path.join(dir, `${earlyBase}.mp4`);
+    if (newMp4Path !== mp4Path) {
+      try {
+        await rename(mp4Path, newMp4Path);
+        result.filePath = newMp4Path;
+        mp4Path = newMp4Path;
+        console.log(`Renamed video to channel-prefixed filename: ${path.basename(newMp4Path)}`);
+      } catch (err) {
+        console.warn(`Channel-prefix rename failed (keeping original):`, err instanceof Error ? err.message : err);
+      }
+    }
+  }
 
   // Check file size - skip transcription for very large files
   const { statSync } = await import('node:fs');
@@ -130,6 +190,7 @@ export async function enrichVideo(mp4Path: string, item: MediaItem): Promise<Vid
     result.metadataWritten = await enrichVideoFile(mp4Path, {
       title: item.title || undefined,
       custom: {
+        doc_type: 'video',
         source_url: item.url,
         bookmarked_at: item.bookmarkedAt || '',
       },
@@ -146,11 +207,33 @@ export async function enrichVideo(mp4Path: string, item: MediaItem): Promise<Vid
     audioPath = await extractAudio(mp4Path);
     console.log(`Audio extracted: ${audioPath}`);
 
-    // Step 2: Transcribe with Whisper (text + VTT)
-    console.log('Transcribing video audio with Whisper...');
+    // Step 2: Transcribe with Parakeet (text + VTT)
+    const videoTitle = item.title || path.basename(mp4Path, '.mp4');
+    await sendDiscordNotification({
+      type: 'info',
+      title: '🎬 Parakeet: transcribing video',
+      description: videoTitle,
+      fields: [
+        { name: 'Size', value: `${Math.round(sizeMB)} MB`, inline: true },
+      ],
+    });
+
+    console.log('Transcribing video audio with Parakeet...');
+    const transcribeStart = Date.now();
     const { text, vtt } = await transcribeForVideo(audioPath);
     result.transcriptLength = text.length;
-    console.log(`Transcription complete: ${text.length} chars`);
+    const transcribeElapsed = Math.round((Date.now() - transcribeStart) / 1000);
+    console.log(`Transcription complete: ${text.length} chars in ${transcribeElapsed}s`);
+
+    await sendDiscordNotification({
+      type: 'success',
+      title: '🎬 Parakeet: done',
+      description: videoTitle,
+      fields: [
+        { name: 'Time', value: `${transcribeElapsed}s`, inline: true },
+        { name: 'Chars', value: text.length.toLocaleString(), inline: true },
+      ],
+    });
 
     // Step 3: AI enrichment (summary + tags from transcript)
     let summary: string | undefined;
@@ -175,7 +258,7 @@ export async function enrichVideo(mp4Path: string, item: MediaItem): Promise<Vid
       console.warn('Video AI enrichment failed:', err instanceof Error ? err.message : err);
     }
 
-    // Step 4: Embed VTT subtitles + metadata into MP4
+    // Step 4: Embed VTT subtitles + metadata into MP4 (ytMeta resolved up-front)
     const commentParts: string[] = [];
     if (summary) commentParts.push(summary);
     if (tags && tags.length > 0) commentParts.push(`Tags: ${tags.join(', ')}`);
@@ -186,28 +269,75 @@ export async function enrichVideo(mp4Path: string, item: MediaItem): Promise<Vid
       title: item.title || undefined,
       comment: commentParts.join('\n'),
       custom: {
+        doc_type: 'video',
         summary: summary || '',
         tags: (tags || []).join(', '),
         source_url: item.url,
         bookmarked_at: item.bookmarkedAt || '',
         transcript_chars: String(text.length),
+        ...(ytMeta?.channel ? { channel: ytMeta.channel } : {}),
+        ...(ytMeta?.uploadDate ? { upload_date: ytMeta.uploadDate } : {}),
+        ...(ytMeta?.description ? { yt_description: ytMeta.description.slice(0, 4000) } : {}),
       },
     }, vtt);
 
     result.vttEmbedded = result.metadataWritten;
 
+    // Step 4.5: Format transcript with LLM (proper-noun correction from title)
+    let formattedTranscript = text;
+    const hasTitle = !!(item.title);
+    if (hasTitle) {
+      await sendDiscordNotification({
+        type: 'info',
+        title: '🧠 Gemma4: formatting video transcript',
+        description: videoTitle,
+        fields: [
+          { name: 'Chunks', value: `~${Math.ceil(text.length / 15000)}`, inline: true },
+          { name: 'Input', value: `${text.length.toLocaleString()} chars`, inline: true },
+        ],
+      });
+    }
+
+    const formatStart = Date.now();
+    try {
+      formattedTranscript = await formatTranscriptWithLLM(text, {
+        episodeTitle: item.title || undefined,
+      });
+      const formatElapsed = Math.round((Date.now() - formatStart) / 1000);
+      console.log(`Transcript formatted: ${text.length} -> ${formattedTranscript.length} chars in ${formatElapsed}s`);
+
+      if (hasTitle) {
+        await sendDiscordNotification({
+          type: 'success',
+          title: '🧠 Gemma4: done',
+          description: videoTitle,
+          fields: [
+            { name: 'Time', value: `${formatElapsed}s`, inline: true },
+            { name: 'Output', value: `${formattedTranscript.length.toLocaleString()} chars`, inline: true },
+          ],
+        });
+      }
+    } catch (err) {
+      console.warn('Transcript formatting failed, using raw text:', err instanceof Error ? err.message : err);
+    }
+
     // Step 5: Generate transcript PDF alongside the video (Karpathy-compliant metadata)
     const transcriptPdfPath = mp4Path.replace(/\.mp4$/i, '.transcript.pdf');
     const pdfBuffer = await generateTranscriptPdf({
-      title: item.title || 'Video Transcript',
+      title: item.title || ytMeta?.title || 'Video Transcript',
       sourceUrl: item.url,
-      date: item.bookmarkedAt,
+      date: ytMeta?.uploadDate || item.bookmarkedAt,
       summary,
       tags,
-      author: enrichedAuthor,
-      publication: enrichedPublication,
+      author: ytMeta?.channel || enrichedAuthor,
+      publication: enrichedPublication || ytMeta?.channel,
       language: enrichedLanguage,
-      transcriptText: text,
+      channel: ytMeta?.channel,
+      channelUrl: ytMeta?.channelUrl,
+      uploadDate: ytMeta?.uploadDate,
+      description: ytMeta?.description,
+      thumbnail: ytMeta?.thumbnail,
+      transcriptText: formattedTranscript,
     });
     await writeFile(transcriptPdfPath, pdfBuffer);
     result.transcriptPath = transcriptPdfPath;

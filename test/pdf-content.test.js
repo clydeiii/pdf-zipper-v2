@@ -74,11 +74,39 @@ test('analyzePdfContent detects firewall/WAF blocks', async () => {
   assert.ok(result.reason?.includes('Firewall') || result.reason?.includes('WAF'));
 });
 
+test('analyzePdfContent detects stripped Reuters page (footer-only)', async () => {
+  // Reuters silently serves the footer/nav skeleton when bot-throttled.
+  // Char count is short and the only "real" sentence is the footer phrase.
+  const text = 'Latest Browse Media About Reuters. Reuters, the news and media division of Thomson Reuters, is the world\'s largest multimedia news provider. LSEG Products. Workspace. Data Catalogue.';
+  const pdf = await createPdfWithText(text);
+  const result = await analyzePdfContent(pdf);
+  assert.equal(result.passed, false);
+  assert.ok(result.reason?.includes('Stripped page'));
+});
+
+test('analyzePdfContent ignores Reuters footer phrase in long article', async () => {
+  // A long article that quotes the Reuters boilerplate (e.g. a meta-piece
+  // about Reuters itself) should NOT be flagged.
+  const text = filler(5000) + ' The brand line goes: "Reuters, the news and media division of Thomson Reuters."';
+  const pdf = await createPdfWithText(text, { pageCount: 2 });
+  const result = await analyzePdfContent(pdf);
+  assert.equal(result.passed, true, 'Reuters phrase in long content should not trigger');
+});
+
 test('analyzePdfContent detects hard paywall patterns', async () => {
   // Hard paywall should trigger regardless of text length.
   // Put the paywall text at the START so it fits within drawText limits.
   const text = 'Subscribe to continue reading this article with a WSJ subscription. ' + filler(6000);
   const pdf = await createPdfWithText(text, { pageCount: 2 });
+  const result = await analyzePdfContent(pdf);
+  assert.equal(result.passed, false);
+  assert.ok(result.reason?.includes('Paywall'));
+});
+
+test('analyzePdfContent detects "Subscribe to <site> to continue reading" (The Verge)', async () => {
+  // Single-page preview with substantial nav/sidebar text plus Verge's paywall phrase.
+  const text = 'Subscribe to The Verge to continue reading. ' + filler(2000);
+  const pdf = await createPdfWithText(text);
   const result = await analyzePdfContent(pdf);
   assert.equal(result.passed, false);
   assert.ok(result.reason?.includes('Paywall'));
