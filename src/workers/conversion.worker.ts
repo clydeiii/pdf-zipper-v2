@@ -436,13 +436,8 @@ function createConversionWorker(): Worker<ConversionJobData, ConversionJobResult
 }
 
 /**
- * Start the worker and register signal handlers
- *
- * Call this from the main entry point to:
- * 1. Initialize browser before processing jobs
- * 2. Check Ollama health (fail-fast if unavailable)
- * 3. Register SIGTERM/SIGINT handlers for graceful shutdown
- * 4. Log that the worker is ready for jobs
+ * Start the worker. Signal handling lives in src/index.ts, which calls
+ * stopWorker() during graceful shutdown.
  */
 export async function startWorker(): Promise<void> {
   if (conversionWorker) {

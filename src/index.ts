@@ -69,6 +69,11 @@ async function closeHttpServer(): Promise<void> {
       if (error) reject(error);
       else resolve();
     });
+    // server.close() alone waits for every socket — including idle keep-alives
+    // held open by cloudflared — so without this the shutdown hangs until
+    // docker SIGKILLs. closeIdleConnections drops idle sockets immediately
+    // while still letting in-flight requests finish.
+    server.closeIdleConnections();
   });
 }
 
