@@ -95,7 +95,7 @@ async function transcribeForVideo(audioPath: string): Promise<{ text: string; vt
 
   // Pick the active ASR host once; both /asr calls (text + VTT) share it so
   // they hit the same backend on the same audio.
-  const host = await resolveWhisperHost();
+  const { host, audioFieldName } = await resolveWhisperHost();
 
   // Request text transcript
   const textUrl = new URL('/asr', host);
@@ -104,6 +104,7 @@ async function transcribeForVideo(audioPath: string): Promise<{ text: string; vt
   const textForm = await createMultipartFileBody({
     filePath: audioPath,
     filename,
+    fieldName: audioFieldName,
   });
 
   const textResp = await fetch(textUrl.toString(), {
@@ -126,6 +127,7 @@ async function transcribeForVideo(audioPath: string): Promise<{ text: string; vt
   const vttForm = await createMultipartFileBody({
     filePath: audioPath,
     filename,
+    fieldName: audioFieldName,
   });
 
   const vttResp = await fetch(vttUrl.toString(), {

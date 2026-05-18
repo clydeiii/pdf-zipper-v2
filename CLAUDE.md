@@ -98,8 +98,8 @@ Runs in Docker, on nginx-proxy-manager's `proxy-network` behind Cloudflare Acces
 **External services (not in docker-compose):**
 - Ollama at `mac.mini:11434` — `gemma4:e4b` for vision/enrichment, `gemma4:latest` for transcript formatting
 - Parakeet (primary) at `mac.mini:9003` — MLX, `mlx-community/parakeet-tdt-0.6b-v3`, launchd `com.pdfzipper.parakeet-server`
-- Parakeet (fallback) at `10.0.0.81:9003` — ONNX, `nemo-parakeet-tdt-0.6b-v3`, CPU ~20x realtime, `systemctl --user status parakeet-server` on ubuntu-m1pro. Same API shape (`/`, `/health`, `/asr?output=txt|vtt`, `/v1/audio/transcriptions`).
-- `src/utils/whisper-host.ts` does a `/health` pre-flight on every transcribe job and routes to the fallback when primary is down. Logs a `whisper_failover` event. Set `WHISPER_HOST_FALLBACK` (already wired in docker-compose) to enable.
+- Parakeet (fallback) at `10.0.0.81:9003` — ONNX, `nemo-parakeet-tdt-0.6b-v3`, CPU ~20x realtime, `systemctl --user status parakeet-server` on ubuntu-m1pro. Same endpoints (`/`, `/health`, `/asr?output=txt|vtt`, `/v1/audio/transcriptions`) but **NOT byte-identical**: the fallback's `/asr` requires the audio multipart field named `file`, while the primary expects `audio_file` (a mismatch 422s the request).
+- `src/utils/whisper-host.ts` does a `/health` pre-flight on every transcribe job and routes to the fallback when primary is down. Logs a `whisper_failover` event. Set `WHISPER_HOST_FALLBACK` (already wired in docker-compose) to enable. `resolveWhisperHost()` returns `{ host, audioFieldName }` — always pass `audioFieldName` to `createMultipartFileBody` so failover hits the right field name.
 
 **Dockerfile gotcha:** CMD must use shell form to wrap in xvfb-run:
 ```

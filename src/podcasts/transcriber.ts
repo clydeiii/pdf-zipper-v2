@@ -224,7 +224,7 @@ export async function transcribeAudio(
   audioPath: string,
   options?: TranscribeOptions
 ): Promise<WhisperResponse> {
-  const host = await resolveWhisperHost();
+  const { host, audioFieldName } = await resolveWhisperHost();
   const url = new URL('/asr', host);
   url.searchParams.set('output', 'txt');  // Plain text transcript (not srt/vtt/json)
 
@@ -256,6 +256,7 @@ export async function transcribeAudio(
   const multipart = await createMultipartFileBody({
     filePath: audioPath,
     filename,
+    fieldName: audioFieldName,
     fields,
   });
 
