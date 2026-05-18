@@ -22,7 +22,7 @@ import { enrichVideoFile } from '../metadata/video-tags.js';
 import { enrichDocumentMetadata } from '../metadata/enrichment.js';
 import { generateTranscriptPdf } from '../metadata/transcript-pdf.js';
 import { formatTranscriptWithLLM } from '../podcasts/transcript-formatter.js';
-import { resolveWhisperHost } from '../utils/whisper-host.js';
+import { transcribeWithRetry } from '../utils/whisper-host.js';
 import { createMultipartFileBody } from '../utils/multipart.js';
 import { sendDiscordNotification } from '../notifications/discord.js';
 import { fetchYouTubeMetadata } from './youtube-metadata.js';
@@ -93,57 +93,58 @@ async function extractAudio(mp4Path: string): Promise<string> {
 async function transcribeForVideo(audioPath: string): Promise<{ text: string; vtt: string }> {
   const filename = path.basename(audioPath);
 
-  // Pick the active ASR host once; both /asr calls (text + VTT) share it so
-  // they hit the same backend on the same audio.
-  const { host, audioFieldName } = await resolveWhisperHost();
+  // Retry across transient ASR failures; each attempt re-resolves the host so
+  // a recovered primary is picked up. Within one attempt both /asr calls
+  // (text + VTT) share the resolved host — same backend, same audio.
+  return transcribeWithRetry(`video:${filename}`, async ({ host, audioFieldName }) => {
+    // Request text transcript
+    const textUrl = new URL('/asr', host);
+    textUrl.searchParams.set('output', 'txt');
 
-  // Request text transcript
-  const textUrl = new URL('/asr', host);
-  textUrl.searchParams.set('output', 'txt');
+    const textForm = await createMultipartFileBody({
+      filePath: audioPath,
+      filename,
+      fieldName: audioFieldName,
+    });
 
-  const textForm = await createMultipartFileBody({
-    filePath: audioPath,
-    filename,
-    fieldName: audioFieldName,
+    const textResp = await fetch(textUrl.toString(), {
+      method: 'POST',
+      headers: {
+        'Content-Type': textForm.contentType,
+        'Content-Length': String(textForm.contentLength),
+      },
+      body: textForm.body,
+      duplex: 'half',
+      dispatcher: whisperAgent,
+    } as unknown as RequestInit & { duplex: 'half'; dispatcher: Agent });
+    if (!textResp.ok) throw new Error(`Whisper text error: ${textResp.status}`);
+    const text = await textResp.text();
+
+    // Request VTT subtitle format
+    const vttUrl = new URL('/asr', host);
+    vttUrl.searchParams.set('output', 'vtt');
+
+    const vttForm = await createMultipartFileBody({
+      filePath: audioPath,
+      filename,
+      fieldName: audioFieldName,
+    });
+
+    const vttResp = await fetch(vttUrl.toString(), {
+      method: 'POST',
+      headers: {
+        'Content-Type': vttForm.contentType,
+        'Content-Length': String(vttForm.contentLength),
+      },
+      body: vttForm.body,
+      duplex: 'half',
+      dispatcher: whisperAgent,
+    } as unknown as RequestInit & { duplex: 'half'; dispatcher: Agent });
+    if (!vttResp.ok) throw new Error(`Whisper VTT error: ${vttResp.status}`);
+    const vtt = await vttResp.text();
+
+    return { text, vtt };
   });
-
-  const textResp = await fetch(textUrl.toString(), {
-    method: 'POST',
-    headers: {
-      'Content-Type': textForm.contentType,
-      'Content-Length': String(textForm.contentLength),
-    },
-    body: textForm.body,
-    duplex: 'half',
-    dispatcher: whisperAgent,
-  } as unknown as RequestInit & { duplex: 'half'; dispatcher: Agent });
-  if (!textResp.ok) throw new Error(`Whisper text error: ${textResp.status}`);
-  const text = await textResp.text();
-
-  // Request VTT subtitle format
-  const vttUrl = new URL('/asr', host);
-  vttUrl.searchParams.set('output', 'vtt');
-
-  const vttForm = await createMultipartFileBody({
-    filePath: audioPath,
-    filename,
-    fieldName: audioFieldName,
-  });
-
-  const vttResp = await fetch(vttUrl.toString(), {
-    method: 'POST',
-    headers: {
-      'Content-Type': vttForm.contentType,
-      'Content-Length': String(vttForm.contentLength),
-    },
-    body: vttForm.body,
-    duplex: 'half',
-    dispatcher: whisperAgent,
-  } as unknown as RequestInit & { duplex: 'half'; dispatcher: Agent });
-  if (!vttResp.ok) throw new Error(`Whisper VTT error: ${vttResp.status}`);
-  const vtt = await vttResp.text();
-
-  return { text, vtt };
 }
 
 export interface VideoEnrichmentResult {

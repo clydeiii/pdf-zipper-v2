@@ -16,7 +16,7 @@ import { unlink, mkdir } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { Agent } from 'undici';
-import { resolveWhisperHost } from '../utils/whisper-host.js';
+import { transcribeWithRetry } from '../utils/whisper-host.js';
 import { createMultipartFileBody } from '../utils/multipart.js';
 import { env } from '../config/env.js';
 import type { WhisperResponse, TranscriptionResult } from './types.js';
@@ -224,20 +224,7 @@ export async function transcribeAudio(
   audioPath: string,
   options?: TranscribeOptions
 ): Promise<WhisperResponse> {
-  const { host, audioFieldName } = await resolveWhisperHost();
-  const url = new URL('/asr', host);
-  url.searchParams.set('output', 'txt');  // Plain text transcript (not srt/vtt/json)
-
-  console.log(JSON.stringify({
-    event: 'transcription_start',
-    audioPath,
-    whisperHost: host,
-    hasInitialPrompt: !!options?.initialPrompt,
-    timestamp: new Date().toISOString(),
-  }));
-
   const startTime = Date.now();
-
   const filename = path.basename(audioPath);
 
   // Add initial_prompt if provided - helps Whisper with proper nouns and terms
@@ -253,33 +240,49 @@ export async function transcribeAudio(
     }));
   }
 
-  const multipart = await createMultipartFileBody({
-    filePath: audioPath,
-    filename,
-    fieldName: audioFieldName,
-    fields,
+  // Transcription can take 5-15+ minutes for long podcasts; the custom
+  // whisperAgent carries extended timeouts (undici default 5 min is too
+  // short). Retries across transient ASR failures, re-resolving the host
+  // each attempt. The multipart body is rebuilt per attempt — its file
+  // stream is single-use.
+  const { text: responseText, contentType } = await transcribeWithRetry(`podcast:${filename}`, async ({ host, audioFieldName }) => {
+    const url = new URL('/asr', host);
+    url.searchParams.set('output', 'txt');  // Plain text transcript (not srt/vtt/json)
+
+    console.log(JSON.stringify({
+      event: 'transcription_start',
+      audioPath,
+      whisperHost: host,
+      hasInitialPrompt: !!options?.initialPrompt,
+      timestamp: new Date().toISOString(),
+    }));
+
+    const multipart = await createMultipartFileBody({
+      filePath: audioPath,
+      filename,
+      fieldName: audioFieldName,
+      fields,
+    });
+
+    const response = await fetch(url.toString(), {
+      method: 'POST',
+      headers: {
+        'Content-Type': multipart.contentType,
+        'Content-Length': String(multipart.contentLength),
+      },
+      body: multipart.body,
+      duplex: 'half',
+      dispatcher: whisperAgent,
+    } as unknown as RequestInit & { duplex: 'half'; dispatcher: Agent });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Whisper ASR error: ${response.status} ${response.statusText} - ${errorText}`);
+    }
+
+    return { text: await response.text(), contentType: response.headers.get('content-type') };
   });
 
-  // Whisper transcription can take 5-15+ minutes for long podcasts with medium.en model
-  // Use custom agent with extended timeouts (undici default is 5 min which is too short)
-  const response = await fetch(url.toString(), {
-    method: 'POST',
-    headers: {
-      'Content-Type': multipart.contentType,
-      'Content-Length': String(multipart.contentLength),
-    },
-    body: multipart.body,
-    duplex: 'half',
-    dispatcher: whisperAgent,
-  } as unknown as RequestInit & { duplex: 'half'; dispatcher: Agent });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Whisper ASR error: ${response.status} ${response.statusText} - ${errorText}`);
-  }
-
-  // Get response as text first for debugging
-  const responseText = await response.text();
   const transcriptionTime = Date.now() - startTime;
 
   // Log raw response info for debugging
@@ -287,7 +290,7 @@ export async function transcribeAudio(
     event: 'whisper_response_received',
     responseLength: responseText.length,
     responsePreview: responseText.substring(0, 200),
-    contentType: response.headers.get('content-type'),
+    contentType,
     timestamp: new Date().toISOString(),
   }));
 
