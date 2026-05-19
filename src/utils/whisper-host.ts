@@ -16,9 +16,10 @@
 import { env } from '../config/env.js';
 
 /**
- * `/health` probe timeout. The primary MLX server is single-threaded, so
- * while it's mid-transcription it answers `/health` slowly — a tight timeout
- * here triggers needless failover. Kept generous on purpose.
+ * `/health` probe timeout. The primary MLX server runs transcription off its
+ * event loop (asyncio.to_thread) so it answers `/health` in ~1ms even
+ * mid-job — a missed probe now means a genuine outage (crash/restart/network),
+ * not a busy server. Kept generous as plain real-outage headroom; not load-bearing.
  */
 const HEALTH_TIMEOUT_MS = 8_000;
 /** Wait before the second `/health` probe (see isHealthy). */
