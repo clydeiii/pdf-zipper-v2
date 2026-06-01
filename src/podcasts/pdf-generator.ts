@@ -10,6 +10,7 @@ import { PDFDocument, StandardFonts, rgb, PDFPage, PDFFont } from 'pdf-lib';
 import { tryEmbedRemoteImage } from '../utils/pdf-image.js';
 import { setInfoDictFields } from '../utils/pdf-info-dict.js';
 import type { PodcastMetadata, WhisperResponse, TranscriptSegment } from './types.js';
+import type { EnrichedMetadata } from '../metadata/enrichment.js';
 
 /**
  * PDF layout constants
@@ -188,11 +189,17 @@ function drawText(
 }
 
 /**
- * Generate a PDF containing podcast metadata and transcript
+ * Generate a PDF containing podcast metadata and transcript.
+ *
+ * `enrichment` (AI summary/tags/language from the transcript) is optional — when
+ * present it's embedded in the Info Dict so podcast transcript PDFs carry the
+ * same Karpathy metadata as the web-to-pdf and video-transcript paths. The
+ * caller must run enrichment BEFORE this so the result can be threaded in.
  */
 export async function generateTranscriptPdf(
   metadata: PodcastMetadata,
-  transcript: WhisperResponse
+  transcript: WhisperResponse,
+  enrichment?: EnrichedMetadata
 ): Promise<Buffer> {
   const pdfDoc = await PDFDocument.create();
 
@@ -419,10 +426,41 @@ export async function generateTranscriptPdf(
   pdfDoc.setAuthor(sanitizedMetadata.podcastAuthor);
   pdfDoc.setSubject(sanitizedMetadata.episodeUrl);  // For rerun feature
   pdfDoc.setProducer(`pdf-zipper v2 podcast transcriber - ${new Date().toISOString()}`);
-  pdfDoc.setCreator('Whisper ASR + pdf-zipper');
+  // Match the {publication} via pdf-zipper v2 convention used by the web-to-pdf
+  // and video-transcript paths (ASR provenance is captured by DocType/MediaType).
+  pdfDoc.setCreator(`${sanitizedMetadata.podcastName} via pdf-zipper v2`);
 
-  // DocType=transcript marks this as derived from an MP3 (sibling file).
-  setInfoDictFields(pdfDoc, { DocType: 'transcript' });
+  // Standard fields from enrichment (parity with web-to-pdf + video transcript).
+  if (enrichment?.tags && enrichment.tags.length > 0) {
+    pdfDoc.setKeywords(enrichment.tags);
+  }
+  if (metadata.publishedAt) {
+    const pubDate = new Date(metadata.publishedAt);
+    if (!isNaN(pubDate.getTime())) pdfDoc.setCreationDate(pubDate);
+  }
+
+  // Karpathy-compliant Info Dict. Mirrors the video transcript path
+  // (transcript-pdf.ts) so the KB consumer reads identical field names on audio
+  // and video transcripts, with audio-specific fields (Podcast/PodcastFeed/
+  // Episode/DurationMs) standing in for video's Channel/UploadDate and matching
+  // the MP3's ID3 TXXX frames. Info Dict values are UTF-16 (full Unicode), so no
+  // WinAnsi sanitization is needed here — that's only for on-page StandardFont
+  // rendering. DocType=transcript marks this as derived from a sibling MP3.
+  setInfoDictFields(pdfDoc, {
+    Summary: enrichment?.summary,
+    Language: enrichment?.language,
+    Publication: metadata.podcastName,
+    PublishDate: metadata.publishedAt,
+    Tags: enrichment?.tags && enrichment.tags.length > 0 ? enrichment.tags.join(', ') : undefined,
+    Translation: enrichment?.translation ?? undefined,
+    EnrichedAt: enrichment ? new Date().toISOString() : undefined,
+    DocType: 'transcript',
+    MediaType: 'audio-transcript',
+    Podcast: metadata.podcastName,
+    PodcastFeed: metadata.feedUrl,
+    Episode: metadata.episodeTitle,
+    DurationMs: metadata.duration ? String(metadata.duration) : undefined,
+  });
 
   // Save PDF
   const pdfBytes = await pdfDoc.save();

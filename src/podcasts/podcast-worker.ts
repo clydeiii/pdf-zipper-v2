@@ -24,7 +24,7 @@ import { env } from '../config/env.js';
 import { sendDiscordNotification } from '../notifications/discord.js';
 import type { PodcastJobData, PodcastJobResult, PodcastMetadata } from './types.js';
 import { writeAudioMetadata } from '../metadata/audio-tags.js';
-import { enrichDocumentMetadata } from '../metadata/enrichment.js';
+import { enrichDocumentMetadata, type EnrichedMetadata } from '../metadata/enrichment.js';
 
 // Sanitize filename helper
 import { createRequire } from 'node:module';
@@ -218,15 +218,35 @@ export async function startPodcastWorker(): Promise<void> {
 
         await job.log(`Formatted: ${formattedText.length.toLocaleString()} characters`);
 
-        // Step 4: Generate PDF
+        // Step 4: Enrich metadata BEFORE generating the PDF, so the enrichment
+        // is embedded in BOTH the transcript PDF Info Dict and the MP3 ID3 tags
+        // — parity with the web-to-pdf and video-transcript paths. (Previously
+        // enrichment ran after the PDF was already written, so its summary/tags
+        // only ever reached the audio.)
         await job.updateProgress(85);
+        await job.log('Enriching metadata...');
+
+        let enriched: EnrichedMetadata | undefined;
+        try {
+          enriched = await enrichDocumentMetadata(
+            formattedTranscript.text.slice(0, 8000),
+            metadata.episodeUrl,
+            metadata.episodeTitle
+          );
+          await job.log(`Metadata enriched: [${enriched.tags?.join(', ')}]`);
+        } catch (error) {
+          // Non-fatal: PDF + audio still saved, just without enrichment fields.
+          console.warn('Podcast metadata enrichment failed:', error instanceof Error ? error.message : error);
+        }
+
+        // Step 5: Generate PDF (enrichment embedded in the Info Dict)
         await job.log('Generating transcript PDF...');
-
-        const pdfBuffer = await generateTranscriptPdf(metadata, formattedTranscript);
-
+        const pdfBuffer = await generateTranscriptPdf(metadata, formattedTranscript, enriched);
         await job.log(`PDF generated: ${pdfBuffer.length.toLocaleString()} bytes`);
 
-        // Step 5: Save to weekly bin (both PDF and audio)
+        // Step 6: Save to weekly bin. The transcript PDF is a sibling of the
+        // audio sharing a base name with a `.transcript.pdf` suffix — same
+        // convention as video transcripts (foo.mp4 → foo.transcript.pdf).
         await job.updateProgress(90);
         await job.log('Saving to weekly bin...');
 
@@ -237,7 +257,7 @@ export async function startPodcastWorker(): Promise<void> {
         await ensureWeeklyBinExists(binPath);
 
         const baseFilename = getPodcastBaseFilename(metadata);
-        const pdfFilename = `${baseFilename}.pdf`;
+        const pdfFilename = `${baseFilename}.transcript.pdf`;
         const audioFilename = `${baseFilename}.${metadata.audioExtension}`;
 
         const pdfPath = path.join(binPath, pdfFilename);
@@ -250,35 +270,21 @@ export async function startPodcastWorker(): Promise<void> {
         await copyFile(tempAudioPath, audioPath);
         await unlink(tempAudioPath);
 
-        // Step 6: Enrich metadata using AI + write to audio file + generate .md companion
+        // Step 7: Write ID3 tags to MP3 (full transcript in USLT lyrics frame +
+        // the enrichment summary/tags computed above). Always written so the
+        // transcript is preserved even when enrichment failed.
         await job.updateProgress(95);
-        await job.log('Enriching metadata and writing tags...');
-
-        let summary: string | undefined;
-        let tags: string[] | undefined;
+        await job.log('Writing audio tags...');
         try {
-          // Use AI to extract summary/tags from transcript
-          const enriched = await enrichDocumentMetadata(
-            formattedTranscript.text.slice(0, 8000),
-            metadata.episodeUrl,
-            metadata.episodeTitle
-          );
-          summary = enriched.summary;
-          tags = enriched.tags;
-
-          // Write ID3 tags to MP3 (includes full transcript in USLT lyrics frame)
           writeAudioMetadata(audioPath, {
             podcastMetadata: metadata,
-            summary,
-            tags,
+            summary: enriched?.summary,
+            tags: enriched?.tags,
             transcriptLength: formattedTranscript.text.length,
             transcriptText: formattedTranscript.text,
           });
-
-          await job.log(`Metadata enriched: [${tags?.join(', ')}]`);
         } catch (error) {
-          // Non-fatal: continue without enrichment
-          console.warn('Podcast metadata enrichment failed:', error instanceof Error ? error.message : error);
+          console.warn('Podcast audio tag write failed:', error instanceof Error ? error.message : error);
         }
 
         const totalTime = Date.now() - startTime;
