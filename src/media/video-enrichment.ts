@@ -60,6 +60,21 @@ const execFileAsync = promisify(execFile);
 
 const TEMP_DIR = process.env.TEMP_DIR || '/tmp/video-enrichment';
 
+/**
+ * Last-resort title when neither the feed item nor yt-dlp supplies one.
+ * De-slugifies the on-disk filename (e.g.
+ * "y-combinator-inference-diffusion-world-models-and-more-yc-paper" →
+ * "Y Combinator Inference Diffusion World Models And More Yc Paper").
+ * Far more useful to the downstream KB than a bare "Video Transcript"
+ * placeholder, which is what a re-enrich of a metadata-less MP4 used to get.
+ */
+function deriveTitleFromFilename(mp4Path: string): string {
+  const base = path.basename(mp4Path, path.extname(mp4Path)).replace(/\.transcript$/i, '');
+  const words = base.replace(/[-_]+/g, ' ').trim();
+  if (!words) return 'Video Transcript';
+  return words.replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 /** Whisper agent with extended timeouts (videos can be hours long) */
 const whisperAgent = new Agent({
   headersTimeout: 4 * 60 * 60 * 1000,
@@ -213,6 +228,27 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
 
   console.log(`Enriching video: ${mp4Path} (${Math.round(sizeMB)}MB)`);
 
+  // Persist identifying metadata to the MP4 BEFORE the long transcription step,
+  // which can fail outright (e.g. the primary ASR host going down mid-job). If
+  // it does and we never reach the step-4 metadata write, the file is left with
+  // no embedded source_url/title — and a later re-enrich (files.ts) then can't
+  // recover them: it falls back to a `file://` URL and a "Video Transcript"
+  // placeholder title (exactly the bug this guards against). Best-effort.
+  try {
+    await enrichVideoFile(mp4Path, {
+      title: item.title || ytMeta?.title || undefined,
+      custom: {
+        doc_type: 'video',
+        source_url: item.url,
+        bookmarked_at: item.bookmarkedAt || '',
+        ...(ytMeta?.channel ? { channel: ytMeta.channel } : {}),
+        ...(ytMeta?.uploadDate ? { upload_date: ytMeta.uploadDate } : {}),
+      },
+    });
+  } catch (err) {
+    console.warn('Early MP4 metadata write failed (non-fatal):', err instanceof Error ? err.message : err);
+  }
+
   let audioPath: string | undefined;
   try {
     // Step 1: Extract audio
@@ -337,7 +373,7 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
     // Step 5: Generate transcript PDF alongside the video (Karpathy-compliant metadata)
     const transcriptPdfPath = mp4Path.replace(/\.mp4$/i, '.transcript.pdf');
     const pdfBuffer = await generateTranscriptPdf({
-      title: item.title || ytMeta?.title || 'Video Transcript',
+      title: item.title || ytMeta?.title || deriveTitleFromFilename(mp4Path),
       sourceUrl: item.url,
       date: ytMeta?.uploadDate || item.bookmarkedAt,
       summary,

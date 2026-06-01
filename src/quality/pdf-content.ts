@@ -130,6 +130,21 @@ const TRUNCATED_BODY_PREFIX = 2500;
 const TRUNCATED_BODY_CEILING = 8000;
 
 /**
+ * Reading-time mismatch detection.
+ *
+ * News/magazine sites print a "X min read" badge next to the headline
+ * (Economist, Medium, Vox, Substack…). When the page is silently paywall-
+ * truncated to the lede, the badge stays but the body is far shorter than
+ * the claimed reading time implies. Real WPM is ~200-250 → ~1000-1250
+ * chars/min; using 500 chars/min as the floor leaves wide margin for
+ * legitimately punchy articles. Skipped for "1 min read" since 1-min
+ * blurbs can genuinely be short.
+ */
+const READ_TIME_PATTERN = /(\d+)\s*[-\s]?min(?:ute)?s?\s+read\b/i;
+const MIN_READ_TIME_MINUTES = 2;
+const CHARS_PER_READING_MINUTE = 500;
+
+/**
  * Firewall/WAF patterns - if any of these appear, the page was blocked by a firewall
  * Common on sites using Cloudflare, Akamai, AWS WAF, etc.
  */
@@ -370,6 +385,26 @@ export async function analyzePdfContent(
             ...baseResult,
             passed: false,
             reason: `Truncated body: site-template marker "${match[0]}" appears at char ${match.index} (before normal article-body length). Likely stealth paywall.`,
+          };
+        }
+      }
+    }
+
+    // Check 0.95: Reading-time mismatch — body far shorter than the page's
+    // own "X min read" badge promises. Catches paywall fades that show the
+    // lede + nothing else (Economist, Medium, etc.) without any explicit
+    // "subscribe" text. Single-page small PDFs slip past the size/ratio
+    // checks below, so this is often the only signal.
+    if (!options.lenient) {
+      const readMatch = READ_TIME_PATTERN.exec(normalizedText);
+      if (readMatch) {
+        const minutes = parseInt(readMatch[1], 10);
+        const expectedMinChars = minutes * CHARS_PER_READING_MINUTE;
+        if (minutes >= MIN_READ_TIME_MINUTES && charCount < expectedMinChars) {
+          return {
+            ...baseResult,
+            passed: false,
+            reason: `Reading-time mismatch: page advertises "${readMatch[0]}" but body has only ${charCount} chars (expected ≥${expectedMinChars}). Likely paywall fade.`,
           };
         }
       }

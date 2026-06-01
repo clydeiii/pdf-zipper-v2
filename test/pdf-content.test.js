@@ -136,6 +136,31 @@ test('analyzePdfContent ignores error page patterns in long content', async () =
   assert.equal(result.passed, true, '404 mention in long content should not trigger');
 });
 
+test('analyzePdfContent detects reading-time mismatch (Economist-style fade)', async () => {
+  // Lede + "X min read" badge but no body — silent paywall truncation.
+  const text = 'Business | Bartleby How should bosses talk about AI? Employees are being asked to embrace a technology that causes fear. If you are a bank boss and in the headlines, you are either Jamie Dimon or you have screwed up. Bill Winters made waves recently when he talked about a planned 15% reduction in back-office jobs. May 28th 2026 | 4 min read advertisement';
+  const pdf = await createPdfWithText(text);
+  const result = await analyzePdfContent(pdf);
+  assert.equal(result.passed, false);
+  assert.ok(result.reason?.includes('Reading-time mismatch'), `expected mismatch reason, got: ${result.reason}`);
+});
+
+test('analyzePdfContent ignores "1 min read" short blurbs', async () => {
+  // 1-minute blurbs can legitimately be short — don't flag.
+  const text = filler(600) + ' 1 min read';
+  const pdf = await createPdfWithText(text);
+  const result = await analyzePdfContent(pdf);
+  assert.equal(result.passed, true, '1 min read should not trigger mismatch');
+});
+
+test('analyzePdfContent passes when body matches claimed reading time', async () => {
+  // 4 min × 500 chars/min = 2000 char floor; 2500 chars passes.
+  const text = filler(2500) + ' 4 min read';
+  const pdf = await createPdfWithText(text, { pageCount: 2 });
+  const result = await analyzePdfContent(pdf);
+  assert.equal(result.passed, true, `should pass with sufficient body; got: ${result.reason}`);
+});
+
 // --- Extracted text ---
 
 test('analyzePdfContent returns extracted text for downstream use', async () => {

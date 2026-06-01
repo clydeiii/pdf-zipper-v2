@@ -7,7 +7,7 @@
  * byte-compatible, Karpathy-aligned PDFs.
  */
 
-import { writeFile, mkdir } from 'node:fs/promises';
+import { writeFile, mkdir, readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { createRequire } from 'node:module';
 import { PDFDocument } from 'pdf-lib';
@@ -124,6 +124,39 @@ export function buildUrlBaseName(
  * `creatorOverride` lets manual-capture paths set Creator to e.g.
  * "pdf-zipper-v2-chrome-plugin-v3" for version tracking.
  */
+/**
+ * Apply enrichment-derived metadata to an open PDFDocument.
+ *
+ * Writes only the fields that come from `enrichDocumentMetadata` (title,
+ * author, tags, publish date, summary, language, publication, translation).
+ * Leaves capture-context fields (Subject, Producer, DocType, Markdown, etc.)
+ * and Creator untouched so this is safe to call on an already-saved PDF for
+ * in-place backfill/salvage — `setInfoDictFields` merges rather than
+ * replacing. Creator policy differs per caller, so it's handled outside.
+ */
+function applyEnrichedMetadata(
+  pdfDoc: PDFDocument,
+  metadata: EnrichedMetadata
+): void {
+  if (metadata.title) pdfDoc.setTitle(metadata.title);
+  if (metadata.author) pdfDoc.setAuthor(metadata.author);
+  if (metadata.tags.length > 0) pdfDoc.setKeywords(metadata.tags);
+  if (metadata.publishDate) {
+    const pubDate = new Date(metadata.publishDate);
+    if (!isNaN(pubDate.getTime())) pdfDoc.setCreationDate(pubDate);
+  }
+
+  setInfoDictFields(pdfDoc, {
+    Summary: metadata.summary,
+    Language: metadata.language,
+    Publication: metadata.publication,
+    PublishDate: metadata.publishDate,
+    Tags: metadata.tags.length > 0 ? metadata.tags.join(', ') : undefined,
+    Translation: metadata.translation,
+    EnrichedAt: new Date().toISOString(),
+  });
+}
+
 export async function embedPdfMetadata(
   pdfBuffer: Buffer,
   sourceUrl: string,
@@ -136,15 +169,9 @@ export async function embedPdfMetadata(
   try {
     const pdfDoc = await PDFDocument.load(pdfBuffer);
 
-    // Standard fields from enrichment
+    // Enrichment-derived fields (title/author/tags/summary/…)
     if (metadata) {
-      if (metadata.title) pdfDoc.setTitle(metadata.title);
-      if (metadata.author) pdfDoc.setAuthor(metadata.author);
-      if (metadata.tags.length > 0) pdfDoc.setKeywords(metadata.tags);
-      if (metadata.publishDate) {
-        const pubDate = new Date(metadata.publishDate);
-        if (!isNaN(pubDate.getTime())) pdfDoc.setCreationDate(pubDate);
-      }
+      applyEnrichedMetadata(pdfDoc, metadata);
     }
 
     // Creator: explicit override wins, otherwise derived from publication
@@ -160,25 +187,11 @@ export async function embedPdfMetadata(
     // Add producer info with capture timestamp
     pdfDoc.setProducer(`pdf-zipper v2 - captured ${new Date().toISOString()}`);
 
-    // Custom fields via Info Dict (for data that doesn't map to standard fields).
     // DocType is always written (defaults to URL-based article classification —
     // research/news/blog) so the downstream KB can sort/filter without parsing
     // hostnames or filenames. Caller can override (e.g. transcript PDFs).
     const docType: DocType = docTypeOverride ?? classifyArticle(originalUrl || sourceUrl);
-    if (metadata) {
-      setInfoDictFields(pdfDoc, {
-        Summary: metadata.summary,
-        Language: metadata.language,
-        Publication: metadata.publication,
-        PublishDate: metadata.publishDate,
-        Tags: metadata.tags.length > 0 ? metadata.tags.join(', ') : undefined,
-        Translation: metadata.translation,
-        DocType: docType,
-        EnrichedAt: new Date().toISOString(),
-      });
-    } else {
-      setInfoDictFields(pdfDoc, { DocType: docType });
-    }
+    setInfoDictFields(pdfDoc, { DocType: docType });
 
     // Caller-provided extra fields (e.g., Markdown from Chrome plugin's Readability extraction)
     if (extraInfoDictFields) {
@@ -190,6 +203,38 @@ export async function embedPdfMetadata(
   } catch (error) {
     console.warn(`Failed to embed PDF metadata for ${sourceUrl}:`, error);
     return pdfBuffer;
+  }
+}
+
+/**
+ * Re-embed enrichment metadata into a PDF that's already on disk, in place.
+ *
+ * Used when enrichment finishes *after* the synchronous request already saved
+ * the PDF bare (manual-capture deadline salvage, #1) and by the backfill sweep
+ * (#4). Only enrichment fields are touched; all existing Info Dict data
+ * (Subject, DocType, Markdown, Readability*, CaptureScope…) is preserved.
+ *
+ * Returns true on success, false if the file couldn't be read/parsed.
+ */
+export async function reembedEnrichmentInPlace(
+  filePath: string,
+  metadata: EnrichedMetadata
+): Promise<boolean> {
+  try {
+    const existing = await readFile(filePath);
+    const pdfDoc = await PDFDocument.load(existing);
+    applyEnrichedMetadata(pdfDoc, metadata);
+    // Preserve whatever Creator the original save wrote (e.g. the Chrome-plugin
+    // tag); only derive from publication when the field is genuinely empty.
+    if (metadata.publication && !pdfDoc.getCreator()) {
+      pdfDoc.setCreator(`${metadata.publication} via pdf-zipper v2`);
+    }
+    const out = await pdfDoc.save();
+    await writeFile(filePath, Buffer.from(out));
+    return true;
+  } catch (error) {
+    console.warn(`Failed to re-embed enrichment for ${filePath}:`, error instanceof Error ? error.message : error);
+    return false;
   }
 }
 

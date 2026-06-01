@@ -48,6 +48,11 @@ export interface ChatTextOptions {
   numCtx?: number;
   /** Max output tokens. Ollama: -1 = unlimited. llama.cpp: omitted when <= 0. */
   numPredict?: number;
+  /**
+   * Ollama only — disable internal reasoning. llama.cpp already suppresses
+   * thinking server-side via chat_template_kwargs, so this is a no-op there.
+   */
+  think?: boolean;
 }
 
 interface Provider {
@@ -59,13 +64,18 @@ interface Provider {
 const ollamaProvider: Provider = {
   name: 'ollama',
   enabled: () => true,
-  async chat({ model, messages, temperature, numCtx, numPredict }) {
+  async chat({ model, messages, temperature, numCtx, numPredict, think }) {
     const options: Record<string, number> = {};
     if (temperature !== undefined) options.temperature = temperature;
     if (numCtx !== undefined) options.num_ctx = numCtx;
     if (numPredict !== undefined) options.num_predict = numPredict;
 
-    const r = await ollamaClient.chat({ model, messages, options });
+    const r = await ollamaClient.chat({
+      model,
+      messages,
+      options,
+      ...(think !== undefined ? { think } : {}),
+    });
     return r.message.content;
   },
 };

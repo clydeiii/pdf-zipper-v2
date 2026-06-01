@@ -15,7 +15,7 @@
 import { Router, Request, Response } from 'express';
 import * as path from 'node:path';
 import { requireApiToken } from '../auth.js';
-import { savePdfToWeeklyBin } from '../../utils/save-pdf.js';
+import { savePdfToWeeklyBin, reembedEnrichmentInPlace } from '../../utils/save-pdf.js';
 import { analyzePdfContent } from '../../quality/pdf-content.js';
 import { enrichDocumentMetadata, type EnrichedMetadata } from '../../metadata/enrichment.js';
 import { conversionQueue } from '../../queues/conversion.queue.js';
@@ -179,6 +179,10 @@ manualCaptureRouter.post(
     try {
       // Extract text + run enrichment (same pipeline as the worker)
       let enrichedMetadata: EnrichedMetadata | undefined;
+      // When enrichment loses the deadline race it keeps running in the
+      // background; we hold the promise here so we can salvage the result and
+      // re-embed it into the already-saved PDF once it settles (#1).
+      let pendingEnrichment: Promise<EnrichedMetadata> | undefined;
       try {
         const contentResult = await analyzePdfContent(pdfBuffer);
         console.log(
@@ -199,10 +203,11 @@ manualCaptureRouter.post(
           ]);
           if (raced === timeoutSentinel) {
             console.warn(
-              `[manual-capture] Enrichment exceeded ${ENRICHMENT_DEADLINE_MS}ms deadline (Ollama busy?) — saving without enrichment`
+              `[manual-capture] Enrichment exceeded ${ENRICHMENT_DEADLINE_MS}ms deadline (Ollama busy?) — saving bare, will salvage if it finishes`
             );
-            // Don't await — let the in-flight call settle in the background
-            enrichPromise.catch(() => { /* already logged via deadline */ });
+            // Don't await — let the in-flight call settle in the background and
+            // re-embed once the PDF has been saved (see salvage block below).
+            pendingEnrichment = enrichPromise;
           } else {
             enrichedMetadata = raced;
             console.log(
@@ -295,6 +300,28 @@ manualCaptureRouter.post(
         extraInfoDictFields: Object.keys(extraFields).length > 0 ? extraFields : undefined,
         filenameSuffix,
       });
+
+      // Salvage (#1): if enrichment lost the deadline race, the request is
+      // already saved bare. Let the in-flight Ollama call settle in the
+      // background and re-embed its result into the file on disk. The client
+      // has its (bare) response by then; this just upgrades the saved PDF.
+      if (!enrichedMetadata && pendingEnrichment) {
+        pendingEnrichment
+          .then(async (late) => {
+            const ok = await reembedEnrichmentInPlace(filePath, late);
+            if (ok) {
+              console.log(
+                `[manual-capture] Salvaged late enrichment for ${path.basename(filePath)}: "${late.title}" [${late.language}]`
+              );
+            }
+          })
+          .catch((error) => {
+            console.warn(
+              '[manual-capture] Late enrichment salvage failed (non-fatal):',
+              error instanceof Error ? error.message : error
+            );
+          });
+      }
 
       // Compute weekId from the saved path
       const { year, week } = getISOWeekNumber(new Date());

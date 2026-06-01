@@ -5,7 +5,7 @@
  * into readable, semantically-structured paragraphs using Ollama.
  */
 
-import { ollama } from '../quality/ollama.js';
+import { chatText } from '../utils/llm-chat.js';
 import { env } from '../config/env.js';
 import type { PodcastMetadata } from './types.js';
 
@@ -228,23 +228,18 @@ ${text}`;
   }));
 
   try {
-    const response = await ollama.chat({
+    // Routed through chatText so a mac.mini/Ollama outage fails over to the
+    // llama.cpp box instead of silently dropping the proper-noun spelling pass.
+    const response = await chatText({
       model: env.TRANSCRIPT_FORMAT_MODEL,
-      messages: [
-        {
-          role: 'user',
-          content: prompt,
-        },
-      ],
+      messages: [{ role: 'user', content: prompt }],
       think: false,       // Disable internal reasoning (saves ~3000 tokens per call)
-      options: {
-        temperature: 0.2, // Low temperature — this is proofreading, not creative
-        num_predict: -1,  // No limit on output tokens
-        num_ctx: 16384,   // 16K — prompt is much shorter now (just proper-noun fix)
-      },
+      temperature: 0.2,   // Low temperature — this is proofreading, not creative
+      numPredict: -1,     // No limit on output tokens
+      numCtx: 16384,      // 16K — prompt is much shorter now (just proper-noun fix)
     });
 
-    return response.message.content.trim();
+    return response.trim();
   } catch (error) {
     console.error(JSON.stringify({
       event: 'transcript_format_error',
