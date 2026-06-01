@@ -11,9 +11,15 @@ import { env } from '../config/env.js';
  * Lines starting with # are comments.
  */
 
-// Track cookies state for hot-reloading
+// Track cookies state for hot-reloading.
+// Cache key is (path, mtimeMs, size): mtime alone is insufficient because two
+// writes within one filesystem mtime tick (common in tests, possible with
+// atomic-rename swaps in prod) leave mtime unchanged while the contents differ,
+// serving stale cookies. Size disambiguates those same-mtime overwrites.
 let cachedCookies: Cookie[] | null = null;
 let lastMtimeMs: number = 0;
+let lastSize: number = -1;
+let lastPath: string = '';
 
 /**
  * Parse a Netscape cookies.txt file into Playwright Cookie objects
@@ -71,9 +77,10 @@ export function loadCookies(): Cookie[] {
   try {
     const stat = statSync(cookiesPath);
     const mtimeMs = stat.mtimeMs;
+    const size = stat.size;
 
-    // Return cached cookies if file hasn't changed
-    if (cachedCookies && mtimeMs === lastMtimeMs) {
+    // Return cached cookies if the file hasn't changed (path + mtime + size)
+    if (cachedCookies && cookiesPath === lastPath && mtimeMs === lastMtimeMs && size === lastSize) {
       return cachedCookies;
     }
 
@@ -81,6 +88,8 @@ export function loadCookies(): Cookie[] {
     const cookies = parseCookiesTxt(cookiesPath);
     cachedCookies = cookies;
     lastMtimeMs = mtimeMs;
+    lastSize = size;
+    lastPath = cookiesPath;
 
     if (cookies.length > 0) {
       console.log(`Loaded ${cookies.length} cookies from ${cookiesPath}`);
