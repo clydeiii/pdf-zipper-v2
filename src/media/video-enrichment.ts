@@ -26,6 +26,7 @@ import { transcribeWithRetry } from '../utils/whisper-host.js';
 import { createMultipartFileBody } from '../utils/multipart.js';
 import { sendDiscordNotification } from '../notifications/discord.js';
 import { fetchYouTubeMetadata } from './youtube-metadata.js';
+import { isTwitterUrl } from '../utils/save-pdf.js';
 import { env } from '../config/env.js';
 import type { MediaItem } from './types.js';
 
@@ -307,7 +308,26 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
       console.warn('Video AI enrichment failed:', err instanceof Error ? err.message : err);
     }
 
-    // Step 4: Embed VTT subtitles + metadata into MP4 (ytMeta resolved up-front)
+    // Resolve the canonical creator + publisher once, reused for the MP4 tags
+    // and the transcript PDF so both carry consistent values.
+    //   creator     = who made it (channel, else the enriched author)
+    //   publisher   = where it was distributed (the channel/show/account) —
+    //                 NEVER the subject. The LLM's enrichedPublication is derived
+    //                 from transcript *content*, so it latches onto the topic
+    //                 ("NVIDIA" for a CNET keynote recap); prefer the structural
+    //                 channel. For X (no yt-dlp channel) the publisher is the
+    //                 posting account (≈ the enriched author), not the platform
+    //                 "X" the LLM returns. enrichedPublication is the last resort
+    //                 (e.g. re-enriched org talks: publisher "Y Combinator").
+    const creator = ytMeta?.channel || enrichedAuthor;
+    const publisher =
+      ytMeta?.channel ||
+      (isTwitterUrl(item.url) ? enrichedAuthor : undefined) ||
+      enrichedPublication;
+
+    // Step 4: Embed VTT subtitles + metadata into MP4 (ytMeta resolved up-front).
+    // artist/album are STANDARD MP4 tags that survive the muxer (unlike the
+    // `custom` keys, which MP4 silently drops), so creator/publisher persist.
     const commentParts: string[] = [];
     if (summary) commentParts.push(summary);
     if (tags && tags.length > 0) commentParts.push(`Tags: ${tags.join(', ')}`);
@@ -316,6 +336,8 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
 
     result.metadataWritten = await enrichVideoFile(mp4Path, {
       title: item.title || undefined,
+      artist: creator,
+      album: publisher,
       comment: commentParts.join('\n'),
       custom: {
         doc_type: 'video',
@@ -378,8 +400,8 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
       date: ytMeta?.uploadDate || item.bookmarkedAt,
       summary,
       tags,
-      author: ytMeta?.channel || enrichedAuthor,
-      publication: enrichedPublication || ytMeta?.channel,
+      author: creator,
+      publication: publisher,
       language: enrichedLanguage,
       channel: ytMeta?.channel,
       channelUrl: ytMeta?.channelUrl,
