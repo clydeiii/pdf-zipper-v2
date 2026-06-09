@@ -33,7 +33,12 @@ export async function writeVideoMetadata(filePath: string, meta: VideoMetadataOp
   const tmpPath = filePath + '.meta.tmp.mp4';
 
   try {
-    const args = ['-i', filePath, '-c', 'copy'];
+    // use_metadata_tags makes the muxer keep arbitrary keys (source_url,
+    // doc_type, ...) instead of silently dropping everything that isn't a
+    // standard iTunes atom; standard tags (title/artist/album/comment) still
+    // read back fine. Without it the comment-packing fallback is the only
+    // place custom metadata survives.
+    const args = ['-i', filePath, '-c', 'copy', '-movflags', 'use_metadata_tags'];
 
     // Standard metadata fields
     if (meta.title) args.push('-metadata', `title=${meta.title}`);
@@ -128,6 +133,9 @@ export async function enrichVideoFile(
     }
 
     args.push('-c', 'copy');  // Copy video/audio
+    // Keep arbitrary metadata keys (source_url, doc_type, ...) — see
+    // writeVideoMetadata above.
+    args.push('-movflags', 'use_metadata_tags');
 
     // Subtitle encoding (if VTT provided)
     if (vttContent) {

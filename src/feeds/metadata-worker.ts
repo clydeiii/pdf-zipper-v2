@@ -84,7 +84,12 @@ function createMetadataWorker(): Worker<MetadataJobData> {
     // Merge: web metadata preferred, feed metadata as fallback
     // Include media fields if present
     const enrichedItem: BookmarkItem = {
-      url: canonicalUrl,
+      // url must stay the ORIGINAL feed URL (the type's documented contract):
+      // it flows into file metadata (PDF Subject, MP4 source_url, transcript
+      // PDF sourceUrl) where the KB consumer and Rerun need the real URL
+      // (www. intact). canonicalUrl below is the dedup key — media queue
+      // jobIds already use it explicitly.
+      url,
       canonicalUrl,
       guid: feedMetadata.guid,
       source,

@@ -20,6 +20,7 @@ These are non-obvious rules that aren't derivable from a quick code read. Respec
 - **Original URL** (`originalUrl`): preserved for archive.is (archive.is treats `www.` and non-`www` as different)
 - Use `originalUrl` for HTTP fetch + external links; use canonical only for dedup keys
 - **Never** pass canonical URLs through conversion — sites like `uncoveralpha.com` require `www.`
+- `BookmarkItem.url` / `MediaItem.url` is the ORIGINAL feed URL (it flows into file metadata: PDF Subject, MP4 source_url); `canonicalUrl` is a separate field used only for dedup jobIds. Don't set `url: canonicalUrl` when building items — that strips `www.` from every embedded source URL downstream.
 
 ### URL Routing (by type, before queuing)
 - **Apple Podcasts** (`podcasts.apple.com`) → `podcastQueue` (iTunes API metadata + audio download + Parakeet transcription)
@@ -37,7 +38,7 @@ Two-layer quality check, both must pass:
 2. **PDF content analysis** (`src/quality/pdf-content.ts`): extracts text, checks char counts, char/KB ratio, error-page patterns, paywall patterns.
 
 Tunable bypasses in pdf-content.ts — don't re-introduce false positives that were explicitly worked around:
-- `SUFFICIENT_CHARS_BYPASS_RATIO = 3000` — skip ratio check on image-heavy articles
+- `SUFFICIENT_CHARS_BYPASS_RATIO = 5000` — skip ratio check on image-heavy articles
 - `MIN_CHARS_PER_PAGE_BYPASS = 400` — skip ratio check on short announcement pages
 - Error-page regex only runs when content < 2000 chars (real 404s don't have long bodies)
 - Pass-through PDFs (arxiv, direct .pdf) skip quality checks but **do** run metadata enrichment
@@ -52,7 +53,7 @@ Every output file is self-describing with embedded metadata — a downstream Cla
 |---|---|
 | PDF | Info Dict custom fields: Title, Author, Summary, Tags, Language, Translation, Publication, PublishDate, Creator. Use helpers in `src/utils/pdf-info-dict.ts` — don't re-cast `(pdfDoc as any).getInfoDict()` |
 | MP3 | ID3 standard tags + TXXX custom frames (SUMMARY, TAGS, SOURCE_URL, AUDIO_URL, PODCAST_FEED, DURATION_MS, PUBLISHED_AT) via `node-id3` |
-| MP4 | ffmpeg metadata fields + embedded VTT subtitles + `.transcript.txt` sidecar |
+| MP4 | ffmpeg metadata fields (written with `-movflags use_metadata_tags` so custom keys like `source_url`/`doc_type` survive the muxer; `comment` also packs Summary/Tags/Transcript/Source lines as a reader fallback) + embedded VTT subtitles + `.transcript.pdf` sidecar |
 
 All three PDF paths must run `analyzePdfContent` → `enrichDocumentMetadata` → embed in Info Dict:
 1. Playwright conversion (`conversion.worker.ts`)
