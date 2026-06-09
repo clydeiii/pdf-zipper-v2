@@ -91,13 +91,14 @@ services:
       - MEDIA_DOWNLOAD_TIMEOUT_MS=300000
       - MAX_PODCAST_AUDIO_MB=750
       - PODCAST_DOWNLOAD_TIMEOUT_MS=600000
-      - MAX_VIDEO_TRANSCRIBE_MB=500
+      - MAX_VIDEO_TRANSCRIBE_MINUTES=360
       - HOME=/home/clyde
 
     ports:
       - "3002:3002"
     volumes:
       - ./data:/data
+      - ./public:/app/public
       # Claude CLI for AI self-healing fix system
       - /home/clyde/.local/share/claude:/home/clyde/.local/share/claude:ro
       - /home/clyde/.local/bin:/home/clyde/.local/bin:ro

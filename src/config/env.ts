@@ -82,8 +82,8 @@ interface EnvConfig {
   MEDIA_DOWNLOAD_TIMEOUT_MS: number;
   /** Maximum podcast audio download size in bytes (default: 750MB) */
   MAX_PODCAST_AUDIO_BYTES: number;
-  /** Maximum video size to transcribe in MB (default: 500) */
-  MAX_VIDEO_TRANSCRIBE_MB: number;
+  /** Maximum video DURATION to transcribe in minutes (default: 360 = 6h). Gates ASR cost by audio length, not mp4 size. */
+  MAX_VIDEO_TRANSCRIBE_MINUTES: number;
   /** Optional llama.cpp OpenAI-compatible server for round-robin/failover on text-only LLM calls */
   LLAMACPP_HOST?: string;
   /** Bearer token for the llama.cpp server */
@@ -193,7 +193,7 @@ export const env: EnvConfig = {
   PODCAST_DOWNLOAD_TIMEOUT_MS: parseIntegerEnv('PODCAST_DOWNLOAD_TIMEOUT_MS', 600000, { min: 1000 }),
   MEDIA_DOWNLOAD_TIMEOUT_MS: parseIntegerEnv('MEDIA_DOWNLOAD_TIMEOUT_MS', 300000, { min: 1000 }),
   MAX_PODCAST_AUDIO_BYTES: parseIntegerEnv('MAX_PODCAST_AUDIO_MB', 750, { min: 1 }) * 1024 * 1024,
-  MAX_VIDEO_TRANSCRIBE_MB: parseIntegerEnv('MAX_VIDEO_TRANSCRIBE_MB', 500, { min: 1 }),
+  MAX_VIDEO_TRANSCRIBE_MINUTES: parseIntegerEnv('MAX_VIDEO_TRANSCRIBE_MINUTES', 360, { min: 1 }),
   // Optional llama.cpp failover/round-robin endpoint for text-only LLM calls
   LLAMACPP_HOST: process.env.LLAMACPP_HOST,
   LLAMACPP_API_KEY: process.env.LLAMACPP_API_KEY,

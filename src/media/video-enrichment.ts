@@ -62,6 +62,25 @@ const execFileAsync = promisify(execFile);
 const TEMP_DIR = process.env.TEMP_DIR || '/tmp/video-enrichment';
 
 /**
+ * Probe a media file's duration in minutes via ffprobe. Returns null on failure
+ * so callers can fail open (transcribe) rather than silently skip.
+ */
+async function probeDurationMinutes(filePath: string): Promise<number | null> {
+  try {
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'error',
+      '-show_entries', 'format=duration',
+      '-of', 'default=nw=1:nk=1',
+      filePath,
+    ], { timeout: 30000 });
+    const seconds = parseFloat(String(stdout).trim());
+    return Number.isFinite(seconds) ? seconds / 60 : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Last-resort title when neither the feed item nor yt-dlp supplies one.
  * De-slugifies the on-disk filename (e.g.
  * "y-combinator-inference-diffusion-world-models-and-more-yc-paper" →
@@ -208,13 +227,18 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
     }
   }
 
-  // Check file size - skip transcription for very large files
+  // Skip transcription for very long videos. Gate on audio DURATION (the real
+  // driver of ASR cost), not mp4 size: a short high-bitrate clip should still
+  // get a transcript, while a multi-hour talk can be skipped. ffprobe the local
+  // file so this works for any source, not just YouTube. Unknown duration (null)
+  // fails open. sizeMB is kept for the Discord display field below.
   const { statSync } = await import('node:fs');
   const stats = statSync(mp4Path);
   const sizeMB = stats.size / (1024 * 1024);
+  const durationMin = await probeDurationMinutes(mp4Path);
 
-  if (sizeMB > env.MAX_VIDEO_TRANSCRIBE_MB) {
-    console.log(`Skipping transcription for ${mp4Path} (${Math.round(sizeMB)}MB > ${env.MAX_VIDEO_TRANSCRIBE_MB}MB limit)`);
+  if (durationMin !== null && durationMin > env.MAX_VIDEO_TRANSCRIBE_MINUTES) {
+    console.log(`Skipping transcription for ${mp4Path} (${Math.round(durationMin)}min > ${env.MAX_VIDEO_TRANSCRIBE_MINUTES}min limit)`);
     // Still write basic metadata even without transcript
     result.metadataWritten = await enrichVideoFile(mp4Path, {
       title: item.title || undefined,

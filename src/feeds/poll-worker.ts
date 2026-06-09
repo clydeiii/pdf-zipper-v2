@@ -9,10 +9,11 @@ import type { BookmarkItem, FeedCacheState } from './types.js';
 // Redis keys for feed cache state
 const FEED_CACHE_PREFIX = 'feed:cache:';
 // Retry counter for video URLs waiting on Karakeep yt-dlp. After MAX_VIDEO_RETRIES
-// polls (12h cadence → ~2 days) we give up and mark the GUID seen so permanently
+// polls (real 5-min cadence → ~2h at default 24; outlasts Karakeep's 1h video
+// timeout so large/slow videos are not dropped early) we give up and mark the GUID seen
 // unsupported videos don't re-log on every cycle forever.
 const VIDEO_RETRY_PREFIX = 'feed:video-retries:';
-const MAX_VIDEO_RETRIES = 4;
+const MAX_VIDEO_RETRIES = Number(process.env.FEED_VIDEO_MAX_RETRIES) || 24;
 
 /** Check if URL is a video-only platform (YouTube, Vimeo) that needs a media enclosure */
 function isVideoOnlyUrl(url: string): boolean {
