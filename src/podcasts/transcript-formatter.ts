@@ -18,6 +18,20 @@ interface FormattingContext {
 }
 
 /**
+ * Normalize transcript whitespace: CRLF/CR → LF, and collapse single newlines
+ * inside paragraphs to spaces. Parakeet emits only blank-line paragraph breaks,
+ * so any lone \n (typically LLM reflow artifacts) is noise that downstream PDF
+ * renderers would turn into a hard mid-paragraph line break.
+ */
+function normalizeTranscriptWhitespace(text: string): string {
+  return text
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/([^\n])\n(?!\n)/g, '$1 ');
+}
+
+/**
  * Strip SRT subtitle formatting to get plain text
  * Handles both standard SRT (sequence + timestamps + text) and partial formats
  */
@@ -99,7 +113,7 @@ export async function formatTranscriptWithLLM(
   context?: FormattingContext
 ): Promise<string> {
   // Strip SRT formatting if present (old Whisper instances may return SRT)
-  let cleanedTranscript = stripSrtFormatting(rawTranscript);
+  let cleanedTranscript = stripSrtFormatting(normalizeTranscriptWhitespace(rawTranscript));
 
   // Clean Parakeet paragraph-grouping artifacts
   cleanedTranscript = cleanParakeetArtifacts(cleanedTranscript);
@@ -239,7 +253,9 @@ ${text}`;
       numCtx: 16384,      // 16K — prompt is much shorter now (just proper-noun fix)
     });
 
-    return response.trim();
+    // The LLM sometimes reflows text with lone newlines despite the prompt —
+    // normalize so its artifacts never reach the PDF generators.
+    return normalizeTranscriptWhitespace(response.trim());
   } catch (error) {
     console.error(JSON.stringify({
       event: 'transcript_format_error',
@@ -269,6 +285,11 @@ async function formatLongTranscript(
   }));
 
   const chunks: string[] = [];
+  // Separator consumed at each split, restored verbatim on rejoin so chunking
+  // never invents a paragraph break that wasn't in the source (joining
+  // sentence-level splits with '\n\n' used to insert a fake paragraph break
+  // mid-paragraph every ~15k chars).
+  const separators: string[] = [];
   let remaining = text;
 
   while (remaining.length > 0) {
@@ -279,15 +300,20 @@ async function formatLongTranscript(
 
     // Find a good split point (paragraph break or sentence end)
     let splitPoint = remaining.lastIndexOf('\n\n', maxChunkSize);
+    let separator = '\n\n';
     if (splitPoint === -1 || splitPoint < maxChunkSize * 0.5) {
       splitPoint = remaining.lastIndexOf('. ', maxChunkSize);
+      separator = ' ';
+      if (splitPoint !== -1) splitPoint += 1; // keep the '.' with the chunk
     }
     if (splitPoint === -1 || splitPoint < maxChunkSize * 0.5) {
       splitPoint = maxChunkSize;
+      separator = ''; // forced mid-word split — rejoin seamlessly
     }
 
-    chunks.push(remaining.substring(0, splitPoint + 1));
-    remaining = remaining.substring(splitPoint + 1).trim();
+    chunks.push(remaining.substring(0, splitPoint));
+    separators.push(separator);
+    remaining = remaining.substring(splitPoint).replace(/^[ \n]+/, '');
   }
 
   console.log(JSON.stringify({
@@ -312,5 +338,7 @@ async function formatLongTranscript(
     formattedChunks.push(formatted);
   }
 
-  return formattedChunks.join('\n\n');
+  return formattedChunks
+    .map((chunk, i) => (i < separators.length ? chunk + separators[i] : chunk))
+    .join('');
 }

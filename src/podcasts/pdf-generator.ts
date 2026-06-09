@@ -38,6 +38,9 @@ const ARTWORK_GAP = 14;
  */
 function sanitizeForWinAnsi(text: string): string {
   return text
+    // Normalize CRLF/CR to LF \u2014 stray \r survives the Latin-1 filter below and
+    // breaks width calculation / renders as tofu in StandardFonts
+    .replace(/\r\n?/g, '\n')
     // Remove zero-width and invisible characters
     .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')  // Zero-width spaces, word joiner, BOM
     .replace(/[\u00AD]/g, '')  // Soft hyphen
@@ -90,15 +93,20 @@ function formatDate(isoDate: string): string {
  */
 function wrapText(text: string, font: PDFFont, fontSize: number, maxWidth: number): string[] {
   const lines: string[] = [];
-  const paragraphs = text.split('\n');
+  // Paragraphs are blank-line separated. Single newlines inside a paragraph are
+  // ASR/LLM artifacts, not intentional breaks — flatten them so they reflow with
+  // the rest of the paragraph instead of rendering as a hard mid-paragraph break.
+  const paragraphs = text.split(/\n\s*\n/).map(p => p.replace(/\n/g, ' '));
 
-  for (const paragraph of paragraphs) {
-    if (paragraph.trim() === '') {
+  for (const [i, paragraph] of paragraphs.entries()) {
+    if (i > 0) {
       lines.push('');
+    }
+    if (paragraph.trim() === '') {
       continue;
     }
 
-    const words = paragraph.split(' ');
+    const words = paragraph.split(/\s+/);
     let currentLine = '';
 
     for (const word of words) {
