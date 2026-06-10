@@ -75,7 +75,7 @@ Shared save pipeline is in `src/utils/save-pdf.ts` (`savePdfToWeeklyBin` + `embe
 ### Transcript Formatting — Fidelity Over Aesthetics
 The `formatTranscriptWithLLM` prompt (`src/podcasts/transcript-formatter.ts`) is deliberately strict: formatter, not editor. Do NOT weaken it. Known hazard: `gemma4:latest` will hallucinate "smart" substitutions (e.g., Whisper's "01" → "Gemini") if the prompt permits editing. Downstream Claude trusts the transcript as ground truth.
 
-Video transcripts (`src/media/video-enrichment.ts`) must also run through `formatTranscriptWithLLM` with the video title as `episodeTitle` hint — don't hand raw Whisper/Parakeet output to the PDF generator.
+Video transcripts (`src/media/video-enrichment.ts`) must also run through `formatTranscriptWithLLM` with the video title as `episodeTitle` hint — don't hand raw Whisper/Parakeet output to the PDF generator. Formatting must run BEFORE `enrichDocumentMetadata` (both video and podcast paths) — enriching from raw ASR bakes phonetic misspellings ("Jan Lakun" for Yann LeCun) into the summary/tags even when the PDF body is corrected.
 
 ### Privacy Filter
 `PRIVACY_FILTER_TERMS` (comma-separated) runs in-page JS to hide elements containing those strings. Used to scrub the user's name/handle from sidebars.

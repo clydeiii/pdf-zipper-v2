@@ -309,7 +309,49 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
       ],
     });
 
-    // Step 3: AI enrichment (summary + tags from transcript)
+    // Step 2.5: Format transcript with LLM (proper-noun correction from title).
+    // MUST run BEFORE enrichment: the summary/tags are otherwise generated from
+    // raw ASR text and bake phonetic misspellings ("Jan Lakun" for Yann LeCun,
+    // "jeppa" for JEPA) into the Info Dict even though the PDF body gets the
+    // corrected text. Same order as the podcast path (podcast-worker.ts).
+    let formattedTranscript = text;
+    const hasTitle = !!(item.title);
+    if (hasTitle) {
+      await sendDiscordNotification({
+        type: 'info',
+        title: '🧠 Gemma4: formatting video transcript',
+        description: videoTitle,
+        fields: [
+          { name: 'Chunks', value: `~${Math.ceil(text.length / 15000)}`, inline: true },
+          { name: 'Input', value: `${text.length.toLocaleString()} chars`, inline: true },
+        ],
+      });
+    }
+
+    const formatStart = Date.now();
+    try {
+      formattedTranscript = await formatTranscriptWithLLM(text, {
+        episodeTitle: item.title || undefined,
+      });
+      const formatElapsed = Math.round((Date.now() - formatStart) / 1000);
+      console.log(`Transcript formatted: ${text.length} -> ${formattedTranscript.length} chars in ${formatElapsed}s`);
+
+      if (hasTitle) {
+        await sendDiscordNotification({
+          type: 'success',
+          title: '🧠 Gemma4: done',
+          description: videoTitle,
+          fields: [
+            { name: 'Time', value: `${formatElapsed}s`, inline: true },
+            { name: 'Output', value: `${formattedTranscript.length.toLocaleString()} chars`, inline: true },
+          ],
+        });
+      }
+    } catch (err) {
+      console.warn('Transcript formatting failed, using raw text:', err instanceof Error ? err.message : err);
+    }
+
+    // Step 3: AI enrichment (summary + tags from the FORMATTED transcript)
     let summary: string | undefined;
     let tags: string[] | undefined;
     let enrichedAuthor: string | undefined;
@@ -317,7 +359,7 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
     let enrichedLanguage: string | undefined;
     try {
       const enriched = await enrichDocumentMetadata(
-        text.slice(0, 8000),
+        formattedTranscript.slice(0, 8000),
         item.url,
         item.title
       );
@@ -377,44 +419,6 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
     }, vtt);
 
     result.vttEmbedded = result.metadataWritten;
-
-    // Step 4.5: Format transcript with LLM (proper-noun correction from title)
-    let formattedTranscript = text;
-    const hasTitle = !!(item.title);
-    if (hasTitle) {
-      await sendDiscordNotification({
-        type: 'info',
-        title: '🧠 Gemma4: formatting video transcript',
-        description: videoTitle,
-        fields: [
-          { name: 'Chunks', value: `~${Math.ceil(text.length / 15000)}`, inline: true },
-          { name: 'Input', value: `${text.length.toLocaleString()} chars`, inline: true },
-        ],
-      });
-    }
-
-    const formatStart = Date.now();
-    try {
-      formattedTranscript = await formatTranscriptWithLLM(text, {
-        episodeTitle: item.title || undefined,
-      });
-      const formatElapsed = Math.round((Date.now() - formatStart) / 1000);
-      console.log(`Transcript formatted: ${text.length} -> ${formattedTranscript.length} chars in ${formatElapsed}s`);
-
-      if (hasTitle) {
-        await sendDiscordNotification({
-          type: 'success',
-          title: '🧠 Gemma4: done',
-          description: videoTitle,
-          fields: [
-            { name: 'Time', value: `${formatElapsed}s`, inline: true },
-            { name: 'Output', value: `${formattedTranscript.length.toLocaleString()} chars`, inline: true },
-          ],
-        });
-      }
-    } catch (err) {
-      console.warn('Transcript formatting failed, using raw text:', err instanceof Error ? err.message : err);
-    }
 
     // Step 5: Generate transcript PDF alongside the video (Karpathy-compliant metadata)
     const transcriptPdfPath = mp4Path.replace(/\.mp4$/i, '.transcript.pdf');
