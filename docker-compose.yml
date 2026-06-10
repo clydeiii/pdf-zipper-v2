@@ -21,6 +21,9 @@ services:
       # Ollama (on mac.mini)
       - OLLAMA_HOST=http://mac.mini:11434
       - OLLAMA_MODEL=gemma4:e4b
+      # Text-only enrichment on the faster model (4x vs e4b per ablation data);
+      # factual fields are hallucination-guarded in enrichment.ts. Vision stays on OLLAMA_MODEL.
+      - ENRICHMENT_MODEL=gemma3:4b
       # Use larger model for transcript formatting + metadata enrichment
       - TRANSCRIPT_FORMAT_MODEL=gemma4:latest
 

@@ -85,7 +85,59 @@ ${truncatedText}`;
     numCtx: 8192,
   });
 
-  return parseMetadataResponse(content, url, pageTitle);
+  return parseMetadataResponse(content, url, pageTitle, truncatedText);
+}
+
+/**
+ * Hallucination guard for FACTUAL fields (Fidelity > Aesthetics — the KB
+ * consumer trusts these as ground truth). Smaller/faster models fabricate
+ * plausible authors ("John Smith", "Elon Musk") and dates that larger models
+ * leave null. We only keep:
+ * - author: every name token (3+ chars) appears verbatim in the source text
+ * - publishDate: its 4-digit year appears in the source text or the URL
+ * Publication is exempt — the prompt explicitly asks to infer it from the
+ * URL domain, so it legitimately may not appear in the text.
+ */
+export function validateFactualFields(
+  meta: Omit<EnrichedMetadata, 'translation'>,
+  sourceText: string,
+  url: string
+): Omit<EnrichedMetadata, 'translation'> {
+  const haystack = sourceText.toLowerCase();
+
+  let author = meta.author;
+  if (author) {
+    const tokens = author.toLowerCase().split(/[\s,]+/).filter((t) => t.length >= 3);
+    const allPresent = tokens.length > 0 && tokens.every((t) => haystack.includes(t));
+    if (!allPresent) {
+      console.log(JSON.stringify({
+        event: 'enrichment_fact_rejected',
+        field: 'author',
+        value: author,
+        reason: 'not_found_in_source_text',
+        timestamp: new Date().toISOString(),
+      }));
+      author = null;
+    }
+  }
+
+  let publishDate = meta.publishDate;
+  if (publishDate) {
+    const yearMatch = /\b(19|20)\d{2}\b/.exec(publishDate);
+    const year = yearMatch ? yearMatch[0] : null;
+    if (!year || !(haystack.includes(year) || url.includes(year))) {
+      console.log(JSON.stringify({
+        event: 'enrichment_fact_rejected',
+        field: 'publishDate',
+        value: publishDate,
+        reason: 'year_not_in_source_or_url',
+        timestamp: new Date().toISOString(),
+      }));
+      publishDate = null;
+    }
+  }
+
+  return { ...meta, author, publishDate };
 }
 
 /**
@@ -94,7 +146,8 @@ ${truncatedText}`;
 function parseMetadataResponse(
   content: string,
   url: string,
-  pageTitle?: string
+  pageTitle?: string,
+  sourceText?: string
 ): Omit<EnrichedMetadata, 'translation'> {
   const fallback: Omit<EnrichedMetadata, 'translation'> = {
     title: pageTitle || extractTitleFromUrl(url),
@@ -113,7 +166,7 @@ function parseMetadataResponse(
 
     const parsed = JSON.parse(jsonMatch[0]);
 
-    return {
+    const result = {
       title: typeof parsed.title === 'string' && parsed.title ? parsed.title : fallback.title,
       author: typeof parsed.author === 'string' && parsed.author ? parsed.author : null,
       publication: typeof parsed.publication === 'string' && parsed.publication ? parsed.publication : fallback.publication,
@@ -122,6 +175,7 @@ function parseMetadataResponse(
       summary: typeof parsed.summary === 'string' ? parsed.summary : '',
       tags: Array.isArray(parsed.tags) ? parsed.tags.filter((t: unknown) => typeof t === 'string').slice(0, 10) : [],
     };
+    return sourceText ? validateFactualFields(result, sourceText, url) : result;
   } catch (error) {
     console.warn('Failed to parse metadata response:', error instanceof Error ? error.message : error);
     return fallback;
