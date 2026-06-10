@@ -332,6 +332,9 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
     try {
       formattedTranscript = await formatTranscriptWithLLM(text, {
         episodeTitle: item.title || undefined,
+        // The yt-dlp description usually spells domain terms correctly
+        // (JEPA, VJEPA2) that the title lacks and ASR garbles
+        extraHintText: ytMeta?.description?.slice(0, 3000),
       });
       const formatElapsed = Math.round((Date.now() - formatStart) / 1000);
       console.log(`Transcript formatted: ${text.length} -> ${formattedTranscript.length} chars in ${formatElapsed}s`);

@@ -15,6 +15,13 @@ import type { PodcastMetadata } from './types.js';
 interface FormattingContext {
   showNotes?: PodcastMetadata['showNotes'];
   episodeTitle?: string;
+  /**
+   * Free text from authoritative metadata (e.g. the yt-dlp video description)
+   * to mine for proper-noun spelling hints. Descriptions usually spell domain
+   * terms correctly ("JEPA", "VJEPA2") that ASR garbles and that don't appear
+   * in the title — the only other hint source for videos.
+   */
+  extraHintText?: string;
 }
 
 /**
@@ -159,44 +166,79 @@ export async function formatTranscriptWithLLM(
  * Build spelling corrections from show notes
  * Extract proper nouns that might be misheard by ASR
  */
-function buildSpellingCorrections(context?: FormattingContext): string {
+/** Cap the hint list so a link/description-heavy source can't bloat the prompt
+ * and tempt the model into overzealous replacement. Title hint not counted. */
+const MAX_SPELLING_HINTS = 20;
+
+// Common words that appear capitalized (sentence case) or in ALL CAPS in
+// descriptions/links but are not proper nouns worth hinting.
+const HINT_SKIP_WORDS = new Set([
+  'The', 'Here', 'Are', 'Is', 'Now', 'What', 'How', 'Why', 'More', 'New', 'About', 'Over',
+  'Your', 'Its', 'Data', 'Users', 'Keys', 'Even', 'Biggest', 'Changes', 'Latest', 'Model',
+  'Uses', 'Gave', 'FBI', 'Future', 'Personal', 'Assistants', 'Looks', 'Like', 'Collecting',
+  // ALL-CAPS noise commonly found in video descriptions
+  'AND', 'THE', 'FOR', 'NOT', 'YOU', 'ALL', 'NEW', 'OUT', 'GET', 'OFF', 'NOW', 'HOW', 'WHY',
+  'WITH', 'THIS', 'THAT', 'FREE', 'LIVE', 'FULL', 'PART', 'LLM', 'LLMS', 'URL', 'PDF', 'FAQ',
+]);
+
+/**
+ * Mine a free-text source (show-notes link text, video description) for
+ * brand-like tokens and acronyms worth using as spelling hints.
+ */
+function extractHintTokens(text: string): string[] {
+  const tokens: string[] = [];
+
+  // Likely brand/product names (consecutive capitals or camelCase)
+  const brandMatches = text.match(/[A-Z][a-z]+[A-Z][a-z]+|[A-Z]{2,}[a-z]+|[a-z]+[A-Z]\w*/g) || [];
+  tokens.push(...brandMatches);
+
+  // ALL-CAPS acronyms, optionally with digits (JEPA, VJEPA2, GPT4) — ASR
+  // reliably garbles these and the camelCase patterns above miss them
+  const acronymMatches = text.match(/\b[A-Z]{2,8}\d{0,2}\b/g) || [];
+  tokens.push(...acronymMatches);
+
+  // Obvious product names (single words with mixed case)
+  const productMatches = text.match(/\b(TikTok|AirTag|BitLocker|ChatGPT|Grok|Grokipedia|xAI|Clawdbot)\b/gi) || [];
+  tokens.push(...productMatches);
+
+  return tokens.filter((t) => t.length >= 3 && !HINT_SKIP_WORDS.has(t));
+}
+
+export function buildSpellingCorrections(context?: FormattingContext): string {
   if (!context) return '';
 
   const corrections: string[] = [];
-
-  // Episode title often contains the key proper noun
-  if (context.episodeTitle) {
-    corrections.push(`"${context.episodeTitle}" (episode title - use this exact spelling)`);
-  }
+  const seen = new Set<string>();
+  const addToken = (token: string) => {
+    const key = token.toLowerCase();
+    if (seen.has(key)) return;
+    if (corrections.length >= MAX_SPELLING_HINTS) return;
+    seen.add(key);
+    corrections.push(`"${token}"`);
+  };
 
   // Extract key terms from show notes links - only multi-word proper nouns or unusual spellings
   if (context.showNotes?.links && context.showNotes.links.length > 0) {
     for (const link of context.showNotes.links) {
-      // Look for brand names, product names, and unusual capitalizations
-      // Skip common words that happen to be capitalized at sentence start
-      const skipWords = new Set(['The', 'Here', 'Are', 'Is', 'Now', 'What', 'How', 'Why', 'More', 'New', 'About', 'Over', 'Your', 'Its', 'Data', 'Users', 'Keys', 'Even', 'Biggest', 'Changes', 'Latest', 'Model', 'Uses', 'Gave', 'FBI', 'Future', 'Personal', 'Assistants', 'Looks', 'Like', 'Collecting']);
-
-      // Extract likely brand/product names (consecutive capitals or camelCase)
-      const brandMatches = link.text.match(/[A-Z][a-z]+[A-Z][a-z]+|[A-Z]{2,}[a-z]+|[a-z]+[A-Z]/g) || [];
-      for (const match of brandMatches) {
-        if (!corrections.some(c => c.includes(match))) {
-          corrections.push(`"${match}"`);
-        }
-      }
-
-      // Also grab obvious product names (single words with mixed case or followed by numbers)
-      const productMatches = link.text.match(/\b(TikTok|AirTag|BitLocker|ChatGPT|Grok|Grokipedia|xAI|Clawdbot)\b/gi) || [];
-      for (const match of productMatches) {
-        if (!corrections.some(c => c.toLowerCase().includes(match.toLowerCase()))) {
-          corrections.push(`"${match}"`);
-        }
-      }
+      extractHintTokens(link.text).forEach(addToken);
     }
   }
 
-  if (corrections.length === 0) return '';
+  // Mine the description text (yt-dlp metadata for videos) the same way
+  if (context.extraHintText) {
+    extractHintTokens(context.extraHintText).forEach(addToken);
+  }
 
-  return corrections.join(', ');
+  // Episode title often contains the key proper noun — always included, on
+  // top of the capped token list
+  const titleHint = context.episodeTitle
+    ? [`"${context.episodeTitle}" (episode title - use this exact spelling)`]
+    : [];
+
+  const all = [...titleHint, ...corrections];
+  if (all.length === 0) return '';
+
+  return all.join(', ');
 }
 
 /**
