@@ -46,3 +46,11 @@ test('camelCase brand extraction still works from description', () => {
   assert.ok(out.includes('"DeepMind"'));
   assert.ok(out.includes('"LangChain"'));
 });
+
+test('strips URLs before mining hints (no YouTube ID junk)', () => {
+  const out = buildSpellingCorrections({
+    extraHintText: 'Part 2: https://www.youtube.com/watch?v=jDvpEGTIg and JEPA explained',
+  });
+  assert.ok(!out.includes('jDvpEGTIg'), `URL fragment leaked into hints: ${out}`);
+  assert.ok(out.includes('"JEPA"'));
+});

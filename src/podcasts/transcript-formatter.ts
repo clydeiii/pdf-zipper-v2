@@ -184,8 +184,12 @@ const HINT_SKIP_WORDS = new Set([
 /**
  * Mine a free-text source (show-notes link text, video description) for
  * brand-like tokens and acronyms worth using as spelling hints.
+ * URLs are stripped first — YouTube IDs and path fragments ("jDvpEGTIg")
+ * match the brand patterns and would become junk hints that tempt the
+ * formatter into bogus substitutions.
  */
-function extractHintTokens(text: string): string[] {
+export function extractHintTokens(rawText: string): string[] {
+  const text = rawText.replace(/https?:\/\/\S+/g, ' ').replace(/\S+@\S+/g, ' ');
   const tokens: string[] = [];
 
   // Likely brand/product names (consecutive capitals or camelCase)

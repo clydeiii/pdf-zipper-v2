@@ -21,7 +21,7 @@ import { createRequire } from 'node:module';
 import { enrichVideoFile } from '../metadata/video-tags.js';
 import { enrichDocumentMetadata } from '../metadata/enrichment.js';
 import { generateTranscriptPdf } from '../metadata/transcript-pdf.js';
-import { formatTranscriptWithLLM } from '../podcasts/transcript-formatter.js';
+import { formatTranscriptWithLLM, extractHintTokens } from '../podcasts/transcript-formatter.js';
 import { transcribeWithRetry } from '../utils/whisper-host.js';
 import { createMultipartFileBody } from '../utils/multipart.js';
 import { sendDiscordNotification } from '../notifications/discord.js';
@@ -78,6 +78,57 @@ async function probeDurationMinutes(filePath: string): Promise<number | null> {
   } catch {
     return null;
   }
+}
+
+function levenshtein(a: string, b: string): number {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const curr = [i];
+    for (let j = 1; j <= n; j++) {
+      curr[j] = Math.min(
+        prev[j] + 1,
+        curr[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+      );
+    }
+    prev = curr;
+  }
+  return prev[n];
+}
+
+/**
+ * Replace LLM-generated tags that are near-miss spellings of an authoritative
+ * acronym (from the title/description hints) with the correct form. The
+ * enrichment model generates tags from the formatted transcript, which can
+ * still contain a few ASR variants ("jeppa", "jepe") of a term the body mostly
+ * spells right — and the tag generator sometimes picks the variant. Exact
+ * deterministic correction only: first letter must match and edit distance is
+ * capped (1 for short tokens, 2 for 6+ chars).
+ */
+export function canonicalizeTags(tags: string[], hintTokens: string[]): string[] {
+  const acronyms = hintTokens.filter((t) => /^[A-Z]{2,8}\d{0,2}$/.test(t) && t.length >= 4);
+  if (acronyms.length === 0) return tags;
+  return tags.map((tag) => {
+    const lower = tag.toLowerCase();
+    for (const tok of acronyms) {
+      const tl = tok.toLowerCase();
+      if (lower === tl) return tag;
+      const maxDist = tl.length >= 6 ? 2 : 1;
+      if (lower[0] === tl[0] && Math.abs(lower.length - tl.length) <= maxDist && levenshtein(lower, tl) <= maxDist) {
+        console.log(JSON.stringify({
+          event: 'tag_canonicalized',
+          from: tag,
+          to: tl,
+          timestamp: new Date().toISOString(),
+        }));
+        return tl;
+      }
+    }
+    return tag;
+  });
 }
 
 /**
@@ -367,7 +418,10 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
         item.title
       );
       summary = enriched.summary;
-      tags = enriched.tags;
+      tags = canonicalizeTags(
+        enriched.tags,
+        extractHintTokens([item.title, ytMeta?.description].filter(Boolean).join(' '))
+      );
       enrichedAuthor = enriched.author || undefined;
       enrichedPublication = enriched.publication || undefined;
       enrichedLanguage = enriched.language || undefined;
