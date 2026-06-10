@@ -145,6 +145,45 @@ const MIN_READ_TIME_MINUTES = 2;
 const CHARS_PER_READING_MINUTE = 500;
 
 /**
+ * Social-media post markers (Mastodon / fediverse).
+ *
+ * A social post captured to PDF can be large (embedded screenshot/quote image)
+ * while having very little body text — that's normal, not truncation. These
+ * captures otherwise trip the "large PDF, little text" check (Check 2) and get
+ * rejected as false negatives. URL-based routing already runs Nitter tweets in
+ * lenient mode, but Mastodon/fediverse posts reach the worker as regular URLs,
+ * so we detect them by content here. Patterns are deliberately fediverse-
+ * specific and won't appear in a truncated news article's body.
+ */
+const SOCIAL_POST_PATTERNS = [
+  // Mastodon engagement bar: "boosts · quote · favorites" / "64 boosts · 1 quote · 91 favorites"
+  /\bboosts?\b[\s·•|,]+(?:\d+\s+)?(?:quotes?\b[\s·•|,]+)?(?:\d+\s+)?favou?rites?\b/i,
+  // Fediverse double-@ handle, e.g. @jwz@mastodon.social — essentially never in article copy
+  /@\w[\w.-]*@[\w-]+\.[\w.-]+/,
+];
+
+/**
+ * Returns true when the page itself declares it is legitimately short — a
+ * social post, or a page advertising a sub-2-minute read time. Used to skip
+ * the large-PDF truncation check (Check 2) for image-heavy-but-short pages
+ * (Mastodon screenshots, "1 MIN READ" announcement posts with charts). A
+ * genuinely truncated long article advertises a longer read time (caught by
+ * the reading-time mismatch check) and lacks these markers, so this stays
+ * safe against the false positives Check 2 was built to catch.
+ */
+function isLegitimatelyShortPage(text: string): boolean {
+  for (const pattern of SOCIAL_POST_PATTERNS) {
+    if (pattern.test(text)) return true;
+  }
+  const readMatch = READ_TIME_PATTERN.exec(text);
+  if (readMatch) {
+    const minutes = parseInt(readMatch[1], 10);
+    if (minutes > 0 && minutes < MIN_READ_TIME_MINUTES) return true;
+  }
+  return false;
+}
+
+/**
  * Firewall/WAF patterns - if any of these appear, the page was blocked by a firewall
  * Common on sites using Cloudflare, Akamai, AWS WAF, etc.
  */
@@ -425,8 +464,17 @@ export async function analyzePdfContent(
     }
 
     // Check 2: Large PDF with suspiciously little text
-    // This catches the "big hero image but truncated article" case
-    if (!options.lenient && pdfSize > LARGE_PDF_THRESHOLD && charCount < MIN_CHARS_FOR_LARGE_PDF) {
+    // This catches the "big hero image but truncated article" case.
+    // Exempt pages that declare themselves legitimately short — Mastodon/
+    // fediverse posts (large embedded screenshot, tiny body) and sub-2-minute
+    // "X min read" announcement posts (charts/hero images, short copy). These
+    // are complete captures, not truncations.
+    if (
+      !options.lenient &&
+      pdfSize > LARGE_PDF_THRESHOLD &&
+      charCount < MIN_CHARS_FOR_LARGE_PDF &&
+      !isLegitimatelyShortPage(normalizedText)
+    ) {
       return {
         ...baseResult,
         passed: false,
