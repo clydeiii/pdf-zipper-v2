@@ -32,6 +32,9 @@ These are non-obvious rules that aren't derivable from a quick code read. Respec
 
 Rerun endpoints must apply the same routing — both `/weeks/:weekId/rerun` and `/rerun-selected` check `isApplePodcastsUrl()` before queuing.
 
+### Manual Capture vs Karakeep Collision Protection
+Manual captures (Chrome extension → `/api/manual-capture`) must never be overwritten by a later Karakeep bookmark of the same URL. The manual-capture route therefore: (1) marks the URL seen in `BookmarkDeduplicator` (source `'manual'`) so the feed poll skips it, (2) removes matching failed AND waiting/delayed conversion jobs, (3) injects the URL into Karakeep via `createKarakeepBookmark` so the Karakeep plugin shows "already saved", (4) deletes stale same-filename copies from other ISO-week bins (re-capture freshness — the new file's mtime makes it "new" for Select New). Don't remove any of these when refactoring the route.
+
 ### Quality Pipeline
 Two-layer quality check, both must pass:
 1. **Vision score** (`src/quality/scorer.ts`): Ollama sees viewport-only screenshot (~800px). Don't flag "truncated" from viewport alone. Threshold configurable via `QUALITY_THRESHOLD`.
@@ -138,7 +141,7 @@ curl -X POST http://localhost:3002/api/jobs \
 |---|---|---|
 | `QUALITY_THRESHOLD` | 50 | Vision score 0-100 |
 | `OLLAMA_MODEL` | `gemma4:e4b` | Vision scoring (and enrichment default) |
-| `ENRICHMENT_MODEL` | = `OLLAMA_MODEL` | Text-only metadata enrichment/translation. The conversion pipeline is Ollama-bound (~30-40s/job is enrichment); ablation data shows qwen3:8b ~3x faster at this task |
+| `ENRICHMENT_MODEL` | = `OLLAMA_MODEL` | Text-only metadata enrichment/translation. Set to `gemma3:4b` in compose (~4x faster than e4b per ablation data). Small models hallucinate authors/dates, so `validateFactualFields` in enrichment.ts nulls author/publishDate unless verbatim-present in source text/URL — don't remove that guard |
 | `TRANSCRIPT_FORMAT_MODEL` | `gemma4:latest` | Text formatting |
 | `WHISPER_HOST` | `http://mac.mini:9003` | Parakeet/Whisper ASR (primary) |
 | `WHISPER_HOST_FALLBACK` | `http://10.0.0.81:9003` | Used when primary fails `/health` pre-flight |

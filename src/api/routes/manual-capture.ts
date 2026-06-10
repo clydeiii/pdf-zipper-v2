@@ -21,8 +21,47 @@ import { enrichDocumentMetadata, type EnrichedMetadata } from '../../metadata/en
 import { conversionQueue } from '../../queues/conversion.queue.js';
 import { normalizeBookmarkUrl } from '../../urls/normalizer.js';
 import { getISOWeekNumber } from '../../media/organization.js';
+import { BookmarkDeduplicator } from '../../urls/deduplicator.js';
+import { queueConnection } from '../../config/redis.js';
+import { createKarakeepBookmark } from '../../feeds/karakeep-api.js';
+import { readdir, unlink } from 'node:fs/promises';
 
 export const manualCaptureRouter = Router();
+
+const deduplicator = new BookmarkDeduplicator(queueConnection);
+
+/**
+ * Delete copies of the same PDF (same basename) left in OTHER week bins by an
+ * earlier capture/conversion of this URL. A re-capture in a new ISO week would
+ * otherwise leave the stale version exportable from the old week forever.
+ * The just-written file itself is never touched.
+ */
+async function deleteStaleCopiesInOtherWeeks(filePath: string): Promise<number> {
+  const basename = path.basename(filePath);
+  const pdfDir = path.dirname(filePath);                 // .../media/<week>/pdfs
+  const mediaRoot = path.dirname(path.dirname(pdfDir));  // .../media
+  let deleted = 0;
+  let weekDirs: string[] = [];
+  try {
+    weekDirs = (await readdir(mediaRoot, { withFileTypes: true }))
+      .filter((d) => d.isDirectory() && /^\d{4}-W\d{2}$/.test(d.name))
+      .map((d) => d.name);
+  } catch {
+    return 0;
+  }
+  for (const week of weekDirs) {
+    const candidate = path.join(mediaRoot, week, 'pdfs', basename);
+    if (path.resolve(candidate) === path.resolve(filePath)) continue;
+    try {
+      await unlink(candidate);
+      deleted++;
+      console.log(`[manual-capture] Deleted stale copy from earlier week: ${candidate}`);
+    } catch {
+      // ENOENT for most weeks — expected
+    }
+  }
+  return deleted;
+}
 
 /** Plugin creator tag embedded in PDF Creator field — includes extension-reported version. */
 const CREATOR_PREFIX = 'pdf-zipper-v2-chrome-plugin';
@@ -104,7 +143,16 @@ async function removeMatchingFailedJobs(capturedUrl: string): Promise<number> {
   let removed = 0;
 
   // Scan failed jobs (reasonable cap — BullMQ keeps ~2000 failed by default)
-  const failedJobs = await conversionQueue.getFailed(0, 2000);
+  // plus jobs still WAITING/DELAYED: if the URL was bookmarked in Karakeep
+  // moments before this manual capture, a queued conversion would later run
+  // and overwrite this capture with the (likely paywalled) automated version.
+  // Active jobs are left alone — removing a mid-flight job is unsafe; that
+  // narrow race loses to the conversion worker's overwrite.
+  const failedJobs = [
+    ...(await conversionQueue.getFailed(0, 2000)),
+    ...(await conversionQueue.getWaiting(0, 500)),
+    ...(await conversionQueue.getDelayed(0, 500)),
+  ];
   for (const job of failedJobs) {
     const jobUrl = job.data?.url;
     const jobOriginalUrl = job.data?.originalUrl;
@@ -335,6 +383,37 @@ manualCaptureRouter.post(
         removedFailedJobs += await removeMatchingFailedJobs(urlForSave);
       }
 
+      // Mark the URL seen in the feed deduplicator so a LATER Karakeep
+      // bookmark of this URL is skipped by the poll instead of re-converting
+      // and silently overwriting this manual capture.
+      try {
+        await deduplicator.markUrlSeen(urlForSave, 'manual');
+        if (body.url !== urlForSave) {
+          await deduplicator.markUrlSeen(body.url, 'manual');
+        }
+      } catch (error) {
+        console.warn('[manual-capture] markUrlSeen failed (non-fatal):', error instanceof Error ? error.message : error);
+      }
+
+      // Re-capture across ISO weeks: remove the stale copy an earlier capture
+      // left in an old week bin, so only the fresh version remains exportable.
+      const removedStaleCopies = await deleteStaleCopiesInOtherWeeks(filePath);
+
+      // Inject the URL into Karakeep (fire-and-forget): a later bookmark via
+      // the Karakeep Chrome plugin then dedupes there ("already saved").
+      // markUrlSeen above already protects against the resulting feed item.
+      createKarakeepBookmark(urlForSave, body.title)
+        .then((result) => {
+          if (result) {
+            console.log(
+              `[manual-capture] Karakeep bookmark ${result.alreadyExists ? 'already existed' : 'created'} for ${urlForSave}`
+            );
+          }
+        })
+        .catch((error) => {
+          console.warn('[manual-capture] Karakeep bookmark create failed (non-fatal):', error instanceof Error ? error.message : error);
+        });
+
       const filename = path.basename(filePath);
       const durationMs = Date.now() - startMs;
 
@@ -343,7 +422,8 @@ manualCaptureRouter.post(
         `[manual-capture] Saved ${filename} in ${durationMs}ms` +
           ` (enrichment: ${enrichedMetadata ? 'yes' : 'no'},` +
           ` markdown: ${mdLen > 0 ? `${mdLen} chars` : 'no'},` +
-          ` removed ${removedFailedJobs} failed job(s))`
+          ` removed ${removedFailedJobs} failed/queued job(s),` +
+          ` ${removedStaleCopies} stale copy(ies))`
       );
 
       res.json({
@@ -352,6 +432,7 @@ manualCaptureRouter.post(
         filePath,
         weekId,
         removedFailedJobs,
+        removedStaleCopies,
         durationMs,
         markdownChars: mdLen,
         metadata: enrichedMetadata

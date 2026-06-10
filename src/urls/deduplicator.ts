@@ -41,8 +41,11 @@ export class BookmarkDeduplicator {
   /**
    * Mark URL as seen and store which source provided it
    * Returns the canonical URL for reference
+   * 'manual' = manual capture via the Chrome extension — marks the URL so a
+   * later Karakeep bookmark of the same URL is skipped by the feed poll
+   * instead of re-converting and overwriting the manual capture.
    */
-  async markUrlSeen(url: string, source: FeedSource): Promise<string> {
+  async markUrlSeen(url: string, source: FeedSource | 'manual'): Promise<string> {
     const canonical = normalizeBookmarkUrl(url);
     await this.redis.sadd(SEEN_URLS_KEY, canonical);
     // Store source in hash for debugging/analytics
