@@ -66,3 +66,21 @@ test('null author and date pass through untouched', () => {
   assert.equal(out.author, null);
   assert.equal(out.publishDate, null);
 });
+
+test('rejects near-miss author whose token is a substring of a real word', () => {
+  const meta = {
+    title: 'T', author: 'Daniela Amode', publication: null, publishDate: null,
+    language: 'en', summary: '', tags: [],
+  };
+  const out = validateFactualFields(meta, 'Anthropic CEO Daniela Amodei spoke today.', 'https://example.com');
+  assert.equal(out.author, null);
+});
+
+test('keeps exactly-spelled author at word boundaries', () => {
+  const meta = {
+    title: 'T', author: 'Daniela Amodei', publication: null, publishDate: null,
+    language: 'en', summary: '', tags: [],
+  };
+  const out = validateFactualFields(meta, 'By Daniela Amodei.', 'https://example.com');
+  assert.equal(out.author, 'Daniela Amodei');
+});

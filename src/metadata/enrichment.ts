@@ -108,7 +108,11 @@ export function validateFactualFields(
   let author = meta.author;
   if (author) {
     const tokens = author.toLowerCase().split(/[\s,]+/).filter((t) => t.length >= 3);
-    const allPresent = tokens.length > 0 && tokens.every((t) => haystack.includes(t));
+    // Word-boundary match, not substring: "Amode" must not pass because
+    // "amodei" appears in the text (observed gemma3:4b near-miss).
+    const wordPresent = (t: string) =>
+      new RegExp(`\\b${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(haystack);
+    const allPresent = tokens.length > 0 && tokens.every(wordPresent);
     if (!allPresent) {
       console.log(JSON.stringify({
         event: 'enrichment_fact_rejected',
