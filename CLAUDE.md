@@ -137,7 +137,8 @@ curl -X POST http://localhost:3002/api/jobs \
 | Var | Default | Purpose |
 |---|---|---|
 | `QUALITY_THRESHOLD` | 50 | Vision score 0-100 |
-| `OLLAMA_MODEL` | `gemma4:e4b` | Vision + enrichment |
+| `OLLAMA_MODEL` | `gemma4:e4b` | Vision scoring (and enrichment default) |
+| `ENRICHMENT_MODEL` | = `OLLAMA_MODEL` | Text-only metadata enrichment/translation. The conversion pipeline is Ollama-bound (~30-40s/job is enrichment); ablation data shows qwen3:8b ~3x faster at this task |
 | `TRANSCRIPT_FORMAT_MODEL` | `gemma4:latest` | Text formatting |
 | `WHISPER_HOST` | `http://mac.mini:9003` | Parakeet/Whisper ASR (primary) |
 | `WHISPER_HOST_FALLBACK` | `http://10.0.0.81:9003` | Used when primary fails `/health` pre-flight |

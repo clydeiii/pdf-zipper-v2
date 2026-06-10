@@ -79,7 +79,7 @@ Article text:
 ${truncatedText}`;
 
   const content = await chatText({
-    model: env.OLLAMA_MODEL,
+    model: env.ENRICHMENT_MODEL,
     messages: [{ role: 'user', content: prompt }],
     temperature: 0.2,
     numCtx: 8192,
@@ -143,7 +143,7 @@ async function translateToEnglish(text: string, sourceLanguage: string): Promise
 ${text}`;
 
   const content = await chatText({
-    model: env.OLLAMA_MODEL,
+    model: env.ENRICHMENT_MODEL,
     messages: [{ role: 'user', content: prompt }],
     temperature: 0.3,
     numPredict: -1,

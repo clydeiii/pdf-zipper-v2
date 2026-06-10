@@ -12,6 +12,11 @@ interface EnvConfig {
   OLLAMA_HOST: string;
   /** Ollama model for vision analysis (default: gemma4:e4b) */
   OLLAMA_MODEL: string;
+  /** Ollama model for text-only metadata enrichment + translation (default: same as OLLAMA_MODEL).
+   * The conversion pipeline is Ollama-throughput-bound; ablation data
+   * (data/ablation/outputs) shows e.g. qwen3:8b runs this task ~3x faster than
+   * gemma4:e4b. Vision scoring stays on OLLAMA_MODEL regardless. */
+  ENRICHMENT_MODEL: string;
   /** Quality score threshold 0-100 (default: 50) */
   QUALITY_THRESHOLD: number;
   /** Conversion worker concurrency (default: 1) */
@@ -154,6 +159,7 @@ export const env: EnvConfig = {
   // Ollama settings (optional with sensible defaults)
   OLLAMA_HOST: process.env.OLLAMA_HOST || 'http://127.0.0.1:11434',
   OLLAMA_MODEL: process.env.OLLAMA_MODEL || 'gemma4:e4b',
+  ENRICHMENT_MODEL: process.env.ENRICHMENT_MODEL || process.env.OLLAMA_MODEL || 'gemma4:e4b',
   QUALITY_THRESHOLD: parseIntegerEnv('QUALITY_THRESHOLD', 50, { min: 0, max: 100 }),
   CONCURRENCY: parseIntegerEnv('CONCURRENCY', 1, { min: 1, max: 8 }),
   NAV_TIMEOUT_MS: parseIntegerEnv('NAV_TIMEOUT_MS', 60000, { min: 1000 }),
