@@ -78,14 +78,55 @@ ${pageTitle ? `Page title: ${pageTitle}` : ''}
 Article text:
 ${truncatedText}`;
 
-  const content = await chatText({
-    model: env.ENRICHMENT_MODEL,
-    messages: [{ role: 'user', content: prompt }],
-    temperature: 0.2,
-    numCtx: 8192,
-  });
+  // Generate, then guard against a hallucinated person-name in the summary
+  // (e.g. a model inventing "Dan O'Toole" for a Mike Krieger interview). Such
+  // a name appears nowhere in the source/title, so it's detectable — regenerate
+  // once (LLM nondeterminism usually clears a one-off). Cheap because it only
+  // retries when an unsupported name is actually found.
+  const supportHaystack = `${truncatedText}\n${pageTitle || ''}\n${url}`.toLowerCase();
+  let result: Omit<EnrichedMetadata, 'translation'> | undefined;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const content = await chatText({
+      model: env.ENRICHMENT_MODEL,
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.2,
+      numCtx: 8192,
+    });
+    result = parseMetadataResponse(content, url, pageTitle, truncatedText);
+    const ghost = unsupportedSummaryName(result.summary, supportHaystack);
+    if (!ghost) break;
+    console.log(JSON.stringify({
+      event: 'enrichment_summary_ghost_name',
+      name: ghost,
+      attempt,
+      action: attempt < 2 ? 'regenerate' : 'kept_after_retry',
+      timestamp: new Date().toISOString(),
+    }));
+  }
+  return result!;
+}
 
-  return parseMetadataResponse(content, url, pageTitle, truncatedText);
+/**
+ * Detect a person-like proper name in the summary that appears nowhere in the
+ * source text / title / URL — a hallucinated entity. Returns the offending name
+ * or null. Token-level word-boundary match (like validateFactualFields), so
+ * "Mike Krieger" passes when both tokens are in source but "Dan O'Toole" fails
+ * because "O'Toole" is absent. Names are 2-3 capitalized words (allowing O',
+ * Mc, hyphens, middle initials) — orgs/products with all tokens present pass.
+ */
+export function unsupportedSummaryName(summary: string, haystack: string): string | null {
+  if (!summary) return null;
+  // Each name word: capital + letters/apostrophes/hyphens/dot (covers
+  // "O'Toole", "McAfee", "Smith-Jones", middle initial "Q."). 2-3 words total.
+  const NAME_RE = /\b[A-Z][A-Za-z'’.-]+(?:\s+[A-Z][A-Za-z'’.-]+){1,2}\b/g;
+  const candidates = summary.match(NAME_RE) || [];
+  for (const name of candidates) {
+    const tokens = name.toLowerCase().split(/[\s.]+/).filter((t) => t.length >= 3);
+    const present = (t: string) =>
+      new RegExp(`\\b${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(haystack);
+    if (tokens.length > 0 && !tokens.every(present)) return name;
+  }
+  return null;
 }
 
 /**

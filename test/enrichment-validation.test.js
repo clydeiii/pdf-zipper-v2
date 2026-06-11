@@ -84,3 +84,20 @@ test('keeps exactly-spelled author at word boundaries', () => {
   const out = validateFactualFields(meta, 'By Daniela Amodei.', 'https://example.com');
   assert.equal(out.author, 'Daniela Amodei');
 });
+
+import { unsupportedSummaryName } from '../dist/metadata/enrichment.js';
+
+test('summary ghost-name: flags a person not in source/title', () => {
+  const hay = "mike krieger talks with dan shipper about claude fable 5".toLowerCase();
+  assert.equal(unsupportedSummaryName("This interview with Dan O'Toole explores Claude Fable 5.", hay), "Dan O'Toole");
+});
+
+test('summary ghost-name: passes when all name tokens are in source', () => {
+  const hay = "mike krieger talks with dan shipper about claude fable 5".toLowerCase();
+  assert.equal(unsupportedSummaryName("Mike Krieger discusses Claude Fable with Dan Shipper.", hay), null);
+});
+
+test('summary ghost-name: passes when name token in title only', () => {
+  const hay = "...transcript body without the name...\nhow anthropic uses claude fable 5 with mike krieger\nhttps://youtube.com/watch?v=x".toLowerCase();
+  assert.equal(unsupportedSummaryName("Mike Krieger explains the workflow shift.", hay), null);
+});
