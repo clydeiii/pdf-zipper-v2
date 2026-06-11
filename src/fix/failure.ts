@@ -13,6 +13,7 @@ export type FailureClass =
   | 'captcha'
   | 'auth_required'
   | 'archive_unavailable'
+  | 'rate_limited'
   | 'timeout'
   | 'navigation_error'
   | 'quality_false_negative_suspected'
@@ -44,6 +45,13 @@ export function classifyFailureMessage(message?: string): FailureClass {
     text.includes('unlock this article')
   ) {
     return 'paywall';
+  }
+
+  // Transient upstream throttling (e.g. our Nitter instance rate-limiting X
+  // captures). Not a code bug — don't send it to the self-healing fixer; it
+  // clears on its own and BullMQ retries handle the rest.
+  if (text.startsWith('rate_limited:') || text.includes('rate limited') || text.includes('rate-limited')) {
+    return 'rate_limited';
   }
 
   if (text.includes('captcha') || text.includes('verify you are human') || text.includes('cloudflare')) {

@@ -942,8 +942,25 @@ export async function convertUrlToPDF(
     // Nitter doesn't support X Articles and just shows a link like "x.com/i/article/..."
     if (isTwitterUrl(url) && targetUrl !== url) {
       const pageContent = await page.content();
-      if (pageContent.includes('x.com/i/article/') || pageContent.includes('twitter.com/i/article/')) {
-        console.log(`Nitter returned article stub for ${url}, retrying with direct X.com`);
+      const isArticleStub = pageContent.includes('x.com/i/article/') || pageContent.includes('twitter.com/i/article/');
+      // Nitter error panel ("Tweet not found", rate-limited instance): the page
+      // renders only the error box, so body text is tiny. These are usually
+      // transient guest-token failures, not proof the tweet is gone — retry
+      // direct so a live tweet isn't rejected as a blank capture.
+      let isNitterErrorPage = false;
+      if (!isArticleStub) {
+        try {
+          const bodyText: string = await page.evaluate(() => document.body?.innerText || '');
+          isNitterErrorPage = bodyText.trim().length < 600 &&
+            /tweet not found|user not found|instance has been rate limited|page not found/i.test(bodyText);
+        } catch {
+          // body inspection failed — fall through to normal capture
+        }
+      }
+      if (isArticleStub || isNitterErrorPage) {
+        console.log(isArticleStub
+          ? `Nitter returned article stub for ${url}, retrying with direct X.com`
+          : `Nitter returned error page for ${url}, retrying with direct X.com`);
         // Close current page and retry with original URL
         await page.close();
         const directPage = await context.newPage();
@@ -953,6 +970,26 @@ export async function convertUrlToPDF(
         });
         // Wait longer for X.com JS rendering
         await directPage.waitForTimeout(3000);
+
+        // Validate the X.com fallback actually returned the tweet. When Nitter
+        // is rate-limited, X.com frequently also blocks us (login wall / "try
+        // again") — capturing that would save a junk PDF in place of the tweet.
+        // If the fallback is also an error/near-blank page, FAIL with a transient
+        // rate_limited reason so the job retries/reprocesses instead of saving it.
+        const directText = await directPage
+          .evaluate(() => document.body?.innerText || '')
+          .catch(() => '');
+        const NITTER_OR_BLOCK_RE = /instance has been rate limited|tweet not found|user not found|use another instance|something went wrong|try again|rate limit|log in to|sign in to x|see the latest/i;
+        if (directText.trim().length < 280 || NITTER_OR_BLOCK_RE.test(directText.slice(0, 600))) {
+          await directPage.close().catch(() => {});
+          console.warn(`Nitter error + X.com fallback failed for ${url} (${directText.trim().length} chars) — rate_limited`);
+          return {
+            success: false,
+            url,
+            error: 'Nitter instance rate-limited and the X.com fallback did not return the tweet',
+            reason: 'rate_limited',
+          };
+        }
         // Apply privacy filtering for direct X.com capture too
         await applyPrivacyFilter(directPage);
         // Continue with directPage for PDF generation
@@ -1007,7 +1044,10 @@ export async function convertUrlToPDF(
           screenshotBuffer: Buffer.from(screenshotBuffer),
           url,
           size: pdfBuffer.length,
-          isXArticle: true,  // Mark as X Article (captured directly, not via Nitter)
+          // Stub = real X Article (strict checks, "article" filename). An
+          // error-page retry is still a tweet: keep isXArticle false so it
+          // stays a "post" and gets the lenient tweet content checks.
+          isXArticle: isArticleStub,
           expandedUrl: expandedUrl !== url ? expandedUrl : undefined,
         };
       }

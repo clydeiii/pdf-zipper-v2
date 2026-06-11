@@ -60,3 +60,9 @@ test('archive_unavailable classifies and does NOT auto-trigger fix', () => {
 test('paywall still skips auto-fix (so archive candidates do not burn cycles)', () => {
   assert.equal(shouldAutoTriggerFix('paywall').allowed, false);
 });
+
+test('rate_limited classifies as transient and does NOT auto-trigger fix', () => {
+  assert.equal(classifyFailureMessage('rate_limited: Nitter instance rate-limited'), 'rate_limited');
+  assert.equal(classifyFailureMessage('Instance has been rate limited.'), 'rate_limited');
+  assert.equal(shouldAutoTriggerFix('rate_limited').allowed, false);
+});

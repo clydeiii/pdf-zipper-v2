@@ -40,7 +40,7 @@ export interface PDFFailureResult {
   success: false;
   url: string;
   error: string; // human-readable error message
-  reason: 'timeout' | 'navigation_error' | 'bot_detected' | 'unknown';
+  reason: 'timeout' | 'navigation_error' | 'bot_detected' | 'rate_limited' | 'unknown';
 }
 
 /**

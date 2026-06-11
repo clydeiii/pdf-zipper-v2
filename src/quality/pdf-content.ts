@@ -154,9 +154,40 @@ const TRUNCATED_BODY_CEILING = 8000;
  * legitimately punchy articles. Skipped for "1 min read" since 1-min
  * blurbs can genuinely be short.
  */
-const READ_TIME_PATTERN = /(\d+)\s*[-\s]?min(?:ute)?s?\s+read\b/i;
+const READ_TIME_PATTERNS = [
+  /(\d+)\s*[-\s]?min(?:ute)?s?\s+read\b/i,
+  // "Reading time 5 min" badge form (claude.com/blog and similar CMSes)
+  /\breading\s+time:?\s*(\d+)\s*min(?:ute)?s?\b/i,
+];
 const MIN_READ_TIME_MINUTES = 2;
 const CHARS_PER_READING_MINUTE = 500;
+
+/** Parse the page's own reading-time badge, in any supported format. */
+function extractAdvertisedReadTime(text: string): { minutes: number; badge: string } | null {
+  for (const pattern of READ_TIME_PATTERNS) {
+    const match = pattern.exec(text);
+    if (match) {
+      const minutes = parseInt(match[1], 10);
+      if (minutes > 0) return { minutes, badge: match[0] };
+    }
+  }
+  return null;
+}
+
+/**
+ * Article-conclusion markers — footer furniture (tag list, image credits)
+ * that sites render only AFTER the article body. When one of these appears
+ * BEFORE an end-of-article marker, the body ended naturally: short-form
+ * posts (TechCrunch "In Brief") reach their footer well before
+ * TRUNCATED_BODY_PREFIX. A stealth-paywall truncation cuts mid-flow and
+ * drops straight into related-content boilerplate without its own footer.
+ */
+const ARTICLE_CONCLUSION_MARKERS = [
+  /\bimage\s+credits?:/i,
+  /\btopics?:\s/i,
+  /\bfiled\s+under:?\b/i,
+  /\btags?:\s/i,
+];
 
 /**
  * Social-media post markers (Mastodon / fediverse).
@@ -196,11 +227,8 @@ function isLegitimatelyShortPage(text: string): boolean {
   for (const pattern of SOCIAL_POST_PATTERNS) {
     if (pattern.test(text)) return true;
   }
-  const readMatch = READ_TIME_PATTERN.exec(text);
-  if (readMatch) {
-    const minutes = parseInt(readMatch[1], 10);
-    if (minutes > 0 && minutes < MIN_READ_TIME_MINUTES) return true;
-  }
+  const readTime = extractAdvertisedReadTime(text);
+  if (readTime && readTime.minutes < MIN_READ_TIME_MINUTES) return true;
   return false;
 }
 
@@ -384,12 +412,15 @@ export async function analyzePdfContent(
       }
 
       // Stripped page: footer chrome rendered without article body.
+      // Wording matters: classifyFailureMessage keys on "bot detection" to
+      // class this as bot_detected, which makes it an archive.today fallback
+      // candidate (Reuters skeletons are usually rescuable from archive).
       for (const pattern of STRIPPED_PAGE_PATTERNS) {
         if (pattern.test(normalizedText)) {
           return {
             ...baseResult,
             passed: false,
-            reason: `Stripped page: only nav/footer rendered (${charCount} chars). Article body missing — likely silently bot-throttled.`,
+            reason: `Stripped page: only nav/footer rendered (${charCount} chars). Article body missing — likely silent bot detection.`,
           };
         }
       }
@@ -438,18 +469,47 @@ export async function analyzePdfContent(
     // body got cut off. Skipped above the ceiling so legit medium-length
     // articles aren't flagged.
     if (!options.lenient && charCount < TRUNCATED_BODY_CEILING) {
+      // A page whose own reading-time badge is consistent with the body we
+      // extracted is complete — an early related-content header is layout
+      // noise (claude.com/blog puts "Related posts" mid-template on full
+      // articles), not truncation. A genuinely truncated page fails this
+      // consistency test and falls through (and is also caught by the
+      // reading-time mismatch check below).
+      const advertisedRead = extractAdvertisedReadTime(normalizedText);
+      const bodyMatchesReadTime =
+        advertisedRead !== null &&
+        charCount >= advertisedRead.minutes * CHARS_PER_READING_MINUTE;
+
       // Search past the floor so a header/sidebar occurrence (e.g. an author
       // bio extracted right after the headline) neither triggers the check
       // nor masks a genuine boilerplate marker further down.
       const bodyAfterFloor = normalizedText.slice(TRUNCATED_BODY_FLOOR);
-      for (const pattern of END_OF_ARTICLE_MARKERS) {
+
+      // Earliest article-footer marker: boilerplate appearing AFTER the
+      // footer means the body concluded naturally (complete short-form post),
+      // so only markers that precede any footer count as truncation.
+      let conclusionIdx = Infinity;
+      for (const pattern of ARTICLE_CONCLUSION_MARKERS) {
         const match = pattern.exec(bodyAfterFloor);
-        if (match && match.index + TRUNCATED_BODY_FLOOR < TRUNCATED_BODY_PREFIX) {
-          return {
-            ...baseResult,
-            passed: false,
-            reason: `Truncated body: site-template marker "${match[0]}" appears at char ${match.index + TRUNCATED_BODY_FLOOR} (before normal article-body length). Likely stealth paywall.`,
-          };
+        if (match && match.index < conclusionIdx) conclusionIdx = match.index;
+      }
+
+      if (!bodyMatchesReadTime) {
+        for (const pattern of END_OF_ARTICLE_MARKERS) {
+          const match = pattern.exec(bodyAfterFloor);
+          if (
+            match &&
+            match.index + TRUNCATED_BODY_FLOOR < TRUNCATED_BODY_PREFIX &&
+            match.index < conclusionIdx
+          ) {
+            // "Paywall detected" wording is load-bearing: classifyFailureMessage
+            // keys on it to class this as paywall → archive.today fallback.
+            return {
+              ...baseResult,
+              passed: false,
+              reason: `Truncated body: site-template marker "${match[0]}" appears at char ${match.index + TRUNCATED_BODY_FLOOR} (before normal article-body length). Stealth paywall detected.`,
+            };
+          }
         }
       }
     }
@@ -460,15 +520,14 @@ export async function analyzePdfContent(
     // "subscribe" text. Single-page small PDFs slip past the size/ratio
     // checks below, so this is often the only signal.
     if (!options.lenient) {
-      const readMatch = READ_TIME_PATTERN.exec(normalizedText);
-      if (readMatch) {
-        const minutes = parseInt(readMatch[1], 10);
-        const expectedMinChars = minutes * CHARS_PER_READING_MINUTE;
-        if (minutes >= MIN_READ_TIME_MINUTES && charCount < expectedMinChars) {
+      const readTime = extractAdvertisedReadTime(normalizedText);
+      if (readTime) {
+        const expectedMinChars = readTime.minutes * CHARS_PER_READING_MINUTE;
+        if (readTime.minutes >= MIN_READ_TIME_MINUTES && charCount < expectedMinChars) {
           return {
             ...baseResult,
             passed: false,
-            reason: `Reading-time mismatch: page advertises "${readMatch[0]}" but body has only ${charCount} chars (expected ≥${expectedMinChars}). Likely paywall fade.`,
+            reason: `Reading-time mismatch: page advertises "${readTime.badge}" but body has only ${charCount} chars (expected ≥${expectedMinChars}). Likely paywall fade.`,
           };
         }
       }
