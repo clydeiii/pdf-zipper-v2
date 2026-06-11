@@ -126,6 +126,15 @@ const END_OF_ARTICLE_MARKERS = [
 
 /** Char index before which an end-of-article marker is suspicious (= truncation) */
 const TRUNCATED_BODY_PREFIX = 2500;
+/**
+ * Char index below which a marker is NOT treated as truncation. Sites like
+ * apollo.com put an "About the Author" bio in a sidebar that extracts right
+ * after the headline (char ~130) even on a complete article. A stealth
+ * paywall still renders headline + lede before dropping into boilerplate,
+ * so a genuine end-of-truncated-body marker lands past the lede, not in the
+ * first few hundred chars of header/sidebar text.
+ */
+const TRUNCATED_BODY_FLOOR = 300;
 /** Total char count above which we trust the document is a real full article */
 const TRUNCATED_BODY_CEILING = 8000;
 
@@ -160,6 +169,13 @@ const SOCIAL_POST_PATTERNS = [
   /\bboosts?\b[\s·•|,]+(?:\d+\s+)?(?:quotes?\b[\s·•|,]+)?(?:\d+\s+)?favou?rites?\b/i,
   // Fediverse double-@ handle, e.g. @jwz@mastodon.social — essentially never in article copy
   /@\w[\w.-]*@[\w-]+\.[\w.-]+/,
+  // Direct x.com status capture: reply box + sidebar chrome. Tweets normally
+  // route through Nitter in lenient mode, but the Nitter article-stub fallback
+  // re-captures from x.com in strict mode — an image/screenshot-heavy tweet
+  // then trips the size/density checks despite being a complete capture.
+  // These phrases are X page chrome and don't appear in article copy.
+  /\bpost\s+your\s+reply\b/i,
+  /\brelevant\s+people\b/i,
 ];
 
 /**
@@ -417,13 +433,17 @@ export async function analyzePdfContent(
     // body got cut off. Skipped above the ceiling so legit medium-length
     // articles aren't flagged.
     if (!options.lenient && charCount < TRUNCATED_BODY_CEILING) {
+      // Search past the floor so a header/sidebar occurrence (e.g. an author
+      // bio extracted right after the headline) neither triggers the check
+      // nor masks a genuine boilerplate marker further down.
+      const bodyAfterFloor = normalizedText.slice(TRUNCATED_BODY_FLOOR);
       for (const pattern of END_OF_ARTICLE_MARKERS) {
-        const match = pattern.exec(normalizedText);
-        if (match && match.index < TRUNCATED_BODY_PREFIX) {
+        const match = pattern.exec(bodyAfterFloor);
+        if (match && match.index + TRUNCATED_BODY_FLOOR < TRUNCATED_BODY_PREFIX) {
           return {
             ...baseResult,
             passed: false,
-            reason: `Truncated body: site-template marker "${match[0]}" appears at char ${match.index} (before normal article-body length). Likely stealth paywall.`,
+            reason: `Truncated body: site-template marker "${match[0]}" appears at char ${match.index + TRUNCATED_BODY_FLOOR} (before normal article-body length). Likely stealth paywall.`,
           };
         }
       }
@@ -469,11 +489,12 @@ export async function analyzePdfContent(
     // fediverse posts (large embedded screenshot, tiny body) and sub-2-minute
     // "X min read" announcement posts (charts/hero images, short copy). These
     // are complete captures, not truncations.
+    const legitimatelyShort = isLegitimatelyShortPage(normalizedText);
     if (
       !options.lenient &&
       pdfSize > LARGE_PDF_THRESHOLD &&
       charCount < MIN_CHARS_FOR_LARGE_PDF &&
-      !isLegitimatelyShortPage(normalizedText)
+      !legitimatelyShort
     ) {
       return {
         ...baseResult,
@@ -487,11 +508,13 @@ export async function analyzePdfContent(
     // BUT: if there's substantial text, it's not truncated regardless of ratio
     // (image-heavy articles with many screenshots will have low ratio but real content)
     // ALSO: short announcement pages with images may have reasonable chars-per-page
+    // ALSO: social posts (X/Mastodon) embed screenshots/memes — low density is
+    // normal for a complete capture, same exemption as Check 2
     const charsPerPage = pageCount > 0 ? charCount / pageCount : 0;
     const hasSufficientChars = charCount >= SUFFICIENT_CHARS_BYPASS_RATIO;
     const hasSufficientCharsPerPage = charsPerPage >= MIN_CHARS_PER_PAGE_BYPASS;
 
-    if (!options.lenient && pageCount > 1 && charsPerKb < MIN_CHARS_PER_KB && !hasSufficientChars && !hasSufficientCharsPerPage) {
+    if (!options.lenient && pageCount > 1 && charsPerKb < MIN_CHARS_PER_KB && !hasSufficientChars && !hasSufficientCharsPerPage && !legitimatelyShort) {
       return {
         ...baseResult,
         passed: false,

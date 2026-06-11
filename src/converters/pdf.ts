@@ -489,9 +489,13 @@ export async function convertUrlToPDF(
   // Use 1280px viewport for rendering (sites may not render properly at narrow widths)
   // The PDF will scale content to fit A4
   const browser = await initBrowser();
+  // UA version must track the running Chromium: Sec-CH-UA client hints are
+  // emitted from the real browser version, so a hardcoded stale major (e.g.
+  // Chrome/120 on a 145 binary) is a contradiction bot walls key on.
+  const browserVersion = /^\d+[\d.]*$/.test(browser.version()) ? browser.version() : '145.0.0.0';
   const context = await browser.newContext({
     viewport: { width: 1280, height: 800 },
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    userAgent: `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${browserVersion} Safari/537.36`
   });
 
   // Load cookies for authentication (paywalls, subscriptions)
@@ -587,6 +591,61 @@ export async function convertUrlToPDF(
 
     // Extra wait for heavy JS sites
     await page.waitForTimeout(2000);
+
+    // Transient near-blank renders: some failures are one-shot, not permanent —
+    // e.g. an HTTP 425 "too early" body (theverge.com gift links over TLS 1.3
+    // 0-RTT) or a bot interstitial that clears on the next request. If the DOM
+    // has almost no text after all waits, reload once before capturing.
+    try {
+      const renderedTextLen = await page.evaluate(
+        () => document.body?.innerText.trim().length ?? 0
+      );
+      if (renderedTextLen < 200) {
+        console.log(`Near-blank render (${renderedTextLen} chars) for ${url}, reloading once...`);
+        try {
+          await page.reload({ timeout, waitUntil: 'networkidle' });
+        } catch {
+          await page.reload({ timeout, waitUntil: 'domcontentloaded' });
+        }
+        await page.waitForTimeout(waitAfterLoad + 2000);
+      }
+    } catch {
+      // Reload attempt failed — capture whatever the original render produced
+    }
+
+    // HuggingFace Spaces embed the app in a cross-origin iframe (*.hf.space)
+    // that renders via websocket/XHR after load — networkidle fires while the
+    // app is still a near-empty shell, producing a PDF with only the page
+    // chrome. Poll the embedded frames until one accumulates real text.
+    if (/huggingface\.co\/spaces\//i.test(targetUrl)) {
+      const SPACE_TEXT_THRESHOLD = 500;
+      const SPACE_WAIT_CAP_MS = 25000;
+      const spaceDeadline = Date.now() + SPACE_WAIT_CAP_MS;
+      let spaceRendered = false;
+      while (!spaceRendered && Date.now() < spaceDeadline) {
+        for (const frame of page.frames()) {
+          if (frame === page.mainFrame()) continue;
+          try {
+            const textLen = await frame.evaluate(
+              () => document.body?.innerText.trim().length ?? 0
+            );
+            if (textLen >= SPACE_TEXT_THRESHOLD) {
+              spaceRendered = true;
+              break;
+            }
+          } catch {
+            // Frame detached or still navigating — keep polling
+          }
+        }
+        if (!spaceRendered) await page.waitForTimeout(1000);
+      }
+      if (!spaceRendered) {
+        console.log(`HF Space app frame never reached ${SPACE_TEXT_THRESHOLD} chars for ${url}; capturing current state`);
+      } else {
+        // Give the app a beat to finish painting tables/charts after data lands
+        await page.waitForTimeout(1500);
+      }
+    }
 
     // For Nitter pages: rewrite broken /pic/ proxy URLs to direct Twitter CDN URLs.
     // Nitter's image proxy is unreliable (rate-limited/broken), but pbs.twimg.com serves
@@ -924,7 +983,8 @@ export async function convertUrlToPDF(
     // 3. Prevent text overflow - ensure content fits within page width
     // 4. Force visibility (some sites hide content in print)
     // Use CSS-only approach for print styling (avoids expensive querySelectorAll('*') DOM traversal)
-    await page.addStyleTag({
+    // Tagged so the blank-print fallback below can strip it and regenerate.
+    const injectedPrintStyle = await page.addStyleTag({
       content: `
         * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
 
@@ -1116,9 +1176,18 @@ export async function convertUrlToPDF(
           visibility: hidden !important;
         }
 
-        /* Modals, popups, overlays, and dialogs (non-floating variants caught by CSS) */
-        .modal, .modal-backdrop, [class*="modal"], [class*="overlay"],
-        [class*="popup"], [class*="dialog"], [role="dialog"],
+        /* Modals, popups, overlays, and dialogs (non-floating variants caught by CSS).
+           The :not() guards matter: sites set classes like "modal-open" /
+           "has-overlay" on body or the app root while a popup is up — without
+           the guards these substring selectors (specificity 0-1-0) out-rank the
+           body/main force-visible rules above (0-0-1) and blank the whole PDF
+           even though the screenshot (taken before style injection) looks fine. */
+        .modal, .modal-backdrop,
+        [class*="modal"]:not(body):not(html):not(main):not(article),
+        [class*="overlay"]:not(body):not(html):not(main):not(article),
+        [class*="popup"]:not(body):not(html):not(main):not(article),
+        [class*="dialog"]:not(body):not(html):not(main):not(article),
+        [role="dialog"],
         .subscription-widget-wrap, .subscribe-widget,
         .pencraft.pc-modal, [class*="pc-modal"] {
           display: none !important;
@@ -1134,17 +1203,28 @@ export async function convertUrlToPDF(
         .footer-cta, .post-footer-cta, [class*="footer-cta"],
         /* Beehiiv */
         [class*="beehiiv"], .bee-popup, .bee-modal,
-        /* Generic inline signup/paywall/newsletter CTAs */
-        [data-testid*="paywall"], [class*="paywall"],
+        /* Generic inline signup/paywall/newsletter CTAs.
+           Same body/main guards as the modal block above — "gate"/"paywall"
+           substrings show up on whole-page wrappers (e.g. metered-content
+           roots), and hiding those blanks the PDF. */
+        [data-testid*="paywall"],
+        [class*="paywall"]:not(body):not(html):not(main):not(article),
         [class*="subscribe-prompt"], [class*="subscription-prompt"],
         [class*="newsletter-signup"], [class*="email-signup"],
         [class*="signup-modal"], [class*="signup-overlay"],
-        [class*="gate"], [class*="Gate"] {
+        /* "gateway" is the trap: NYT wraps the WHOLE article in
+           div.vi-gateway-container (their metered-content gateway), which in
+           the authed case holds the full body. [class*="gate"] matches it and
+           blanks the PDF. Exempt gateway explicitly; the blank-print fallback
+           below is the backstop for any other over-broad match. */
+        [class*="gate"]:not(body):not(html):not(main):not(article):not([class*="gateway"]):not([class*="Gateway"]),
+        [class*="Gate"]:not(body):not(html):not(main):not(article):not([class*="gateway"]):not([class*="Gateway"]) {
           display: none !important;
           visibility: hidden !important;
         }
       `
     });
+    await injectedPrintStyle.evaluate(el => (el as Element).setAttribute('data-pdfzipper-style', ''));
     } catch (styleError) {
       // Style injection failed - continue with PDF generation anyway
       console.warn(`Style injection failed for ${url}: ${styleError instanceof Error ? styleError.message : styleError}`);
@@ -1169,13 +1249,39 @@ export async function convertUrlToPDF(
 
     // Generate PDF with scale to fit wide content on A4
     // 1280px viewport → 595pt A4 width requires ~0.8 scale
-    const pdfBuffer = await withTimeout(page.pdf({
+    const pdfOptions = {
       format,
       printBackground: true,
       margin,
       preferCSSPageSize: false,
       scale: 0.7
-    }), pdfTimeout, 'PDF generation');
+    };
+    let pdfBuffer = Buffer.from(await withTimeout(
+      page.pdf(pdfOptions), pdfTimeout, 'PDF generation'
+    ));
+
+    // Blank-print fallback: a near-empty PDF off a page whose screenshot
+    // clearly rendered means print styling hid a content wrapper (the
+    // screenshot is taken before style injection, the PDF after). Strip the
+    // injected styles and print-media emulation, regenerate once. Thresholds
+    // mirror the blank-page bot_detected check in conversion.worker.ts
+    // (5KB PDF / 15KB screenshot).
+    if (pdfBuffer.length < 5000 && screenshotBuffer.length >= 15000) {
+      console.log(`Blank PDF (${pdfBuffer.length}B) from visibly-rendered page for ${url}; regenerating without injected print styles`);
+      try {
+        await page.evaluate(() => {
+          document.querySelectorAll('style[data-pdfzipper-style]').forEach(el => el.remove());
+        });
+        const retryBuffer = await withTimeout(
+          page.pdf(pdfOptions), pdfTimeout, 'PDF regeneration'
+        );
+        if (retryBuffer.length > pdfBuffer.length) {
+          pdfBuffer = Buffer.from(retryBuffer);
+        }
+      } catch (regenError) {
+        console.warn(`PDF regeneration failed for ${url}: ${regenError instanceof Error ? regenError.message : regenError}`);
+      }
+    }
 
     // For Twitter URLs that went through Nitter, mark as NOT an X Article
     // (X Articles are captured directly from X.com and have isXArticle: true)
@@ -1183,7 +1289,7 @@ export async function convertUrlToPDF(
 
     return {
       success: true,
-      pdfBuffer: Buffer.from(pdfBuffer),
+      pdfBuffer,
       screenshotBuffer: Buffer.from(screenshotBuffer),
       url,
       size: pdfBuffer.length,
