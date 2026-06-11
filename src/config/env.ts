@@ -17,6 +17,10 @@ interface EnvConfig {
    * (data/ablation/outputs) shows e.g. qwen3:8b runs this task ~3x faster than
    * gemma4:e4b. Vision scoring stays on OLLAMA_MODEL regardless. */
   ENRICHMENT_MODEL: string;
+  /** When true, hard-paywall/block failures retry via an existing archive.today
+   * snapshot (needs fresh archive.is clearance cookies in COOKIES_FILE). Off by
+   * default — never touches the primary pipeline until enabled. */
+  ARCHIVE_FALLBACK_ENABLED: boolean;
   /** Quality score threshold 0-100 (default: 50) */
   QUALITY_THRESHOLD: number;
   /** Conversion worker concurrency (default: 1) */
@@ -160,6 +164,7 @@ export const env: EnvConfig = {
   OLLAMA_HOST: process.env.OLLAMA_HOST || 'http://127.0.0.1:11434',
   OLLAMA_MODEL: process.env.OLLAMA_MODEL || 'gemma4:e4b',
   ENRICHMENT_MODEL: process.env.ENRICHMENT_MODEL || process.env.OLLAMA_MODEL || 'gemma4:e4b',
+  ARCHIVE_FALLBACK_ENABLED: process.env.ARCHIVE_FALLBACK_ENABLED === 'true',
   QUALITY_THRESHOLD: parseIntegerEnv('QUALITY_THRESHOLD', 50, { min: 0, max: 100 }),
   CONCURRENCY: parseIntegerEnv('CONCURRENCY', 1, { min: 1, max: 8 }),
   NAV_TIMEOUT_MS: parseIntegerEnv('NAV_TIMEOUT_MS', 60000, { min: 1000 }),

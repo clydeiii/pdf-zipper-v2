@@ -21,6 +21,7 @@ const COOLDOWN_MS: Record<FailureClass, number> = {
   paywall: 7 * 24 * 60 * 60 * 1000, // 7d
   captcha: 7 * 24 * 60 * 60 * 1000, // 7d
   auth_required: 3 * 24 * 60 * 60 * 1000, // 3d
+  archive_unavailable: 7 * 24 * 60 * 60 * 1000, // 7d
   timeout: 2 * 60 * 60 * 1000, // 2h
   navigation_error: 2 * 60 * 60 * 1000, // 2h
   quality_false_negative_suspected: 60 * 60 * 1000, // 1h
@@ -36,6 +37,7 @@ export function shouldAutoTriggerFix(failureClass: FailureClass): TriggerDecisio
     case 'paywall':
     case 'captcha':
     case 'auth_required':
+    case 'archive_unavailable':
       return {
         allowed: false,
         reason: `skipped_auto_hard_blocker:${failureClass}`,

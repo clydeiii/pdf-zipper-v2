@@ -28,6 +28,7 @@ import { shouldAutoTriggerFix } from '../fix/trigger-policy.js';
 import { updateFixOutcome } from '../fix/ledger.js';
 import { addJobToWeekIndex } from '../jobs/week-index.js';
 import { enrichDocumentMetadata, type EnrichedMetadata } from '../metadata/enrichment.js';
+import { captureViaArchive } from '../converters/archive-fallback.js';
 
 /** Reference to the worker instance. Created explicitly by startWorker(). */
 let conversionWorker: Worker<ConversionJobData, ConversionJobResult> | null = null;
@@ -87,7 +88,77 @@ async function deleteOldFileIfDifferent(oldFilePath: string, newFilePath: string
  * Scores PDF quality using vision model.
  * Throws on failure to trigger BullMQ retry logic.
  */
+/**
+ * Failure classes where the original page is access-restricted but an existing
+ * archive.today snapshot might still hold the content. Excludes timeouts,
+ * navigation errors and generic quality misses (archive won't help those).
+ */
+function isArchiveFallbackCandidate(message: string): boolean {
+  const cls = classifyFailureMessage(message);
+  return cls === 'paywall' || cls === 'auth_required' || cls === 'captcha' || cls === 'bot_detected';
+}
+
 async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Promise<ConversionJobResult> {
+  try {
+    return await runPrimaryCapture(job);
+  } catch (primaryErr) {
+    const message = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
+    if (!env.ARCHIVE_FALLBACK_ENABLED || !isArchiveFallbackCandidate(message)) {
+      throw primaryErr;
+    }
+    const { url, originalUrl, title: jobTitle, bookmarkedAt, oldFilePath } = job.data;
+    const target = originalUrl || url;
+    console.log(`[archive-fallback] Primary failed (${message.slice(0, 60)}); trying archive.today for ${target}`);
+    let arch;
+    try {
+      arch = await captureViaArchive(target);
+    } catch (archErr) {
+      console.warn(`[archive-fallback] errored:`, archErr instanceof Error ? archErr.message : archErr);
+      throw primaryErr; // fall back to the original failure
+    }
+    if (!arch.ok) {
+      // Reclassify so the fix system treats these as expected hard-blockers,
+      // not retryable false-negatives. (archive_unavailable is non-auto-trigger.)
+      if (arch.reason === 'wall') {
+        throw new Error(`archive_unavailable: archive.is clearance cookies stale — re-solve captcha and re-upload cookies.txt (original: ${message.slice(0, 80)})`);
+      }
+      const why = arch.reason === 'not_archived' ? 'no archive.today snapshot exists' : 'archive.today snapshot is a 403/incomplete capture';
+      throw new Error(`archive_unavailable: ${why} (original: ${message.slice(0, 80)})`);
+    }
+
+    // Archive snapshot captured. Enrich from its text and save with the REAL
+    // article URL as the source (not the archive.is URL), tagged as archive-sourced.
+    console.log(`[archive-fallback] Captured snapshot ${arch.snapshotUrl} (${arch.extractedText.length} chars)`);
+    let enrichedMetadata: EnrichedMetadata | undefined;
+    try {
+      enrichedMetadata = await enrichDocumentMetadata(arch.extractedText, target, jobTitle);
+    } catch { /* non-fatal */ }
+    const pdfPath = await savePdfToWeeklyBin(arch.pdfBuffer, {
+      url: target,
+      title: jobTitle || enrichedMetadata?.title,
+      bookmarkedAt,
+      originalUrl: target,
+      enrichedMetadata,
+      creatorOverride: 'pdf-zipper-v2-archive',
+      extraInfoDictFields: { ViaArchive: arch.snapshotUrl },
+    });
+    console.log(`[archive-fallback] PDF saved via archive: ${pdfPath}`);
+    if (oldFilePath) await deleteOldFileIfDifferent(oldFilePath, pdfPath);
+    await job.updateProgress(100);
+    return {
+      pdfPath,
+      pdfSize: arch.pdfBuffer.length,
+      completedAt: new Date().toISOString(),
+      url,
+      qualityScore: -1,
+      qualityReasoning: `Captured via archive.today snapshot (${arch.snapshotUrl})`,
+      summary: enrichedMetadata?.summary || undefined,
+      language: enrichedMetadata?.language || undefined,
+    };
+  }
+}
+
+async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult>): Promise<ConversionJobResult> {
   console.log(`[DEBUG] processJob called for job ${job.id}`);
   const { url, originalUrl, userId, title: jobTitle, bookmarkedAt, oldFilePath } = job.data;
 

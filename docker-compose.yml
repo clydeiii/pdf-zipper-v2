@@ -24,6 +24,9 @@ services:
       # Text-only enrichment on the faster model (4x vs e4b per ablation data);
       # factual fields are hallucination-guarded in enrichment.ts. Vision stays on OLLAMA_MODEL.
       - ENRICHMENT_MODEL=gemma3:4b
+      # Paywall fallback via existing archive.today snapshots. Requires fresh
+      # archive.is clearance cookies in cookies.txt (cf_clearance ~1-day TTL).
+      - ARCHIVE_FALLBACK_ENABLED=true
       # Use larger model for transcript formatting + metadata enrichment
       - TRANSCRIPT_FORMAT_MODEL=gemma4:latest
 

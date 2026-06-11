@@ -12,6 +12,7 @@ export type FailureClass =
   | 'paywall'
   | 'captcha'
   | 'auth_required'
+  | 'archive_unavailable'
   | 'timeout'
   | 'navigation_error'
   | 'quality_false_negative_suspected'
@@ -26,7 +27,22 @@ export function classifyFailureMessage(message?: string): FailureClass {
 
   if (!text) return 'unknown';
 
-  if (text.startsWith('paywall:') || text.includes('subscription') || text.includes('subscriber only')) {
+  // archive.today fallback already tried and gave up — expected hard-blocker,
+  // not something the fix system should re-attempt.
+  if (text.startsWith('archive_unavailable:')) {
+    return 'archive_unavailable';
+  }
+
+  // "truncated: Paywall detected: ..." / "...behind a subscription wall" are
+  // the content-check's name for a paywall — treat as paywall (hard blocker)
+  // so it's recognized as an archive-fallback candidate and skipped by auto-fix.
+  if (
+    text.startsWith('paywall:') ||
+    text.includes('subscription') ||
+    text.includes('subscriber only') ||
+    text.includes('paywall detected') ||
+    text.includes('unlock this article')
+  ) {
     return 'paywall';
   }
 
