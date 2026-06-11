@@ -32,10 +32,16 @@ const ARCHIVE_UA =
 /** Minimum main-document text for a snapshot to count as real article content. */
 const GOOD_TEXT_THRESHOLD = 1500;
 
-/** Markers that mean the snapshot is a broken/incomplete capture, not content. */
+/**
+ * Markers that mean the snapshot is a broken/incomplete capture, not content.
+ * NOTE: do NOT match the "0% 10% 20%" capture-progress bar — archive.today
+ * embeds that widget's text in the innerText of EVERY snapshot page (complete
+ * ones included), so it false-positives good captures. The real signal for an
+ * incomplete capture is "task timed-out"; broken/empty captures are also caught
+ * by the GOOD_TEXT_THRESHOLD length check.
+ */
 const BROKEN_MARKERS: RegExp[] = [
   /task timed-?out/i,
-  /0%\s+10%\s+20%/, // archive.today capture progress bar
   /\b403\s+forbidden\b/i,
   /\berror\s+1020\b/i, // Cloudflare access denied on the archived origin
   /\baccess denied\b/i,

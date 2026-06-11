@@ -27,9 +27,15 @@ test('classifySnapshotText: archive-chrome-only is broken', () => {
   assert.equal(classifySnapshotText('archive.today webpage capture Saved from history ←prior next→ All snapshots from host www.nytimes.com'), 'broken');
 });
 
-test('classifySnapshotText: capture-progress marker is broken even if long', () => {
-  const text = 'archive.today webpage capture Error: Task timed-out after 15 seconds of inactivity 0% 10% 20% ' + 'x '.repeat(900);
+test('classifySnapshotText: task-timed-out is broken even if long', () => {
+  const text = 'archive.today webpage capture Error: Task timed-out after 15 seconds of inactivity ' + 'x '.repeat(900);
   assert.equal(classifySnapshotText(text), 'broken');
+});
+
+test('classifySnapshotText: progress-bar text alone does NOT mark a good capture broken', () => {
+  // archive.today embeds "0% 10% 20%" in every snapshot page, including complete ones
+  const text = 'archive.today webpage capture Saved from history 0% 10% 20% 30% ' + 'real article body '.repeat(200);
+  assert.equal(classifySnapshotText(text), 'good');
 });
 
 test('classifySnapshotText: 403 origin is broken', () => {
