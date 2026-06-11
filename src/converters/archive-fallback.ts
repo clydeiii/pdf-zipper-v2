@@ -25,6 +25,7 @@
 import type { Browser } from 'playwright';
 import { initBrowser } from '../browsers/manager.js';
 import { loadCookies } from '../browsers/cookies.js';
+import { convertUrlToPDF } from './pdf.js';
 
 const ARCHIVE_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36';
@@ -147,32 +148,16 @@ export async function captureViaArchive(originalUrl: string): Promise<ArchiveRes
         }
         if (verdict !== 'good') continue;
 
-        // Strip archive.today's own toolbar/chrome so the PDF is just the article.
-        await page.evaluate(() => {
-          // archive.today injects its UI as the first elements of <body>; remove
-          // any top-level node whose text is the archive toolbar.
-          const markers = ['archive.today webpage capture', 'Saved from history', 'report bug or abuse'];
-          for (const el of [...document.body.children]) {
-            const t = (el.textContent || '').slice(0, 200);
-            if (markers.some((m) => t.includes(m)) && t.length < 600) el.remove();
-          }
-          // Known archive.today chrome ids/classes (best-effort).
-          ['#HEADER', '#TOOLBAR', '#globalheader', '.SOLID', '#streams'].forEach((sel) => {
-            document.querySelectorAll(sel).forEach((e) => {
-              if ((e.textContent || '').length < 800) (e as HTMLElement).style.display = 'none';
-            });
-          });
-        }).catch(() => { /* best-effort chrome removal */ });
-
-        await page.emulateMedia({ media: 'screen' }).catch(() => {});
-        const pdf = await page.pdf({
-          format: 'A4',
-          printBackground: true,
-          margin: { top: '20px', right: '20px', bottom: '20px', left: '20px' },
-          preferCSSPageSize: false,
-          scale: 0.7,
-        });
-        return { ok: true, pdfBuffer: Buffer.from(pdf), extractedText: text, snapshotUrl: snap };
+        // Render the validated snapshot through the main converter: it already
+        // hides nav/sticky/toolbar chrome (incl. archive.today's bar), forces
+        // article content visible, and has the blank-print fallback. Hand-rolled
+        // page.pdf here produced near-empty PDFs, so delegate.
+        const rendered = await convertUrlToPDF(snap);
+        if (rendered.success && rendered.pdfBuffer.length >= 5000) {
+          return { ok: true, pdfBuffer: rendered.pdfBuffer, extractedText: text, snapshotUrl: snap };
+        }
+        // Render came back blank despite good snapshot text — try the next one.
+        continue;
       } catch {
         continue; // try the next snapshot
       }
