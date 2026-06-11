@@ -804,6 +804,40 @@ export async function convertUrlToPDF(
           }
         }
 
+        // Phase 2.5: De-floatie — force out-of-flow elements into normal flow so
+        // they can't overlap body text in the flat PDF. The classic case: a hero
+        // photo with position:absolute (z-index auto, so Phase 3 misses it)
+        // rendered over the article column (e.g. archived Bloomberg articles).
+        // We force static + unfloat rather than remove, so the image is KEPT —
+        // just dropped into normal flow below/above the text instead of over it.
+        // Scoped to media elements and to large absolute blocks (small absolute
+        // badges/icons don't obscure text and are left alone).
+        for (const el of document.querySelectorAll('img, figure, picture, video')) {
+          const s = window.getComputedStyle(el);
+          if (s.position === 'absolute' || s.float !== 'none') {
+            const h = el as HTMLElement;
+            h.style.setProperty('position', 'static', 'important');
+            h.style.setProperty('float', 'none', 'important');
+            count++;
+          }
+        }
+        for (const el of document.querySelectorAll('*')) {
+          const s = window.getComputedStyle(el);
+          if (s.position === 'absolute') {
+            const r = (el as HTMLElement).getBoundingClientRect();
+            // Large absolute block likely to overlap the text column.
+            if (r.width > 250 && r.height > 150) {
+              const h = el as HTMLElement;
+              h.style.setProperty('position', 'static', 'important');
+              h.style.setProperty('float', 'none', 'important');
+              count++;
+            }
+          } else if (s.float !== 'none') {
+            (el as HTMLElement).style.setProperty('float', 'none', 'important');
+            count++;
+          }
+        }
+
         // Phase 3: Remove high z-index elements that might still float over content
         // Some overlays use position:absolute with very high z-index
         const remaining = document.querySelectorAll('*');
