@@ -1230,6 +1230,28 @@ export async function convertUrlToPDF(
       console.warn(`Style injection failed for ${url}: ${styleError instanceof Error ? styleError.message : styleError}`);
     }
 
+    // archive.today snapshot chrome removal: when capturing an archive.is/.today
+    // snapshot (paywall fallback), strip archive's own UI so the PDF is just the
+    // archived article — #HEADER is the top toolbar ("archive.today webpage
+    // capture / Saved from history / <timestamp>"), and table#hashtags is the
+    // left-edge percentage ruler (0% 10% … 100%). #SOLID holds the real article
+    // and is kept. Gated to archive hosts so normal pages are untouched.
+    if (/^https?:\/\/archive\.(is|today|ph|li|md|vn|fo)\//i.test(targetUrl)) {
+      try {
+        await page.evaluate(() => {
+          document.getElementById('HEADER')?.remove();
+          // Percentage ruler + any tiny element whose entire text is the scale.
+          document.getElementById('hashtags')?.remove();
+          for (const el of document.querySelectorAll('table, div, nav, aside')) {
+            const t = (el.textContent || '').replace(/\s+/g, '').trim();
+            if (/^(\d{1,3}%){5,}$/.test(t)) (el as HTMLElement).remove();
+          }
+        });
+      } catch (archiveChromeError) {
+        console.warn(`archive.today chrome strip failed for ${url}: ${archiveChromeError instanceof Error ? archiveChromeError.message : archiveChromeError}`);
+      }
+    }
+
     // Extract page title for filename generation (useful for non-descriptive URLs like HN)
     let pageTitle: string | undefined;
     try {
