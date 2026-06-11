@@ -9,10 +9,30 @@ import { Router, Request, Response } from 'express';
 import archiver from 'archiver';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import { mkdir, readdir, stat, unlink } from 'node:fs/promises';
 import { env } from '../../config/env.js';
 import { resolveWithinRoot } from '../../utils/paths.js';
 
 export const downloadRouter = Router();
+
+/** Where persisted export ZIPs live (served via /api/file/exports/<name>). */
+const EXPORTS_SUBDIR = 'exports';
+/** Keep only the few newest export ZIPs — each can be GBs. */
+const KEEP_EXPORTS = 3;
+
+/** Prune data/exports/ to the KEEP_EXPORTS newest .zip files (best-effort). */
+async function pruneExports(exportsDir: string): Promise<void> {
+  try {
+    const names = (await readdir(exportsDir)).filter((n) => n.toLowerCase().endsWith('.zip'));
+    const withTimes = await Promise.all(
+      names.map(async (n) => ({ n, m: (await stat(path.join(exportsDir, n))).mtimeMs }))
+    );
+    withTimes.sort((a, b) => b.m - a.m);
+    for (const { n } of withTimes.slice(KEEP_EXPORTS)) {
+      await unlink(path.join(exportsDir, n)).catch(() => {});
+    }
+  } catch { /* best-effort */ }
+}
 
 /**
  * Shared handler for ZIP download (works for both GET and POST)
@@ -93,7 +113,24 @@ async function handleZipDownload(
     }
   });
 
-  // Pipe archive to response
+  // Persist the ZIP to disk WHILE streaming it to the client (tee). If the
+  // browser download dies mid-transfer (a 2.5GB stream can crash Chrome), the
+  // on-disk copy still finalizes independently and stays downloadable at
+  // /api/file/exports/<filename> — and a download manager can resume it.
+  const exportsDir = path.join(dataDir, EXPORTS_SUBDIR);
+  let diskOut: fs.WriteStream | undefined;
+  try {
+    await mkdir(exportsDir, { recursive: true });
+    diskOut = fs.createWriteStream(path.join(exportsDir, filename));
+    diskOut.on('error', (err) => {
+      console.warn('Export disk-copy write failed (non-fatal):', err instanceof Error ? err.message : err);
+    });
+    archive.pipe(diskOut); // disk copy — survives a client abort
+  } catch (err) {
+    console.warn('Could not open export disk copy (streaming only):', err instanceof Error ? err.message : err);
+  }
+
+  // Pipe archive to response (client stream — starts immediately)
   archive.pipe(res);
 
   // Add each file to the archive
@@ -128,9 +165,46 @@ async function handleZipDownload(
     }
   }
 
-  // Finalize the archive (triggers streaming)
+  // Finalize the archive (triggers streaming to both client and disk)
   await archive.finalize();
+
+  // Once the disk copy is fully flushed, prune old exports. Don't block the
+  // client response on this.
+  if (diskOut) {
+    diskOut.on('close', () => {
+      console.log(JSON.stringify({
+        event: 'zip_export_persisted',
+        file: `${EXPORTS_SUBDIR}/${filename}`,
+        fileCount: files.length,
+        timestamp: new Date().toISOString(),
+      }));
+      void pruneExports(exportsDir);
+    });
+  }
 }
+
+/**
+ * GET /latest - Redirect to the newest persisted export ZIP (resumable static
+ * download via /api/file/exports/...). The UI links here so a crashed download
+ * is always one click from recovery.
+ */
+downloadRouter.get('/latest', async (_req: Request, res: Response): Promise<void> => {
+  const exportsDir = path.join(path.resolve(env.DATA_DIR), EXPORTS_SUBDIR);
+  try {
+    const names = (await readdir(exportsDir)).filter((n) => n.toLowerCase().endsWith('.zip'));
+    if (names.length === 0) {
+      res.status(404).json({ error: 'No export ZIPs available yet' });
+      return;
+    }
+    const withTimes = await Promise.all(
+      names.map(async (n) => ({ n, m: (await stat(path.join(exportsDir, n))).mtimeMs }))
+    );
+    withTimes.sort((a, b) => b.m - a.m);
+    res.redirect(302, `/api/file/${EXPORTS_SUBDIR}/${encodeURIComponent(withTimes[0].n)}`);
+  } catch {
+    res.status(404).json({ error: 'No exports directory' });
+  }
+});
 
 /**
  * GET /zip - Download multiple files as a ZIP archive
