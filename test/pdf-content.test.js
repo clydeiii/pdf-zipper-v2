@@ -161,6 +161,46 @@ test('analyzePdfContent passes when body matches claimed reading time', async ()
   assert.equal(result.passed, true, `should pass with sufficient body; got: ${result.reason}`);
 });
 
+test('analyzePdfContent ignores early sidebar "About the Author" (apollo.com layout)', async () => {
+  // Apollo's Daily Spark puts the author bio in a sidebar that extracts at
+  // char ~130, right after the headline — on a COMPLETE article. Markers in
+  // the first 300 chars are layout, not end-of-truncated-body.
+  const header = 'Home The Daily Spark Where Is the AI Jobs Crisis? MACRO INDICATORS June 09, 2026 Where Is the AI Jobs Crisis? About the Author Torsten Slok, Partner, Chief Economist. ';
+  const text = header + filler(3000);
+  const pdf = await createPdfWithText(text, { pageCount: 2 });
+  const result = await analyzePdfContent(pdf);
+  assert.equal(result.passed, true, `sidebar author bio should not trigger; got: ${result.reason}`);
+});
+
+test('analyzePdfContent still detects stealth paywall via post-lede end-of-article marker', async () => {
+  // Lede + 1 paragraph, then straight into end-of-page boilerplate — the
+  // Fortune-style stealth truncation the marker check was built for.
+  const text = filler(900) + ' About the Author. Jane Doe covers AI. Most Popular. Latest in Tech. ' + filler(400);
+  const pdf = await createPdfWithText(text);
+  const result = await analyzePdfContent(pdf);
+  assert.equal(result.passed, false);
+  assert.ok(result.reason?.includes('Truncated body'), `expected truncation reason, got: ${result.reason}`);
+});
+
+test('analyzePdfContent passes image-heavy direct X post capture (low density)', async () => {
+  // Direct x.com status capture: short text + huge embedded screenshots.
+  // Large size + low chars/KB is normal for a complete tweet capture.
+  const text = 'Garry Tan @garrytan Just trying to work on fixing GStack and running into this *long sigh* 4:04 AM Jun 10, 2026 34.2K Views Relevant people What’s happening Post your reply ' + filler(550);
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  for (let i = 0; i < 2; i++) {
+    const page = doc.addPage([612, 792]);
+    page.drawText(text.slice(i * 400, (i + 1) * 400), { x: 50, y: 700, size: 10, font, maxWidth: 500 });
+  }
+  // Inflate file size past the 500KB large-PDF threshold (stand-in for images)
+  const noise = Buffer.alloc(700 * 1024);
+  for (let i = 0; i < noise.length; i++) noise[i] = (i * 2654435761) & 0xff;
+  await doc.attach(noise, 'image-noise.bin', { mimeType: 'application/octet-stream' });
+  const bytes = await doc.save();
+  const result = await analyzePdfContent(Buffer.from(bytes));
+  assert.equal(result.passed, true, `X post chrome should exempt size/density checks; got: ${result.reason}`);
+});
+
 // --- Extracted text ---
 
 test('analyzePdfContent returns extracted text for downstream use', async () => {
