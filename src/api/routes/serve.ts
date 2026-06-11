@@ -60,7 +60,13 @@ serveRouter.get('/file/*', async (req: Request, res: Response): Promise<void> =>
       throw error;
     }
 
-    // Serve the file
+    // Serve the file. `no-cache` = always revalidate against the origin's
+    // ETag/Last-Modified before serving (NOT "don't store"). Files at a stable
+    // path get OVERWRITTEN on rerun (e.g. a fresher capture, an archive
+    // rescue, a de-floatie fix), so a CDN/browser must not serve a stale cached
+    // copy by URL. Cloudflare honors no-cache and will revalidate, returning
+    // the new bytes once the file changes. Mirrors download.ts.
+    res.setHeader('Cache-Control', 'no-cache, must-revalidate');
     res.sendFile(filePath);
   } catch (error) {
     console.error('Failed to serve file:', {
