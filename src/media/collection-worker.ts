@@ -4,7 +4,8 @@
  */
 
 import { Worker, Job } from 'bullmq';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, rename, access } from 'node:fs/promises';
+import * as path from 'node:path';
 import { PDFDocument } from 'pdf-lib';
 import { workerConnection } from '../config/redis.js';
 import { downloadMedia } from './collector.js';
@@ -12,6 +13,7 @@ import { enrichVideo } from './video-enrichment.js';
 import { analyzePdfContent } from '../quality/pdf-content.js';
 import { enrichDocumentMetadata } from '../metadata/enrichment.js';
 import { setInfoDictFields } from '../utils/pdf-info-dict.js';
+import { isGenericPdfBasename, slugifyTitle } from '../utils/save-pdf.js';
 import type { MediaItem, MediaCollectionResult } from './types.js';
 import type { MediaCollectionJobData } from '../feeds/monitor.js';
 
@@ -125,6 +127,35 @@ export async function startMediaWorker(): Promise<void> {
 
               const enrichedPdf = await pdfDoc.save();
               await writeFile(result.filePath, Buffer.from(enrichedPdf));
+
+              // Karakeep PDF assets are named from the uploaded filename, which
+              // is often generic ("report.pdf" → saved as "report.pdf.pdf").
+              // Now that enrichment has the real document title, rename the file
+              // to a content-derived name. Only for generic names so descriptive
+              // uploads (e.g. "frontiermath-batch-2.pdf") are left alone.
+              if (metadata.title && isGenericPdfBasename(path.basename(result.filePath))) {
+                const titleSlug = slugifyTitle(metadata.title).slice(0, 100);
+                if (titleSlug) {
+                  const dir = path.dirname(result.filePath);
+                  let candidate = path.join(dir, `${titleSlug}.pdf`);
+                  // Avoid clobbering a different file with the same title.
+                  for (let n = 2; n <= 20; n++) {
+                    if (path.resolve(candidate) === path.resolve(result.filePath)) break;
+                    try { await access(candidate); candidate = path.join(dir, `${titleSlug}-${n}.pdf`); }
+                    catch { break; } // ENOENT → free to use
+                  }
+                  if (path.resolve(candidate) !== path.resolve(result.filePath)) {
+                    await rename(result.filePath, candidate);
+                    console.log(JSON.stringify({
+                      event: 'pdf_asset_renamed',
+                      from: path.basename(result.filePath),
+                      to: path.basename(candidate),
+                      timestamp: new Date().toISOString(),
+                    }));
+                    result.filePath = candidate;
+                  }
+                }
+              }
 
               console.log(JSON.stringify({
                 event: 'pdf_asset_enrichment_complete',

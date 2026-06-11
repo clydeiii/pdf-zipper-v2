@@ -62,6 +62,26 @@ export function isTwitterUrl(url: string): boolean {
  * - falls back to a slugified title for non-descriptive paths (HN `/item`, etc.)
  * - for Twitter/X URLs, rewrites `-status-` to `-post-` (or `-article-` if known)
  */
+/** Generic/placeholder PDF filename stems that carry no meaning on their own. */
+const GENERIC_PDF_STEMS = new Set([
+  'report', 'reports', 'paper', 'papers', 'document', 'documents', 'doc',
+  'file', 'download', 'downloads', 'main', 'fulltext', 'full-text',
+  'attachment', 'view', 'viewcontent', 'content', 'output', 'final',
+  'draft', 'preprint', 'manuscript', 'pdf', 'untitled', 'index', 'default',
+  'whitepaper', 'white-paper', 'ebook', 'slides', 'deck', 'presentation',
+  'overview', 'brief', 'latest',
+]);
+
+/**
+ * True when a filename/segment is a generic PDF name that should be replaced by
+ * a content-derived title (e.g. "report.pdf", "report.pdf.pdf", "paper",
+ * "main.pdf"). A trailing .pdf (even doubled) is stripped before the check.
+ */
+export function isGenericPdfBasename(name: string): boolean {
+  const stem = name.replace(/(\.pdf)+$/i, '').toLowerCase().trim();
+  return stem === '' || GENERIC_PDF_STEMS.has(stem);
+}
+
 export function buildUrlBaseName(
   url: string,
   options: { title?: string; isXArticle?: boolean } = {}
@@ -80,9 +100,19 @@ export function buildUrlBaseName(
     if (pathname.startsWith('-')) {
       pathname = pathname.substring(1);
     }
+    // Strip a trailing .pdf so a direct-PDF URL (e.g. /report.pdf) doesn't
+    // become "report.pdf" and then "report.pdf.pdf" when the save appends .pdf.
+    pathname = pathname.replace(/\.pdf$/i, '');
 
+    // Generic/placeholder PDF filenames carry no meaning — fall back to the
+    // (enriched) title. An org publishing "report.pdf" / "paper.pdf" / "main.pdf"
+    // is the motivating case; arxiv IDs and slugged filenames stay descriptive.
+    const lastSeg = parsed.pathname.split('/').filter(Boolean).pop() || '';
     const nonDescriptivePaths = ['item', 'comments', 'post', 'p', 'a', 'article', 'story', 's'];
-    const isNonDescriptive = !pathname || nonDescriptivePaths.includes(pathname.toLowerCase());
+    const isNonDescriptive =
+      !pathname ||
+      nonDescriptivePaths.includes(pathname.toLowerCase()) ||
+      isGenericPdfBasename(lastSeg);
 
     let baseName: string;
     if (isNonDescriptive && title) {
@@ -295,9 +325,13 @@ export async function savePdfToWeeklyBin(
   await mkdir(pdfDir, { recursive: true });
 
   // Generate filename from URL, with title fallback for non-descriptive paths.
+  // Prefer the enriched title (the real document headline) over the raw job
+  // title/Content-Disposition for that fallback — it's what makes a generic
+  // "report.pdf" become a meaningful, unique name.
   // Shared helper so media enclosures (MP4s) produce matching base names and
   // the downstream KB consumer can link them.
-  let baseName = buildUrlBaseName(url, { title, isXArticle });
+  const filenameTitle = enrichedMetadata?.title || title;
+  let baseName = buildUrlBaseName(url, { title: filenameTitle, isXArticle });
 
   // Sanitize and truncate baseName, reserving room for the optional suffix so
   // a long URL can't truncate the suffix off and collide with the full-page capture.

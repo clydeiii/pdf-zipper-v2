@@ -126,6 +126,13 @@ export function getMediaFilename(item: MediaItem): string {
     .replace(/\.+/g, '.')
     .replace(/^[-.]+|[-.]+$/g, '');
 
+  // item.title often already carries the source extension (e.g. a Karakeep
+  // asset uploaded as "report.pdf" or "June-2026-Threat-Report.pdf"). Strip a
+  // trailing media extension so appending one below doesn't double it
+  // (report.pdf → report.pdf.pdf). arxiv-style dotted IDs (2604.01007v2) are
+  // untouched since they don't end in a media extension.
+  baseName = baseName.replace(/\.(pdf|mp4|webm|m4v|mov|mp3|m4a|wav)$/i, '');
+
   // Determine file extension from enclosure MIME type
   let extension = '';
 
