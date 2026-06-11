@@ -171,9 +171,17 @@ async function preparePatchBranch(params: {
     };
   }
 
+  // Capture where we started so we can return HEAD here afterward. Creating the
+  // fix branch must NOT strand the repo on it — the commit stays on the branch
+  // for review, but the checked-out ref goes back to where it was, or a later
+  // manual commit silently lands on the fix branch and `git push origin master`
+  // no-ops while master stays behind.
+  const origRef = await getCurrentGitRef();
+
   const branchName = `fix/batch-${params.batchId.slice(0, 8)}-${params.provider}`;
   const checkout = await runCommand('git', ['switch', '-c', branchName]);
   if (!checkout.success) {
+    // Never left origRef — nothing to restore.
     return {
       success: false,
       changedFiles,
@@ -181,54 +189,82 @@ async function preparePatchBranch(params: {
     };
   }
 
-  const add = await runCommand('git', ['add', '--', ...changedFiles]);
-  if (!add.success) {
-    return {
-      success: false,
-      changedFiles,
-      error: `git_add_failed: ${add.stderr || add.stdout}`,
-    };
-  }
+  // We're on the fix branch now. Whatever happens below, restore origRef before
+  // returning (the commit, if made, persists on branchName).
+  try {
+    const add = await runCommand('git', ['add', '--', ...changedFiles]);
+    if (!add.success) {
+      return {
+        success: false,
+        changedFiles,
+        error: `git_add_failed: ${add.stderr || add.stdout}`,
+      };
+    }
 
-  const hasStaged = await runCommand('git', ['diff', '--cached', '--quiet']);
-  if (hasStaged.success) {
-    // diff --quiet exits 0 when there is no staged diff.
-    return {
-      success: false,
-      changedFiles,
-      error: 'no_staged_diff_after_add',
-    };
-  }
+    const hasStaged = await runCommand('git', ['diff', '--cached', '--quiet']);
+    if (hasStaged.success) {
+      // diff --quiet exits 0 when there is no staged diff.
+      return {
+        success: false,
+        changedFiles,
+        error: 'no_staged_diff_after_add',
+      };
+    }
 
-  const commit = await runCommand('git', [
-    'commit',
-    '-m',
-    `fix(self-heal): batch ${params.batchId.slice(0, 8)} via ${params.provider}`,
-  ]);
-  if (!commit.success) {
-    return {
-      success: false,
-      changedFiles,
-      error: `git_commit_failed: ${commit.stderr || commit.stdout}`,
-    };
-  }
+    const commit = await runCommand('git', [
+      'commit',
+      '-m',
+      `fix(self-heal): batch ${params.batchId.slice(0, 8)} via ${params.provider}`,
+    ]);
+    if (!commit.success) {
+      return {
+        success: false,
+        changedFiles,
+        error: `git_commit_failed: ${commit.stderr || commit.stdout}`,
+      };
+    }
 
+    const sha = await runCommand('git', ['rev-parse', 'HEAD']);
+    if (!sha.success) {
+      return {
+        success: false,
+        changedFiles,
+        error: `git_rev_parse_failed: ${sha.stderr || sha.stdout}`,
+      };
+    }
+
+    return {
+      success: true,
+      branchName,
+      commitSha: sha.stdout.trim(),
+      applyCommand: `git switch ${branchName}`,
+      changedFiles,
+    };
+  } finally {
+    await restoreGitRef(origRef);
+  }
+}
+
+/** Current checked-out ref: a branch name, or the HEAD SHA if detached. */
+async function getCurrentGitRef(): Promise<{ ref: string; detached: boolean }> {
+  const branch = await runCommand('git', ['rev-parse', '--abbrev-ref', 'HEAD']);
+  const name = branch.stdout.trim();
+  if (branch.success && name && name !== 'HEAD') {
+    return { ref: name, detached: false };
+  }
   const sha = await runCommand('git', ['rev-parse', 'HEAD']);
-  if (!sha.success) {
-    return {
-      success: false,
-      changedFiles,
-      error: `git_rev_parse_failed: ${sha.stderr || sha.stdout}`,
-    };
-  }
+  return { ref: sha.stdout.trim(), detached: true };
+}
 
-  return {
-    success: true,
-    branchName,
-    commitSha: sha.stdout.trim(),
-    applyCommand: `git switch ${branchName}`,
-    changedFiles,
-  };
+/** Return HEAD to a ref captured by getCurrentGitRef (best-effort, logged). */
+async function restoreGitRef(orig: { ref: string; detached: boolean }): Promise<void> {
+  const args = orig.detached ? ['switch', '--detach', orig.ref] : ['switch', orig.ref];
+  const res = await runCommand('git', args);
+  if (!res.success) {
+    console.warn(`[Fix] could not restore git ref to ${orig.ref}: ${res.stderr || res.stdout}`);
+  } else {
+    console.log(`[Fix] restored git HEAD to ${orig.ref} after staging patch branch`);
+  }
 }
 
 async function getAllowedWorkingTreeChanges(): Promise<string[]> {
