@@ -718,6 +718,27 @@ export async function convertUrlToPDF(
       // Scroll failed, continue with PDF generation anyway
     }
 
+    // Lazy-body settle: SPA article bodies (axios-style) fetch their text on
+    // scroll via XHR/intersection observers, and the fast scroll above can
+    // outrun that fetch — capturing only the page shell (nav + headline +
+    // "what to read next"). If the body is still article-shell-thin, wait for
+    // it to grow before capturing. Only runs when thin, so real articles
+    // (already > threshold) pay nothing.
+    try {
+      const SHELL_THRESHOLD = 2500;
+      const len0 = await page.evaluate(() => document.body?.innerText.trim().length ?? 0);
+      if (len0 < SHELL_THRESHOLD) {
+        await page.waitForFunction(
+          (prev) => (document.body?.innerText.trim().length ?? 0) > prev + 500,
+          len0,
+          { timeout: 8000 }
+        ).catch(() => { /* body didn't grow — capture what rendered */ });
+        await page.waitForTimeout(1500);
+      }
+    } catch {
+      // Settle check failed — continue with PDF generation anyway
+    }
+
     // Wait for images to finish downloading (especially Nitter → Twitter CDN rewrites)
     try {
       await page.waitForFunction(() => {

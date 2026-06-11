@@ -54,7 +54,12 @@ const MIN_ARTICLE_CHARS = 500;
  * A big PDF with little text = big images but truncated article
  */
 const LARGE_PDF_THRESHOLD = 500 * 1024; // 500KB
-const MIN_CHARS_FOR_LARGE_PDF = 1000;
+// A 500KB+ PDF with under this many chars is almost always a failed render —
+// an SPA shell (nav + headline + "what to read next") whose article body never
+// loaded. Legit short pages (social posts, brief announcements) are exempted by
+// isLegitimatelyShortPage. Raised 1000→1500 after an axios SPA shell (1042
+// chars in a 2MB PDF) squeaked through.
+const MIN_CHARS_FOR_LARGE_PDF = 1500;
 
 /**
  * Chars-per-KB ratio threshold
