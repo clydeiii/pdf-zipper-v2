@@ -1047,7 +1047,14 @@ export async function convertUrlToPDF(
           // Stub = real X Article (strict checks, "article" filename). An
           // error-page retry is still a tweet: keep isXArticle false so it
           // stays a "post" and gets the lenient tweet content checks.
-          isXArticle: isArticleStub,
+          // The stub heuristic also fires on regular tweets that merely LINK
+          // to an X Article (news accounts post every story this way) — the
+          // Nitter page contains "x.com/i/article/" either way. What x.com
+          // actually rendered disambiguates: an article view has a long essay
+          // body, a tweet-with-article-card stays short. Only apply strict
+          // article checks (and the "article" filename) when the rendered
+          // text backs up the article classification.
+          isXArticle: isArticleStub && directText.trim().length >= 2000,
           expandedUrl: expandedUrl !== url ? expandedUrl : undefined,
         };
       }

@@ -228,8 +228,9 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
 
   // Use job title if provided, otherwise use extracted page title
   const title = jobTitle || (result.success ? result.pageTitle : undefined);
-  // Track if this was an X Article capture (for filename generation)
-  const isXArticle = result.success ? result.isXArticle : undefined;
+  // Track if this was an X Article capture (for filename generation).
+  // `let` because a short "X Article" can be re-classified as a tweet below.
+  let isXArticle = result.success ? result.isXArticle : undefined;
   // Use expanded URL for filename generation (so t.co links get real domain names)
   const filenameUrl = (result.success ? result.expandedUrl : undefined) || url;
 
@@ -309,8 +310,23 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
   // when the PDF is truly blank. X Articles (isXArticle === true) are full
   // essays and get the strict checks like other articles.
   const lenient = isXArticle === false;
-  const contentResult = await analyzePdfContent(result.pdfBuffer, { lenient });
+  let contentResult = await analyzePdfContent(result.pdfBuffer, { lenient });
   console.log(`PDF content analysis for ${url}: ${contentResult.charCount} chars, ${contentResult.pageCount} pages, ${contentResult.charsPerKb} chars/KB${lenient ? ' [lenient: tweet]' : ''}`);
+
+  // A capture flagged as an X Article (only via the Nitter article-stub retry)
+  // but with tweet-length content is almost always a mis-flagged short tweet:
+  // the stub heuristic false-fires on quote-tweets, and the X.com logged-out
+  // fallback shows limited content. Holding it to the long-form 500-char
+  // article minimum drops a real (short) bookmark. Re-check as a tweet; if that
+  // passes, save it as a post rather than failing.
+  if (!contentResult.passed && isXArticle === true) {
+    const asTweet = await analyzePdfContent(result.pdfBuffer, { lenient: true });
+    if (asTweet.passed) {
+      console.log(`Re-classified short "X Article" as tweet for ${url} (${asTweet.charCount} chars) — saving as post`);
+      contentResult = asTweet;
+      isXArticle = false; // tweet → "-post-" filename, not "-article-"
+    }
+  }
 
   if (!contentResult.passed) {
     // Save debug PDF before failing

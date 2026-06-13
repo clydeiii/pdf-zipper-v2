@@ -212,7 +212,28 @@ const SOCIAL_POST_PATTERNS = [
   // These phrases are X page chrome and don't appear in article copy.
   /\bpost\s+your\s+reply\b/i,
   /\brelevant\s+people\b/i,
+  // Logged-out x.com chrome — the article-stub fallback captures without a
+  // session, so the reply box / "Relevant people" sidebar never renders.
+  /\bdon'?t\s+miss\s+what'?s\s+happening\b/i,
+  /\bpeople\s+on\s+x\s+are\s+the\s+first\s+to\s+know\b/i,
 ];
+
+/**
+ * Minimum chars for a social-post capture to pass Check 1. A complete tweet
+ * capture (status text + page chrome) lands well above this; a chrome-only
+ * shell where the status itself failed to render stays below it and still
+ * fails. Tweets routed through Nitter don't need this (lenient mode), but
+ * the Nitter article-stub fallback re-captures from x.com in STRICT mode —
+ * a regular tweet that merely links to an X Article would otherwise be
+ * rejected by the 500-char article minimum (real case: 454-char complete
+ * tweet capture failed Check 1).
+ */
+const MIN_SOCIAL_POST_CHARS = 200;
+
+/** True when the text contains social-post page chrome (X/Mastodon capture). */
+function isSocialPostCapture(text: string): boolean {
+  return SOCIAL_POST_PATTERNS.some((pattern) => pattern.test(text));
+}
 
 /**
  * Returns true when the page itself declares it is legitimately short — a
@@ -224,9 +245,7 @@ const SOCIAL_POST_PATTERNS = [
  * safe against the false positives Check 2 was built to catch.
  */
 function isLegitimatelyShortPage(text: string): boolean {
-  for (const pattern of SOCIAL_POST_PATTERNS) {
-    if (pattern.test(text)) return true;
-  }
+  if (isSocialPostCapture(text)) return true;
   const readTime = extractAdvertisedReadTime(text);
   if (readTime && readTime.minutes < MIN_READ_TIME_MINUTES) return true;
   return false;
@@ -536,14 +555,21 @@ export async function analyzePdfContent(
     // Check 1: Very little text overall.
     // Lenient mode (Nitter tweet captures) only fails when truly blank —
     // a status with no replies legitimately has very little body text.
-    const minChars = options.lenient ? 1 : MIN_ARTICLE_CHARS;
+    // Social-post captures running in strict mode (direct x.com via the
+    // Nitter article-stub fallback) get the lower social floor: a complete
+    // tweet is shorter than MIN_ARTICLE_CHARS, but a chrome-only shell
+    // still fails.
+    const socialPost = isSocialPostCapture(normalizedText);
+    const minChars = options.lenient ? 1 : socialPost ? MIN_SOCIAL_POST_CHARS : MIN_ARTICLE_CHARS;
     if (charCount < minChars) {
       return {
         ...baseResult,
         passed: false,
         reason: options.lenient
           ? `PDF is blank (0 chars of text).`
-          : `PDF has only ${charCount} characters of text (minimum: ${MIN_ARTICLE_CHARS}). Content appears truncated.`,
+          : socialPost
+            ? `Social post capture has only ${charCount} characters of text (minimum: ${MIN_SOCIAL_POST_CHARS}). Status likely failed to render.`
+            : `PDF has only ${charCount} characters of text (minimum: ${MIN_ARTICLE_CHARS}). Content appears truncated.`,
       };
     }
 
