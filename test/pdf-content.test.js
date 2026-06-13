@@ -201,6 +201,25 @@ test('analyzePdfContent passes image-heavy direct X post capture (low density)',
   assert.equal(result.passed, true, `X post chrome should exempt size/density checks; got: ${result.reason}`);
 });
 
+test('analyzePdfContent passes short direct X tweet capture in strict mode (logged-out chrome)', async () => {
+  // Real case (job 14853): tweet linking an X Article got re-captured from
+  // x.com in strict mode via the Nitter article-stub fallback. Complete
+  // capture, 454 chars — must not fail the 500-char article minimum.
+  const text = 'unprompted @unpromptednews OpenAI threatens Anthropic with AI price war. Is it shooting itself in the foot? ChatGPT maker @OpenAI was once the undisputed leader of the AI industry, but many now consider that its rival @AnthropicAI has removed it from its throne. As the two companies race towards IPOs and a... 4:49 AM Jun 11, 2026 23.7K Views Article 4 1 Don\'t miss what\'s happening People on X are the first to know. Log in Sign up Post';
+  const pdf = await createPdfWithText(text);
+  const result = await analyzePdfContent(pdf);
+  assert.equal(result.passed, true, `complete tweet capture should pass; got: ${result.reason}`);
+});
+
+test('analyzePdfContent still fails chrome-only X shell (status did not render)', async () => {
+  // Only the logged-out chrome, no status body — below the social floor.
+  const text = 'Don\'t miss what\'s happening People on X are the first to know. Log in Sign up';
+  const pdf = await createPdfWithText(text);
+  const result = await analyzePdfContent(pdf);
+  assert.equal(result.passed, false);
+  assert.ok(result.reason?.includes('Social post'), `expected social-post floor reason, got: ${result.reason}`);
+});
+
 // --- Extracted text ---
 
 test('analyzePdfContent returns extracted text for downstream use', async () => {
