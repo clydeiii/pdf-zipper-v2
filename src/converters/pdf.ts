@@ -795,9 +795,23 @@ export async function convertUrlToPDF(
           const style = window.getComputedStyle(el);
           const position = style.position;
           if (position === 'fixed' || position === 'sticky') {
-            // Safety: don't remove <html>, <body>, or the main content root
             const tag = el.tagName.toLowerCase();
-            if (tag === 'html' || tag === 'body') continue;
+            if (tag === 'html' || tag === 'body') {
+              // Never remove html/body — but app-shell layouts (e.g. thenextweb
+              // sets body{position:fixed;overflow:hidden}) pin the document
+              // scrollHeight to the viewport, so page.pdf captures only the first
+              // screen and the article looks cut off after a few paragraphs.
+              // Return them to normal flow so the full content paginates. Inline
+              // !important beats the site's class-specific rule (a stylesheet
+              // override loses the specificity war).
+              const h = el as HTMLElement;
+              h.style.setProperty('position', 'static', 'important');
+              h.style.setProperty('height', 'auto', 'important');
+              h.style.setProperty('max-height', 'none', 'important');
+              h.style.setProperty('overflow', 'visible', 'important');
+              count++;
+              continue;
+            }
 
             (el as HTMLElement).remove();
             count++;
