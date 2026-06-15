@@ -952,6 +952,47 @@ export async function convertUrlToPDF(
       // Element removal failed, CSS fallback will handle it
     }
 
+    // Un-pin viewport-height scroll wrappers. SPA shells (e.g. Politico's Nuxt
+    // app: a `div.h-screen.flex.flex-col` Tailwind wrapper) pin html/body/#__nuxt
+    // to one viewport height (height:100vh) while the real article overflows to
+    // a far larger scrollHeight. innerText reads the whole article, but page.pdf
+    // paginates off the document height — so it captures only the first screen
+    // and the PDF looks cut off after a few paragraphs. The Phase-1 fix only
+    // handles position:fixed/sticky html/body; these wrappers are position:static
+    // and pinned purely by height, so it misses them. This is self-gating: it
+    // only fires when an element's content overflows its pinned box, which never
+    // happens on a normally-flowing article — so other sites pay nothing.
+    try {
+      const unpinned = await page.evaluate(() => {
+        const vh = window.innerHeight;
+        let count = 0;
+        // html + body + every block wrapper whose box is pinned ~one viewport
+        // tall while its content overflows well past it.
+        const candidates = [document.documentElement, document.body,
+          ...Array.from(document.querySelectorAll('body > *, body > * > *, #__nuxt, #__next, #root, #app'))];
+        for (const el of new Set(candidates)) {
+          if (!el) continue;
+          const h = el as HTMLElement;
+          const clientH = h.clientHeight;
+          const scrollH = h.scrollHeight;
+          // Pinned to ~viewport height but holding much taller content.
+          if (clientH > 0 && clientH <= vh + 50 && scrollH > clientH + 400) {
+            h.style.setProperty('height', 'auto', 'important');
+            h.style.setProperty('min-height', '0', 'important');
+            h.style.setProperty('max-height', 'none', 'important');
+            h.style.setProperty('overflow', 'visible', 'important');
+            count++;
+          }
+        }
+        return count;
+      });
+      if (unpinned > 0) {
+        console.log(`Un-pinned ${unpinned} viewport-height scroll wrapper(s) from ${url}`);
+      }
+    } catch {
+      // Un-pin failed — capture whatever rendered
+    }
+
     // For Twitter URLs via Nitter: check if this is an article stub
     // Nitter doesn't support X Articles and just shows a link like "x.com/i/article/..."
     if (isTwitterUrl(url) && targetUrl !== url) {
