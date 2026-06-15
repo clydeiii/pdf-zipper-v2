@@ -214,7 +214,11 @@ function parseMetadataResponse(
     const result = {
       title: typeof parsed.title === 'string' && parsed.title ? parsed.title : fallback.title,
       author: typeof parsed.author === 'string' && parsed.author ? parsed.author : null,
-      publication: typeof parsed.publication === 'string' && parsed.publication ? parsed.publication : fallback.publication,
+      // For a known publisher domain the URL is authoritative — override the
+      // LLM (small models mislabel publisher from in-text mentions). Otherwise
+      // take the LLM's guess, falling back to the hostname.
+      publication: knownPublicationForUrl(url)
+        || (typeof parsed.publication === 'string' && parsed.publication ? parsed.publication : fallback.publication),
       publishDate: typeof parsed.publishDate === 'string' && parsed.publishDate ? parsed.publishDate : null,
       language: typeof parsed.language === 'string' && parsed.language.length >= 2 ? parsed.language.slice(0, 5).toLowerCase() : 'en',
       summary: typeof parsed.summary === 'string' ? parsed.summary : '',
@@ -336,7 +340,57 @@ function extractTitleFromUrl(url: string): string {
   }
 }
 
+/**
+ * Authoritative domain → publication name map. The domain is ground truth, so
+ * for these the URL beats the LLM's guess (a small model reading "New York
+ * University" 22x in a Nature paper, primed by the prompt's lone "nytimes.com
+ * → The New York Times" example, mislabeled it "The New York Times"). Keyed by
+ * registrable domain; subdomains match via suffix.
+ */
+const PUBLICATION_BY_DOMAIN: Record<string, string> = {
+  'nature.com': 'Nature',
+  'science.org': 'Science',
+  'nytimes.com': 'The New York Times',
+  'wsj.com': 'The Wall Street Journal',
+  'ft.com': 'Financial Times',
+  'bloomberg.com': 'Bloomberg',
+  'washingtonpost.com': 'The Washington Post',
+  'economist.com': 'The Economist',
+  'reuters.com': 'Reuters',
+  'theatlantic.com': 'The Atlantic',
+  'newyorker.com': 'The New Yorker',
+  'wired.com': 'Wired',
+  'theverge.com': 'The Verge',
+  'arstechnica.com': 'Ars Technica',
+  'technologyreview.com': 'MIT Technology Review',
+  'axios.com': 'Axios',
+  'thenextweb.com': 'The Next Web',
+  'cnn.com': 'CNN',
+  'theinformation.com': 'The Information',
+  'semafor.com': 'Semafor',
+  'techcrunch.com': 'TechCrunch',
+  'arxiv.org': 'arXiv',
+  'nejm.org': 'The New England Journal of Medicine',
+  'thelancet.com': 'The Lancet',
+};
+
+/** Authoritative publication for a known publisher domain, else null. */
+export function knownPublicationForUrl(url: string): string | null {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, '').toLowerCase();
+    for (const [domain, pub] of Object.entries(PUBLICATION_BY_DOMAIN)) {
+      if (host === domain || host.endsWith('.' + domain)) return pub;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function extractPublicationFromUrl(url: string): string | null {
+  // Curated map first — authoritative for major publishers.
+  const known = knownPublicationForUrl(url);
+  if (known) return known;
   try {
     const hostname = new URL(url).hostname.replace(/^www\./, '');
     // Strip common TLDs to get a cleaner publication name
