@@ -882,6 +882,17 @@ export async function convertUrlToPDF(
           // Only collapse elements that are visually empty but take up space
           if (htmlEl.offsetHeight > 100 && htmlEl.children.length === 0 &&
               (htmlEl.textContent?.trim().length || 0) === 0) {
+            // Don't hide grid/flex ITEMS: an empty child of a grid/flex container
+            // is a layout participant (e.g. a scrollytelling timeline rail/spine in
+            // a CSS grid). display:none removes it from the track/item layout, which
+            // reflows its siblings — collapsing the content column to min-content
+            // (mid-word wrapping → hundreds of near-blank pages, e.g. europe2031.ai).
+            // A genuine leftover spacer from a removed navbar is a plain block child,
+            // not a grid/flex item, so this guard keeps the spacer-removal intent.
+            const parentDisplay = htmlEl.parentElement
+              ? window.getComputedStyle(htmlEl.parentElement).display : '';
+            if (parentDisplay === 'grid' || parentDisplay === 'inline-grid' ||
+                parentDisplay === 'flex' || parentDisplay === 'inline-flex') continue;
             htmlEl.style.display = 'none';
             count++;
           }
