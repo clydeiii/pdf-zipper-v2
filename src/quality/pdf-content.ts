@@ -127,6 +127,7 @@ const END_OF_ARTICLE_MARKERS = [
   /\bmost\s+popular\b/i,
   /\brecommended\s+(stories|articles|reading)\b/i,
   /\brelated\s+(stories|articles|posts)\b/i,
+  /\byou\s+might\s+also\s+like\b/i,        // Condé Nast (Wired, Vogue, GQ, …) related-content header
 ];
 
 /** Char index before which an end-of-article marker is suspicious (= truncation) */

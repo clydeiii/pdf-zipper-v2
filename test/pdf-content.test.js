@@ -239,3 +239,30 @@ test('analyzePdfContent passes gracefully on corrupted PDF', async () => {
   assert.equal(result.passed, true);
   assert.ok(result.reason?.includes('parsing failed'));
 });
+
+test('flags Condé Nast "You Might Also Like" stealth paywall (Wired truncation)', async () => {
+  // Headline + lede + 1 paragraph, then the related-content widget appears early.
+  const text =
+    "'Dangerous' AI Models Are Coming No Matter What. " +
+    "The US government crackdown on Anthropic hides a glaring truth. " +
+    "LATE LAST WEEK, Anthropic took its new Claude models offline following a " +
+    "United States government export-control directive barring any foreign national " +
+    "from using the services. The company has been in talks with the White House " +
+    "since Friday but has yet to secure an agreement to reinstate the offerings. " +
+    filler(250) +  // push the marker past the 300-char floor, like the real capture (char ~907)
+    " You Might Also Like " +
+    "In your inbox the week's biggest tech news. " + filler(800);
+  const pdf = await createPdfWithText(text);
+  const r = await analyzePdfContent(pdf);
+  assert.equal(r.passed, false);
+  assert.match(r.reason || '', /paywall/i);
+});
+
+test('does NOT flag a full article that ends with "You Might Also Like" past the body', async () => {
+  // A complete long article: the related-content header lands well past the
+  // truncation window, so it must NOT be treated as a paywall.
+  const text = filler(6000) + ' You Might Also Like ' + filler(500);
+  const pdf = await createPdfWithText(text, { pageCount: 4 });
+  const r = await analyzePdfContent(pdf);
+  assert.equal(r.passed, true);
+});
