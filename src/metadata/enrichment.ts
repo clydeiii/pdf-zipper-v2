@@ -211,8 +211,10 @@ function parseMetadataResponse(
 
     const parsed = JSON.parse(jsonMatch[0]);
 
+    const llmTitle = typeof parsed.title === 'string' && parsed.title ? parsed.title : fallback.title;
     const result = {
-      title: typeof parsed.title === 'string' && parsed.title ? parsed.title : fallback.title,
+      // Page headline is ground truth; let the LLM only trim it, never reword it.
+      title: reconcileTitle(llmTitle, pageTitle, knownPublicationForUrl(url)),
       author: typeof parsed.author === 'string' && parsed.author ? parsed.author : null,
       // For a known publisher domain the URL is authoritative — override the
       // LLM (small models mislabel publisher from in-text mentions). Otherwise
@@ -338,6 +340,58 @@ function extractTitleFromUrl(url: string): string {
   } catch {
     return 'Untitled';
   }
+}
+
+/** Significant words of a title: lowercase alphanumerics ≥4 chars, sans common stopwords. */
+const TITLE_STOPWORDS = new Set([
+  'this', 'that', 'with', 'from', 'into', 'about', 'after', 'then', 'than',
+  'what', 'when', 'will', 'your', 'their', 'have', 'been', 'them', 'they',
+  'which', 'while', 'were', 'over', 'more', 'most', 'some', 'such', 'only',
+]);
+function significantTitleWords(s: string): string[] {
+  return (s.toLowerCase().replace(/[’']/g, "'").match(/[a-z0-9]+/g) || [])
+    .filter((w) => w.length >= 4 && !TITLE_STOPWORDS.has(w));
+}
+
+/** Strip a trailing " - Publication" / " | Publication" site-name suffix from a page title. */
+function stripPublicationSuffix(pageTitle: string, publication: string | null): string {
+  let t = pageTitle.trim();
+  if (publication) {
+    // e.g. "Headline - The Washington Post" → "Headline". Only " - " / " | " /
+    // " : " separators (regular hyphen/pipe/colon) — NOT em/en dashes, which
+    // headlines themselves use ("trust — and then its flagship product").
+    const re = new RegExp(`\\s*[-|:]\\s*${publication.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i');
+    t = t.replace(re, '').trim();
+  }
+  return t || pageTitle.trim();
+}
+
+/**
+ * The page headline is ground truth for the title; a small LLM should only ever
+ * TRIM it (drop the site name), never reword it. When the model introduces a
+ * significant word that isn't in the real page title, it has paraphrased —
+ * classically by splicing the lede's subject into the headline (e.g. WaPo's
+ * "How Anthropic lost…" became "Trump administration lost…"). In that case fall
+ * back to the page title itself. Only validates when the page title is a real
+ * headline (≥3 significant words); otherwise (junk/generic titles) trust the LLM.
+ */
+export function reconcileTitle(llmTitle: string, pageTitle: string | undefined, publication: string | null): string {
+  if (!pageTitle) return llmTitle;
+  const pageWords = new Set(significantTitleWords(pageTitle));
+  if (pageWords.size < 3) return llmTitle; // page title too thin to trust as headline
+  const llmWords = significantTitleWords(llmTitle);
+  if (llmWords.length === 0) return stripPublicationSuffix(pageTitle, publication);
+  const introduced = llmWords.filter((w) => !pageWords.has(w));
+  if (introduced.length > 0) {
+    console.log(JSON.stringify({
+      event: 'enrichment_title_diverged',
+      llmTitle, pageTitle, introduced,
+      action: 'use_page_title',
+      timestamp: new Date().toISOString(),
+    }));
+    return stripPublicationSuffix(pageTitle, publication);
+  }
+  return llmTitle;
 }
 
 /**

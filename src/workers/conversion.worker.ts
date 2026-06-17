@@ -131,7 +131,7 @@ async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Pro
     console.log(`[archive-fallback] Captured snapshot ${arch.snapshotUrl} (${arch.extractedText.length} chars)`);
     let enrichedMetadata: EnrichedMetadata | undefined;
     try {
-      enrichedMetadata = await enrichDocumentMetadata(arch.extractedText, target, jobTitle);
+      enrichedMetadata = await enrichDocumentMetadata(arch.extractedText, target, jobTitle || arch.pageTitle);
     } catch { /* non-fatal */ }
     const pdfPath = await savePdfToWeeklyBin(arch.pdfBuffer, {
       url: target,

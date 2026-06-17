@@ -101,3 +101,42 @@ test('summary ghost-name: passes when name token in title only', () => {
   const hay = "...transcript body without the name...\nhow anthropic uses claude fable 5 with mike krieger\nhttps://youtube.com/watch?v=x".toLowerCase();
   assert.equal(unsupportedSummaryName("Mike Krieger explains the workflow shift.", hay), null);
 });
+
+import { reconcileTitle } from '../dist/metadata/enrichment.js';
+
+test('reconcileTitle: falls back to page headline when LLM swaps the subject', () => {
+  const out = reconcileTitle(
+    'Trump administration lost the White House’s trust — and then its flagship product',
+    'How Anthropic lost the White House’s trust — and then its flagship product - The Washington Post',
+    'The Washington Post'
+  );
+  assert.equal(out, 'How Anthropic lost the White House’s trust — and then its flagship product');
+});
+
+test('reconcileTitle: keeps a faithful LLM trim (page-title subset)', () => {
+  const out = reconcileTitle(
+    'How Anthropic lost the White House’s trust — and then its flagship product',
+    'How Anthropic lost the White House’s trust — and then its flagship product - The Washington Post',
+    'The Washington Post'
+  );
+  assert.equal(out, 'How Anthropic lost the White House’s trust — and then its flagship product');
+});
+
+test('reconcileTitle: trusts LLM when page title is thin/generic', () => {
+  const out = reconcileTitle('A Real Extracted Headline About Cats', 'Home | Acme', 'Acme');
+  assert.equal(out, 'A Real Extracted Headline About Cats');
+});
+
+test('reconcileTitle: trusts LLM when no page title', () => {
+  const out = reconcileTitle('A clean extracted headline', undefined, null);
+  assert.equal(out, 'A clean extracted headline');
+});
+
+test('reconcileTitle: preserves em-dash in headline (only strips site suffix)', () => {
+  const out = reconcileTitle(
+    'Completely Different Words Here Replacing Everything Original',
+    'Real Headline — with an em-dash clause | Example News',
+    'Example News'
+  );
+  assert.equal(out, 'Real Headline — with an em-dash clause');
+});

@@ -59,7 +59,7 @@ const WALL_MARKERS: RegExp[] = [
 ];
 
 export type ArchiveResult =
-  | { ok: true; pdfBuffer: Buffer; extractedText: string; snapshotUrl: string }
+  | { ok: true; pdfBuffer: Buffer; extractedText: string; snapshotUrl: string; pageTitle?: string }
   | { ok: false; reason: 'not_archived' | 'broken' | 'wall' | 'error'; detail?: string };
 
 /** Strip query + fragment for the archive.is lookup (matches the archive.is button). */
@@ -154,7 +154,9 @@ export async function captureViaArchive(originalUrl: string): Promise<ArchiveRes
         // page.pdf here produced near-empty PDFs, so delegate.
         const rendered = await convertUrlToPDF(snap);
         if (rendered.success && rendered.pdfBuffer.length >= 5000) {
-          return { ok: true, pdfBuffer: rendered.pdfBuffer, extractedText: text, snapshotUrl: snap };
+          // Carry the snapshot's real headline so enrichment can anchor the
+          // title to it (archive.today preserves the original page <title>).
+          return { ok: true, pdfBuffer: rendered.pdfBuffer, extractedText: text, snapshotUrl: snap, pageTitle: rendered.pageTitle };
         }
         // Render came back blank despite good snapshot text — try the next one.
         continue;
