@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      width: 260px; margin: 0; font: 13px/1.4 -apple-system, system-ui, sans-serif;
+      background: #fff; color: #1a1a1a;
+    }
+    @media (prefers-color-scheme: dark) {
+      body { background: #1e1e1e; color: #eaeaea; }
+      .row { border-color: #333 !important; }
+      .host { color: #9ad !important; }
+    }
+    header {
+      display: flex; align-items: center; gap: 8px; padding: 12px 14px;
+      background: linear-gradient(135deg, #26c6da, #2176c7); color: #fff;
+    }
+    header img { width: 24px; height: 24px; }
+    header b { font-size: 15px; }
+    header span { font-size: 11px; opacity: .9; }
+    .row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 11px 14px; border-bottom: 1px solid #eee;
+    }
+    .row label { cursor: pointer; }
+    .host { color: #2176c7; font-weight: 600; word-break: break-all; }
+    .count { padding: 11px 14px; font-size: 12px; opacity: .8; }
+    .count b { font-size: 16px; opacity: 1; }
+    /* iOS-style switch */
+    .sw { position: relative; width: 38px; height: 22px; flex: none; }
+    .sw input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute; inset: 0; background: #bbb; border-radius: 22px;
+      transition: .15s;
+    }
+    .slider::before {
+      content: ""; position: absolute; height: 16px; width: 16px; left: 3px; top: 3px;
+      background: #fff; border-radius: 50%; transition: .15s;
+    }
+    .sw input:checked + .slider { background: #2176c7; }
+    .sw input:checked + .slider::before { transform: translateX(16px); }
+  </style>
+</head>
+<body>
+  <header>
+    <img src="icons/icon48.png" alt="" />
+    <div>
+      <b>DeCraft</b><br /><span>strips tracking cruft from links</span>
+    </div>
+  </header>
+
+  <div class="row">
+    <label for="globalToggle">Enabled everywhere</label>
+    <span class="sw"><input type="checkbox" id="globalToggle" /><span class="slider"></span></span>
+  </div>
+
+  <div class="row">
+    <label for="siteToggle">Active on <span class="host" id="hostName">this site</span></label>
+    <span class="sw"><input type="checkbox" id="siteToggle" /><span class="slider"></span></span>
+  </div>
+
+  <div class="count">Cleaned <b id="count">0</b> links on this tab.</div>
+
+  <script src="cleaner.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

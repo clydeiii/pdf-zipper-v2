@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "DeCruft",
+  "version": "1.1.0",
+  "description": "Strips tracking & campaign cruft (utm_*, fbclid, newsletter junk, ...) from links so they open in their clean, canonical form — including open-in-new-tab.",
+  "permissions": ["storage"],
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["cleaner.js", "content.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    },
+    "default_title": "DeCruft — clean tracking junk from links"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}
