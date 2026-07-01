@@ -23,7 +23,7 @@
 
 import archiver from 'archiver';
 import * as fs from 'node:fs';
-import { mkdir, readdir, stat, unlink, rename, copyFile } from 'node:fs/promises';
+import { mkdir, readdir, stat, unlink, rename, copyFile, link } from 'node:fs/promises';
 import * as path from 'node:path';
 import { env } from '../config/env.js';
 import { sendDiscordNotification } from '../notifications/discord.js';
@@ -207,7 +207,14 @@ export async function buildCapturesBundle(): Promise<BundleResult> {
   });
 
   await rename(tmpPath, finalPath);
-  await copyFile(finalPath, latestPath);
+  // Hardlink -latest to the dated bundle (same dir, same fs) so the multi-GB
+  // snapshot isn't stored twice; fall back to a copy if the fs refuses links.
+  await unlink(latestPath).catch(() => {});
+  try {
+    await link(finalPath, latestPath);
+  } catch {
+    await copyFile(finalPath, latestPath);
+  }
 
   const bytesZip = (await stat(finalPath)).size;
   await pruneOldBundles(capturesDir);

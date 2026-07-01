@@ -130,7 +130,7 @@ docker compose down
 # Dev (non-Docker)
 npm run dev       # hot reload
 npm run build
-npm test          # 53 unit tests
+npm test          # 118 unit tests
 
 # Endpoints
 # http://localhost:3002              Web UI
