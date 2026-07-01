@@ -172,5 +172,5 @@ curl -X POST http://localhost:3002/api/jobs \
   vision capability (empty responses on image input), and the primary use of
   `OLLAMA_MODEL=gemma4:e4b` is vision quality-scoring. Adding an MLX copy alongside
   the GGUF one also doubles resident RAM (~18.5 GB) and collides with parakeet on
-  the 24 GB Mac. Full benchmarks + rationale: `OLLAMA_MLX_FINDINGS.md`.
+  the 24 GB Mac.
 - mac.mini's Ollama was upgraded to **0.31.1** (faster Gemma 4 MLX) on this date.
