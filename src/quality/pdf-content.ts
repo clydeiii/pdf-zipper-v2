@@ -88,7 +88,12 @@ const MIN_CHARS_PER_PAGE_BYPASS = 400;
  */
 const ERROR_PAGE_PATTERNS = [
   /page\s*(can'?t|cannot|could\s*n[o']t)\s*be\s*found/i,
-  /404\s*(error|not\s*found)?/i,
+  // Require an error suffix ("404 Not Found" / "404 Error") — a bare "404"
+  // appears legitimately as an engagement count (tweet likes/views), a price,
+  // or a year, and was matching here because the suffix group was optional.
+  // "Error 404" is still caught by /error\s*404/i below; "Page not found" by
+  // the pattern on the next line.
+  /\b404\b\s*(error|not\s*found)/i,
   /page\s*not\s*found/i,
   /this\s*page\s*(doesn'?t|does\s*not)\s*exist/i,
   /sorry,?\s*(we\s*)?(can'?t|couldn'?t)\s*find/i,
@@ -547,7 +552,12 @@ export async function analyzePdfContent(
           return {
             ...baseResult,
             passed: false,
-            reason: `Reading-time mismatch: page advertises "${readTime.badge}" but body has only ${charCount} chars (expected ≥${expectedMinChars}). Likely paywall fade.`,
+            // "Paywall detected" wording is load-bearing: classifyFailureMessage
+            // keys on it to class this as paywall → archive.today fallback (same
+            // as Check 0.9). A reading-time fade is a silent paywall (Economist,
+            // Medium); archive.today often holds the full text, so it must be a
+            // fallback candidate rather than a suspected quality false-negative.
+            reason: `Reading-time mismatch: page advertises "${readTime.badge}" but body has only ${charCount} chars (expected ≥${expectedMinChars}). Paywall detected (likely paywall fade).`,
           };
         }
       }

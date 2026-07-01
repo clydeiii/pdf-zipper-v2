@@ -386,6 +386,12 @@ async function applyPrivacyFilter(page: import('playwright').Page): Promise<void
   console.log(`Applying privacy filter for ${terms.length} terms`);
 
   await page.evaluate((filterTerms: string[]) => {
+    // Guard: createTreeWalker throws "parameter 1 is not of type 'Node'" when
+    // document.body is null (some pages — e.g. certain Forbes renders — briefly
+    // have no <body> at the moment this runs, or the doc was replaced). An
+    // unhandled throw here aborts the whole conversion, so bail cleanly instead.
+    if (!document.body) return;
+
     // Find all text nodes and check for matches
     const walker = document.createTreeWalker(
       document.body,
@@ -724,16 +730,63 @@ export async function convertUrlToPDF(
     // "what to read next"). If the body is still article-shell-thin, wait for
     // it to grow before capturing. Only runs when thin, so real articles
     // (already > threshold) pay nothing.
+    //
+    // Measure the ARTICLE CONTAINER (<article>/<main>), not whole-body innerText.
+    // Axios renders headline + hero + a full "What to read next" related-content
+    // rail + footer even when the story body never hydrates — that chrome alone
+    // exceeds the whole-body threshold, so a whole-body gate never fired and the
+    // re-arm below was skipped (the body stayed empty and the quality check
+    // rejected it as truncated). The related/footer chrome lives OUTSIDE
+    // <article>/<main>, so scoping the measurement to that container exposes the
+    // empty body. Falls back to document.body when no such container exists, so
+    // sites without semantic <article>/<main> keep the original behaviour.
+    const ARTICLE_LEN_FN = () => {
+      const main = document.querySelector('article') || document.querySelector('main');
+      return (main ?? document.body)?.innerText.trim().length ?? 0;
+    };
     try {
       const SHELL_THRESHOLD = 2500;
-      const len0 = await page.evaluate(() => document.body?.innerText.trim().length ?? 0);
+      const len0 = await page.evaluate(ARTICLE_LEN_FN);
       if (len0 < SHELL_THRESHOLD) {
         await page.waitForFunction(
-          (prev) => (document.body?.innerText.trim().length ?? 0) > prev + 500,
+          (prev) => {
+            const main = document.querySelector('article') || document.querySelector('main');
+            return ((main ?? document.body)?.innerText.trim().length ?? 0) > prev + 500;
+          },
           len0,
           { timeout: 8000 }
-        ).catch(() => { /* body didn't grow — capture what rendered */ });
+        ).catch(() => { /* body didn't grow — try re-arming lazy loaders below */ });
         await page.waitForTimeout(1500);
+
+        // Re-scroll retries. Some SPAs (axios) hydrate the article body only when
+        // its container scrolls into view via an intersection observer, and a
+        // single fast scroll pass can outrun (or have its XHR dropped before) that
+        // fetch — leaving just the page shell (headline + hero + "what to read
+        // next"), which the quality check then correctly rejects as truncated.
+        // Re-arm the observers by scrolling bottom→middle→top a few more rounds,
+        // re-checking growth each round. Guarded on still-shell-thin, so complete
+        // articles never enter this loop and pay nothing.
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const len = await page.evaluate(ARTICLE_LEN_FN);
+          if (len >= SHELL_THRESHOLD) break;
+          await page.evaluate(`(async () => {
+            const delay = ms => new Promise(r => setTimeout(r, ms));
+            window.scrollTo(0, document.documentElement.scrollHeight);
+            await delay(400);
+            window.scrollTo(0, Math.floor(document.documentElement.scrollHeight / 2));
+            await delay(400);
+            window.scrollTo(0, 0);
+          })()`).catch(() => { /* scroll failed — keep trying */ });
+          await page.waitForFunction(
+            (prev) => {
+              const main = document.querySelector('article') || document.querySelector('main');
+              return ((main ?? document.body)?.innerText.trim().length ?? 0) > prev + 500;
+            },
+            len,
+            { timeout: 5000 }
+          ).catch(() => { /* still thin — next round, or give up after the loop */ });
+          await page.waitForTimeout(1000);
+        }
       }
     } catch {
       // Settle check failed — continue with PDF generation anyway
@@ -759,8 +812,14 @@ export async function convertUrlToPDF(
       } catch { /* ignore */ }
     }
 
-    // Apply privacy filtering (hides elements containing configured terms)
-    await applyPrivacyFilter(page);
+    // Apply privacy filtering (hides elements containing configured terms).
+    // Non-fatal: a throw inside the in-page evaluate (e.g. createTreeWalker on a
+    // missing body) must not abort an otherwise-good capture.
+    try {
+      await applyPrivacyFilter(page);
+    } catch (privacyError) {
+      console.warn(`Privacy filter failed for ${url}: ${privacyError instanceof Error ? privacyError.message : privacyError}`);
+    }
 
     // Remove ALL fixed/sticky positioned elements (cookie banners, newsletter popups,
     // dark/light toggles, floating share buttons, chat widgets, "back to top", etc.)
@@ -1446,9 +1505,28 @@ export async function convertUrlToPDF(
       preferCSSPageSize: false,
       scale: 0.7
     };
-    let pdfBuffer = Buffer.from(await withTimeout(
-      page.pdf(pdfOptions), pdfTimeout, 'PDF generation'
-    ));
+    let pdfBuffer: Buffer;
+    try {
+      pdfBuffer = Buffer.from(await withTimeout(
+        page.pdf(pdfOptions), pdfTimeout, 'PDF generation'
+      ));
+    } catch (printError) {
+      // Chromium's printToPDF can transiently fail ("Protocol error
+      // (Page.printToPDF): Printing failed") on heavy/animated SPAs — the
+      // renderer is mid-frame (running CSS animations, an oversized canvas) when
+      // the print snapshot is requested. Let the page settle and retry once
+      // before giving up; a one-shot renderer hiccup shouldn't fail the whole job.
+      const msg = printError instanceof Error ? printError.message : String(printError);
+      if (/printToPDF|Printing failed/i.test(msg)) {
+        console.log(`printToPDF failed for ${url} (${msg}); settling and retrying once...`);
+        await page.waitForTimeout(1500);
+        pdfBuffer = Buffer.from(await withTimeout(
+          page.pdf(pdfOptions), pdfTimeout, 'PDF generation (retry)'
+        ));
+      } else {
+        throw printError;
+      }
+    }
 
     // Blank-print fallback: a near-empty PDF off a page whose screenshot
     // clearly rendered means print styling hid a content wrapper (the
