@@ -202,6 +202,37 @@ function isSubstackUrl(url: string): boolean {
 }
 
 /**
+ * Rewrite Substack reader-wrapper URLs to the canonical publication URL.
+ *
+ * Share links from the Substack iOS/Android app and the web reader use the
+ * `open.substack.com/pub/<PUB>/p/<SLUG>` form. That host serves Substack's
+ * heavy reader SPA (floating audio player, an infinite "recommendations" feed,
+ * comment rail) rather than the plain article page — its runaway scrollHeight
+ * and continuous JS make Chromium's printToPDF hang until PDF_TIMEOUT_MS
+ * (real case: a lironshapira post timed out at 90s in page.pdf()). The
+ * canonical `https://<PUB>.substack.com/p/<SLUG>` renders as a normal article
+ * that paginates cleanly. Also yields better filenames + cookie matching, same
+ * rationale as short-URL expansion. Returns the original URL if not a reader link.
+ */
+function rewriteSubstackReaderUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname.toLowerCase() !== 'open.substack.com') return url;
+
+    // /pub/<PUB>/p/<SLUG>  (PUB is the publication subdomain)
+    const match = parsed.pathname.match(/^\/pub\/([^/]+)\/p\/([^/]+)\/?$/);
+    if (!match) return url;
+
+    const [, pub, slug] = match;
+    const canonical = `https://${pub}.substack.com/p/${slug}${parsed.search}`;
+    console.log(`Rewriting Substack reader URL: ${url} → ${canonical}`);
+    return canonical;
+  } catch {
+    return url;
+  }
+}
+
+/**
  * Clean Substack URLs by removing email tracking parameters
  * These params (especially 'r') cause "I've Shared This With Myself" popups
  */
@@ -516,10 +547,13 @@ export async function convertUrlToPDF(
     // Expand short URLs (t.co, apple.news, bit.ly, etc.) to their final destination
     const expandedUrl = await expandShortUrl(url);
 
+    // Rewrite Substack reader-wrapper links (open.substack.com) to the canonical
+    // publication URL — the reader SPA hangs printToPDF (see fn comment).
     // Clean Substack URLs (remove tracking params that cause popups)
     // Rewrite Twitter/X URLs to Nitter for better capture
     // Rewrite Datawrapper URLs to direct CDN embed (avoids iframe + chrome)
-    const cleanedUrl = cleanSubstackUrl(expandedUrl);
+    const substackUrl = rewriteSubstackReaderUrl(expandedUrl);
+    const cleanedUrl = cleanSubstackUrl(substackUrl);
     const datawrapperUrl = rewriteDatawrapperUrl(cleanedUrl);
     const targetUrl = rewriteTwitterUrl(datawrapperUrl);
 
