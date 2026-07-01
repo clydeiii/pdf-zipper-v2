@@ -11,6 +11,10 @@ services:
       - NODE_ENV=production
       - PORT=3002
 
+      # Match host TZ so the in-container nightly captures zipper fires at the
+      # same local midnight as the host-cron benchmarks harvester.
+      - TZ=America/New_York
+
       # Redis (external container with processing history)
       - REDIS_HOST=pdfzipper-redis
       - REDIS_PORT=6379
@@ -49,10 +53,10 @@ services:
       # Karakeep API for retention cleanup (delete bookmarks older than KARAKEEP_RETENTION_DAYS)
       - KARAKEEP_API_BASE=http://karakeep-web-1:3000
       - KARAKEEP_API_TOKEN=${KARAKEEP_API_TOKEN:-}
-      - KARAKEEP_RETENTION_DAYS=90
+      - KARAKEEP_RETENTION_DAYS=14
 
       # pdf-zipper-v2 retention (delete data/media/YYYY-WWW dirs older than RETENTION_DAYS)
-      - RETENTION_DAYS=90
+      - RETENTION_DAYS=30
 
       # Nitter for Twitter URLs (container name on proxy-network)
       - NITTER_HOST=http://nitter:8080

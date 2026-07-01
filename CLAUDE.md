@@ -83,6 +83,13 @@ Video transcripts (`src/media/video-enrichment.ts`) must also run through `forma
 ### WinAnsi Sanitization
 Podcast/transcript PDFs use pdf-lib StandardFonts (WinAnsi-only). LLM output contains invisible chars (U+2060 Word Joiner, zero-width spaces, smart quotes). `sanitizeForWinAnsi` in `src/podcasts/pdf-generator.ts` must stay — removing it breaks PDF generation on certain transcripts.
 
+### Nightly Static Bundles (`/api/file/...`)
+Two nightly ZIPs are published as stable static URLs (served by the generic `serve.ts` `/file/*` route straight from DATA_DIR — no dedicated route, no cache):
+- **`/api/file/captures/captures-latest.zip`** — every capture (PDF/MP3/MP4/transcript) with mtime in the last 24h, structured `{ISO-week}/{type}/{file}` with a self-describing `MANIFEST.txt`. Built in-process by `src/maintenance/captures-zipper.ts` (`setTimeout` to next midnight, then `setInterval` 24h), registered in `index.ts` alongside the other maintenance timers. Keeps 7 dated bundles (`captures-YYYY-MM-DD.zip`); `-latest` is never pruned. Tunables: `CAPTURES_ZIP_ENABLED`, `CAPTURES_ZIP_HOUR` (default 0), `CAPTURES_WINDOW_HOURS` (24), `CAPTURES_ZIP_RETENTION_DAYS` (7).
+- **`/api/file/benchmarks/benchmarks-latest.zip`** — built by the **external** `~/benchmark-harvester` project (host cron), NOT this repo. This repo only serves it. Retention is `BENCH_RETENTION=7` in that repo's `run.sh`.
+
+Both fire at **local midnight** for a clean as-of-midnight snapshot. Alignment depends on `TZ=America/New_York` in docker-compose (host cron is already host-local); without the pinned TZ the in-container captures job would fire at UTC midnight instead.
+
 ### Self-Healing Fix System
 - Users flag false positives (saved PDF that shouldn't have) / false negatives (failed URL that should've succeeded) via "Fix Selected"
 - Every 5min (offset 2.5min from feed polling) pending items are processed by headless Claude CLI
@@ -158,3 +165,12 @@ curl -X POST http://localhost:3002/api/jobs \
 - **undici default 5min timeout** — whisper/parakeet calls use a custom `Agent` with 4hr timeouts (6hr podcasts exist); don't revert to default fetch
 - **Chrome extension debugger conflict** — extension uses `chrome.debugger` + `Page.printToPDF`; conflicts with Matter, React/Redux DevTools, Lighthouse, claude-in-chrome, and other extensions that claim the debugger
 - **Parakeet launchd PATH** — must include `/opt/homebrew/bin` (Apple Silicon Homebrew) for ffmpeg
+
+## Ollama MLX vs GGUF (2026-06-30)
+
+- **Keep gemma4 on GGUF; do NOT switch to `gemma4:*-mlx`.** `gemma4:e4b-mlx` has no
+  vision capability (empty responses on image input), and the primary use of
+  `OLLAMA_MODEL=gemma4:e4b` is vision quality-scoring. Adding an MLX copy alongside
+  the GGUF one also doubles resident RAM (~18.5 GB) and collides with parakeet on
+  the 24 GB Mac. Full benchmarks + rationale: `OLLAMA_MLX_FINDINGS.md`.
+- mac.mini's Ollama was upgraded to **0.31.1** (faster Gemma 4 MLX) on this date.

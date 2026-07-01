@@ -47,6 +47,9 @@ import { startRetentionSweeper, stopRetentionSweeper } from './maintenance/reten
 
 // Import Karakeep cleaner (deletes Karakeep bookmarks older than KARAKEEP_RETENTION_DAYS via its API)
 import { startKarakeepCleaner, stopKarakeepCleaner } from './maintenance/karakeep-cleaner.js';
+
+// Import nightly captures zipper (bundles the last 24h of captures into captures-latest.zip)
+import { startCapturesZipper, stopCapturesZipper } from './maintenance/captures-zipper.js';
 import type { Server } from 'node:http';
 
 console.log(`Environment: ${env.NODE_ENV}`);
@@ -102,6 +105,7 @@ async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
   try {
     stopKarakeepCleaner();
     stopRetentionSweeper();
+    stopCapturesZipper();
 
     console.log('Closing HTTP server...');
     await closeHttpServer();
@@ -170,6 +174,9 @@ async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
 
   // Start daily Karakeep cleaner (delete Karakeep bookmarks older than KARAKEEP_RETENTION_DAYS)
   startKarakeepCleaner();
+
+  // Start nightly captures zipper (bundle last 24h of captures → captures-latest.zip)
+  startCapturesZipper();
 
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
   process.on('SIGINT', () => gracefulShutdown('SIGINT'));
