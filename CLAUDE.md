@@ -100,7 +100,7 @@ Both fire at **local midnight** for a clean as-of-midnight snapshot. Alignment d
 ### Self-Healing Fix System
 - Users flag false positives (saved PDF that shouldn't have) / false negatives (failed URL that should've succeeded) via "Fix Selected"
 - Every 5min (offset 2.5min from feed polling) pending items are processed by headless Claude CLI
-- Write boundary: only `src/quality/*` and `src/converters/*` — don't broaden this
+- Write boundary: `src/quality/*`, `src/converters/*`, `src/workers/*`, `src/utils/*`, `src/fix/*` — but NEVER `src/workers/fix.worker.ts` (the gate must not be editable by the batches it judges). Batches land on `fix/batch-*` branches for human review; they never auto-merge, which is why the broad boundary is safe
 - `FIX_ENABLED=true` + `CLAUDE_CLI_PATH` required
 
 ## Docker Deployment

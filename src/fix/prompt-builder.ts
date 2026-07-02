@@ -53,7 +53,10 @@ The user has flagged the following items as incorrectly classified. Your job is 
 You are authorized to modify files within these boundaries:
 - ✅ src/quality/* - Quality scoring logic
 - ✅ src/converters/* - PDF conversion logic
+- ✅ src/workers/* - Job pipeline workers (blank-page checks, routing, save flow) — EXCEPT src/workers/fix.worker.ts, which is off-limits
+- ✅ src/utils/* - Shared pipeline helpers (save-pdf, filenames, metadata embedding)
 - ✅ Run tests (npm test) to verify changes
+- ❌ DO NOT modify src/workers/fix.worker.ts (the self-heal gate that judges your changes)
 - ❌ DO NOT modify config files (.env, docker-compose.yml)
 - ❌ DO NOT modify package.json
 - ❌ DO NOT make network requests

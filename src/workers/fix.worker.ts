@@ -119,9 +119,14 @@ function parseGitStatusPaths(stdout: string): string[] {
 }
 
 function isAllowedFixPath(filePath: string): boolean {
+  // The gate itself stays out of reach: a batch must not be able to weaken
+  // the boundary/build/commit logic that judges it.
+  if (filePath === 'src/workers/fix.worker.ts') return false;
   return (
     filePath.startsWith('src/quality/') ||
     filePath.startsWith('src/converters/') ||
+    filePath.startsWith('src/workers/') ||
+    filePath.startsWith('src/utils/') ||
     filePath.startsWith('src/fix/')
   );
 }
