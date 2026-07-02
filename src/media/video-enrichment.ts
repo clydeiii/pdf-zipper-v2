@@ -282,7 +282,12 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
   // derived name for ~15 min while transcription runs. Pays a ~2-3s yt-dlp
   // latency cost up front. Best-effort: any failure keeps the original path.
   const ytMeta = await fetchYouTubeMetadata(item.url);
-  const earlyBase = buildVideoBaseName(ytMeta?.channel, item.title || ytMeta?.title);
+  // X videos keep the x.com-{account}-post-{id} filename convention — the
+  // channel-title rename is for YouTube/Vimeo only (ytMeta now resolves for
+  // X URLs too, but only to source post text/channel metadata, not naming).
+  const earlyBase = isTwitterUrl(item.url)
+    ? null
+    : buildVideoBaseName(ytMeta?.channel, item.title || ytMeta?.title);
   if (earlyBase) {
     const dir = path.dirname(mp4Path);
     const newMp4Path = path.join(dir, `${earlyBase}.mp4`);

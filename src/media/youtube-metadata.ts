@@ -13,6 +13,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import { env } from '../config/env.js';
+import { isTwitterUrl } from '../utils/save-pdf.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -107,8 +108,10 @@ async function runYtDlp(url: string, cookiesFile?: string): Promise<YouTubeMetad
     // not available" when YouTube returns only storyboard formats (bot-detect
     // / restricted videos). Pinning a guaranteed-present format lets the JSON
     // extraction succeed even when no real streams are exposed. --skip-download
-    // means nothing is actually fetched.
-    '-f', 'mhtml/bestaudio/best',
+    // means nothing is actually fetched. The final `best*` matches video-only
+    // formats too — silent X clips have no audio in ANY format, so plain
+    // `best` (which requires muxed audio+video) errors out on them.
+    '-f', 'mhtml/bestaudio/best/best*',
   ];
   if (cookiesFile) args.push('--cookies', cookiesFile);
   args.push(url);
@@ -118,7 +121,10 @@ async function runYtDlp(url: string, cookiesFile?: string): Promise<YouTubeMetad
       timeout: YT_DLP_TIMEOUT_MS,
       maxBuffer: 8 * 1024 * 1024,
     });
-    const json = JSON.parse(stdout);
+    // Multi-video tweets dump one JSON object per line even with
+    // --no-playlist; uploader/description are identical across items, so the
+    // first line is enough.
+    const json = JSON.parse(stdout.trim().split('\n')[0]);
     return {
       channel: typeof json.channel === 'string' ? json.channel : (typeof json.uploader === 'string' ? json.uploader : undefined),
       channelUrl: typeof json.channel_url === 'string' ? json.channel_url : (typeof json.uploader_url === 'string' ? json.uploader_url : undefined),
@@ -154,7 +160,12 @@ async function runYtDlp(url: string, cookiesFile?: string): Promise<YouTubeMetad
  * treats null as "no enrichment" and continues — never fatal.
  */
 export async function fetchYouTubeMetadata(url: string): Promise<YouTubeMetadata | null> {
-  if (!isYouTubeOrVimeoUrl(url)) return null;
+  // X/Twitter is allowed too: yt-dlp extracts the tweet text as description
+  // and the posting account as channel — the only source of post text for
+  // silent X clips (no transcript) on the re-enrich path, where the Karakeep
+  // feed title is no longer available. Callers must NOT use channel/title for
+  // filenames on X URLs (the x.com-{account}-post-{id} convention wins).
+  if (!isYouTubeOrVimeoUrl(url) && !isTwitterUrl(url)) return null;
 
   const meta = await runYtDlp(url);
   if (meta) {
