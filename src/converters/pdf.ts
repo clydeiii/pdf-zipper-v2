@@ -1151,10 +1151,24 @@ export async function convertUrlToPDF(
         // Close current page and retry with original URL
         await page.close();
         const directPage = await context.newPage();
-        await directPage.goto(url, {
+        const directResponse = await directPage.goto(url, {
           timeout,
           waitUntil: 'domcontentloaded'
         });
+        // X serves HTTP 404 for deleted tweets/removed accounts even without
+        // JS — a precise signal that separates "content is gone" from Nitter
+        // guest-token hiccups (which retry) below. Archive fallback still gets
+        // a shot: a tweet archived before deletion is recoverable.
+        if (directResponse && directResponse.status() === 404) {
+          await directPage.close().catch(() => {});
+          console.warn(`Tweet gone (X returned 404) for ${url}`);
+          return {
+            success: false,
+            url,
+            error: 'Tweet no longer exists (deleted or account removed) — X returned 404',
+            reason: 'navigation_error',
+          };
+        }
         // Wait longer for X.com JS rendering
         await directPage.waitForTimeout(3000);
 

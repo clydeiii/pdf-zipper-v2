@@ -99,6 +99,10 @@ async function deleteOldFileIfDifferent(oldFilePath: string, newFilePath: string
  * snapshots from being saved.
  */
 function isArchiveFallbackCandidate(message: string): boolean {
+  // Deleted content (tweet removed after bookmarking) is a special case:
+  // navigation errors generally aren't archive-rescuable, but a snapshot
+  // taken before deletion is exactly what archive.today is for.
+  if (message.includes('no longer exists')) return true;
   const cls = classifyFailureMessage(message);
   return cls === 'paywall' || cls === 'auth_required' || cls === 'captcha' ||
     cls === 'bot_detected' || cls === 'quality_false_negative_suspected';
