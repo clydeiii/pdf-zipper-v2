@@ -246,12 +246,21 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
   // A real page screenshot is typically 50KB+, blank pages are <10KB
   const MIN_SCREENSHOT_SIZE = 15000; // 15KB minimum
   const MIN_PDF_SIZE = 5000; // 5KB minimum
+  // A tiny screenshot alone is NOT proof of a blank page: flat dark themes
+  // compress a fully-rendered viewport below 15KB (observed: a 449KB Nitter
+  // thread whose viewport screenshot was 12.5KB). Only hard-fail on screenshot
+  // size when the PDF is also too small to hold a real capture; a small
+  // screenshot with a substantial PDF falls through to vision scoring +
+  // analyzePdfContent, which judge actual pixels/text (firewall and error-page
+  // patterns there run even in lenient tweet mode).
+  const BLANK_SCREENSHOT_MAX_PDF = 100_000; // 100KB
 
   // Skip screenshot check if capture failed (0 bytes) - just use PDF size
   const screenshotFailed = result.screenshotBuffer.length === 0;
-  const isBlankPage = screenshotFailed
-    ? result.pdfBuffer.length < MIN_PDF_SIZE
-    : result.screenshotBuffer.length < MIN_SCREENSHOT_SIZE || result.pdfBuffer.length < MIN_PDF_SIZE;
+  const isBlankPage = result.pdfBuffer.length < MIN_PDF_SIZE ||
+    (!screenshotFailed &&
+      result.screenshotBuffer.length < MIN_SCREENSHOT_SIZE &&
+      result.pdfBuffer.length < BLANK_SCREENSHOT_MAX_PDF);
 
   if (isBlankPage) {
     console.warn(`Blank page detected for ${url} - screenshot: ${result.screenshotBuffer.length}B, PDF: ${result.pdfBuffer.length}B`);
