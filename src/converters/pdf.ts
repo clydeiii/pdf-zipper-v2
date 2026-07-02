@@ -654,17 +654,45 @@ export async function convertUrlToPDF(
     }
 
     // HuggingFace Spaces embed the app in a cross-origin iframe (*.hf.space)
-    // that renders via websocket/XHR after load — networkidle fires while the
-    // app is still a near-empty shell, producing a PDF with only the page
-    // chrome. Poll the embedded frames until one accumulates real text.
+    // with a fixed layout height, so printing the huggingface.co shell clips
+    // the app to at most one viewport — even a fully rendered app comes out
+    // as a near-blank first page. Hop into the app frame's own URL (read from
+    // the live DOM, which handles HF's subdomain-mangling rules) and print
+    // that document instead, same pattern as the Datawrapper embed rewrite.
     if (/huggingface\.co\/spaces\//i.test(targetUrl)) {
+      let inAppFrame = false;
+      try {
+        const spaceFrameSrc = await page.evaluate(() => {
+          const src = Array.from(document.querySelectorAll('iframe'))
+            .map(f => f.getAttribute('src') || '')
+            .find(s => /\.hf\.space/i.test(s));
+          return src || null;
+        });
+        if (spaceFrameSrc) {
+          console.log(`HF Space detected for ${url}; navigating into app frame: ${spaceFrameSrc}`);
+          try {
+            await page.goto(spaceFrameSrc, { timeout, waitUntil: 'networkidle' });
+          } catch {
+            // networkidle never settles on websocket-driven apps (Gradio/Streamlit)
+            await page.goto(spaceFrameSrc, { timeout, waitUntil: 'domcontentloaded' });
+          }
+          inAppFrame = true;
+        }
+      } catch (err) {
+        console.warn(`HF Space frame hop failed for ${url}:`, err instanceof Error ? err.message : err);
+      }
+
+      // The app renders via websocket/XHR after load — poll until real text
+      // accumulates. After the hop that's the main frame; if the hop failed
+      // we're still on the HF shell, so only embedded frames count (the
+      // shell's own nav chrome would satisfy the threshold spuriously).
       const SPACE_TEXT_THRESHOLD = 500;
       const SPACE_WAIT_CAP_MS = 25000;
       const spaceDeadline = Date.now() + SPACE_WAIT_CAP_MS;
       let spaceRendered = false;
       while (!spaceRendered && Date.now() < spaceDeadline) {
         for (const frame of page.frames()) {
-          if (frame === page.mainFrame()) continue;
+          if (!inAppFrame && frame === page.mainFrame()) continue;
           try {
             const textLen = await frame.evaluate(
               () => document.body?.innerText.trim().length ?? 0
