@@ -24,6 +24,7 @@ import { getISOWeekNumber } from '../../media/organization.js';
 import { BookmarkDeduplicator } from '../../urls/deduplicator.js';
 import { queueConnection } from '../../config/redis.js';
 import { createKarakeepBookmark } from '../../feeds/karakeep-api.js';
+import { sendDiscordNotification } from '../../notifications/discord.js';
 import { readdir, unlink } from 'node:fs/promises';
 
 export const manualCaptureRouter = Router();
@@ -231,8 +232,10 @@ manualCaptureRouter.post(
       // background; we hold the promise here so we can salvage the result and
       // re-embed it into the already-saved PDF once it settles (#1).
       let pendingEnrichment: Promise<EnrichedMetadata> | undefined;
+      let capturedCharCount: number | undefined;
       try {
         const contentResult = await analyzePdfContent(pdfBuffer);
+        capturedCharCount = contentResult.charCount;
         console.log(
           `[manual-capture] Content: ${contentResult.charCount} chars, ${contentResult.pageCount} pages`
         );
@@ -416,6 +419,20 @@ manualCaptureRouter.post(
 
       const filename = path.basename(filePath);
       const durationMs = Date.now() - startMs;
+
+      // Manual captures are saved unconditionally (the user chose to capture),
+      // but a near-zero text count means the page didn't survive printToPDF —
+      // iframe-embedded apps (HF Spaces) and canvas-heavy pages produce PDFs
+      // with no extractable text. Warn immediately so a junk capture doesn't
+      // sit unnoticed until the KB import on the other side.
+      if (capturedCharCount !== undefined && capturedCharCount < 300) {
+        sendDiscordNotification({
+          type: 'warning',
+          title: '⚠️ Manual capture has almost no text',
+          description: `${filename} — only ${capturedCharCount} chars extracted. Likely an iframe/canvas page that printed empty; consider re-capturing with reader mode or a selection.`,
+          url: urlForSave,
+        }).catch(() => { /* non-fatal */ });
+      }
 
       const mdLen = body.markdown ? body.markdown.length : 0;
       console.log(
