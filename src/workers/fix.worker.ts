@@ -212,6 +212,11 @@ async function preparePatchBranch(params: {
     }
 
     const commit = await runCommand('git', [
+      // Git runs inside the container, where no ~/.gitconfig is mounted, so
+      // there is no global user identity — without these -c overrides the
+      // commit fails with "Author identity unknown" and the whole batch gates.
+      '-c', 'user.name=pdf-zipper self-heal',
+      '-c', 'user.email=self-heal@pdfzipper.local',
       'commit',
       '-m',
       `fix(self-heal): batch ${params.batchId.slice(0, 8)} via ${params.provider}`,
