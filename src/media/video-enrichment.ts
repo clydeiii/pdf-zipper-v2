@@ -62,6 +62,26 @@ const execFileAsync = promisify(execFile);
 const TEMP_DIR = process.env.TEMP_DIR || '/tmp/video-enrichment';
 
 /**
+ * Probe whether a media file has any audio stream. Returns null on probe
+ * failure so callers can fail open (attempt transcription) rather than
+ * silently skip.
+ */
+async function probeHasAudio(filePath: string): Promise<boolean | null> {
+  try {
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'error',
+      '-select_streams', 'a',
+      '-show_entries', 'stream=index',
+      '-of', 'csv=p=0',
+      filePath,
+    ], { timeout: 30000 });
+    return String(stdout).trim().length > 0;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Probe a media file's duration in minutes via ffprobe. Returns null on failure
  * so callers can fail open (transcribe) rather than silently skip.
  */
@@ -323,6 +343,68 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
     });
   } catch (err) {
     console.warn('Early MP4 metadata write failed (non-fatal):', err instanceof Error ? err.message : err);
+  }
+
+  // Silent clips (screen-recording demos are common on X) have no audio stream
+  // at all. Audio extraction would throw, aborting the whole enrich flow and
+  // leaving the file with only the bare early-metadata write — no summary/tags
+  // for the KB consumer. Detect up front and enrich from the post text (the
+  // Karakeep title carries the full tweet text; yt-dlp description usually
+  // does too). A null probe result fails open into normal transcription.
+  if (await probeHasAudio(mp4Path) === false) {
+    console.log(`No audio stream in ${mp4Path} — enriching silent video from post text`);
+
+    let summary: string | undefined;
+    let tags: string[] | undefined;
+    let enrichedAuthor: string | undefined;
+    let enrichedPublication: string | undefined;
+    const postText = [item.title, ytMeta?.description].filter(Boolean).join('\n\n');
+    if (postText.length >= 40) {
+      try {
+        const enriched = await enrichDocumentMetadata(postText.slice(0, 8000), item.url, item.title);
+        summary = enriched.summary;
+        tags = canonicalizeTags(enriched.tags, extractHintTokens(postText));
+        enrichedAuthor = enriched.author || undefined;
+        enrichedPublication = enriched.publication || undefined;
+        result.summary = summary;
+        result.tags = tags;
+      } catch (err) {
+        console.warn('Silent-video AI enrichment failed:', err instanceof Error ? err.message : err);
+      }
+    }
+
+    // Same creator/publisher resolution as the transcribed path below.
+    const creator = ytMeta?.channel || enrichedAuthor;
+    const publisher =
+      ytMeta?.channel ||
+      (isTwitterUrl(item.url) ? enrichedAuthor : undefined) ||
+      enrichedPublication;
+
+    const commentParts: string[] = [];
+    if (summary) commentParts.push(summary);
+    if (tags && tags.length > 0) commentParts.push(`Tags: ${tags.join(', ')}`);
+    commentParts.push('Silent video: no audio track, no transcript');
+    commentParts.push(`Source: ${item.url}`);
+
+    result.metadataWritten = await enrichVideoFile(mp4Path, {
+      title: item.title || undefined,
+      artist: creator,
+      album: publisher,
+      comment: commentParts.join('\n'),
+      custom: {
+        doc_type: 'video',
+        summary: summary || '',
+        tags: (tags || []).join(', '),
+        source_url: item.url,
+        bookmarked_at: item.bookmarkedAt || '',
+        transcript_chars: '0',
+        silent_video: 'true',
+        ...(ytMeta?.channel ? { channel: ytMeta.channel } : {}),
+        ...(ytMeta?.uploadDate ? { upload_date: ytMeta.uploadDate } : {}),
+        ...(ytMeta?.description ? { yt_description: ytMeta.description.slice(0, 4000) } : {}),
+      },
+    });
+    return result;
   }
 
   let audioPath: string | undefined;
