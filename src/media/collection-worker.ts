@@ -10,6 +10,7 @@ import { PDFDocument } from 'pdf-lib';
 import { workerConnection } from '../config/redis.js';
 import { downloadMedia } from './collector.js';
 import { enrichVideo } from './video-enrichment.js';
+import { maybeCompressVideo } from './video-compress.js';
 import { analyzePdfContent } from '../quality/pdf-content.js';
 import { enrichDocumentMetadata } from '../metadata/enrichment.js';
 import { setInfoDictFields } from '../utils/pdf-info-dict.js';
@@ -73,6 +74,13 @@ export async function startMediaWorker(): Promise<void> {
 
         // Post-download enrichment for video files
         if (item.mediaType === 'video' && result.filePath.endsWith('.mp4')) {
+          // Compress BEFORE enrichment so metadata/VTT are embedded into the
+          // final file. Bitrate-gated: lean YouTube grabs skip, fat X grabs
+          // re-encode. Never throws — failure keeps the original file.
+          const compressResult = await maybeCompressVideo(result.filePath);
+          if (compressResult.compressed && compressResult.newSizeBytes) {
+            result.fileSize = compressResult.newSizeBytes;
+          }
           try {
             const enrichResult = await enrichVideo(result.filePath, item);
             // enrichVideo may rename the file to {channel}-{title}.mp4; reflect

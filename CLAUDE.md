@@ -46,6 +46,13 @@ Tunable bypasses in pdf-content.ts — don't re-introduce false positives that w
 - Error-page regex only runs when content < 2000 chars (real 404s don't have long bodies)
 - Pass-through PDFs (arxiv, direct .pdf) skip quality checks but **do** run metadata enrichment
 
+### Video Compression (`src/media/video-compress.ts`)
+All videos arrive via Karakeep assets, but sources differ wildly: Karakeep's yt-dlp grabs YouTube at 360p/~160-500 kbps, while X/Twitter variants arrive up to 4K (observed 2.7 GB for one 36-min X clip). `maybeCompressVideo` runs in the collection worker BEFORE `enrichVideo` (so metadata/VTT embed into the final file) and re-encodes only when:
+1. **Oversize**: shorter frame side > `VIDEO_COMPRESS_MAX_HEIGHT` (720) → downscale. Gate is on the SHORT side so portrait phone video isn't crushed.
+2. **Fat bitrate**: kbps > max(1200 floor, `VIDEO_COMPRESS_KBPS_PER_MEGAPIXEL` × frame MP). The floor keeps every YouTube grab untouched.
+
+Bitrate gating makes it idempotent (compressed output falls below threshold on re-enrich). Audio/subtitle streams are stream-copied; the re-encode is discarded if not ≥10% smaller. Never throws — any failure keeps the original file.
+
 ### Debug Artifacts
 Failed jobs save the actual PDF (not screenshot) to `data/debug/{jobId}.pdf`. Viewable via failure badge or `GET /api/debug/:jobId`.
 
@@ -155,6 +162,10 @@ curl -X POST http://localhost:3002/api/jobs \
 | `NITTER_HOST` | `http://nitter:8080` | Twitter rewrite target |
 | `COOKIES_FILE` | — | Netscape cookies.txt for paywalls. Preserve leading `.` on domains (Playwright needs it for subdomain match). Express JSON body limit is bumped to 10mb for cookie upload. |
 | `PRIVACY_FILTER_TERMS` | — | Comma-separated strings to hide from PDFs |
+| `VIDEO_COMPRESS_ENABLED` | true | Re-encode fat video grabs (X/Twitter) to YouTube-like size post-download |
+| `VIDEO_COMPRESS_MAX_HEIGHT` | 720 | Downscale when the SHORTER frame side exceeds this |
+| `VIDEO_COMPRESS_KBPS_PER_MEGAPIXEL` | 2000 | Bitrate allowance before re-encode kicks in (plus 1200 kbps absolute floor) |
+| `VIDEO_COMPRESS_CRF` | 26 | x264 quality for the re-encode (lower = bigger/better) |
 | `FIX_ENABLED` | false | Enable AI self-healing |
 | `CLAUDE_CLI_PATH` | `claude` | Path to Claude CLI |
 | `DISCORD_WEBHOOK_URL` | — | Job event notifications |

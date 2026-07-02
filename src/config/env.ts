@@ -93,6 +93,14 @@ interface EnvConfig {
   MAX_PODCAST_AUDIO_BYTES: number;
   /** Maximum video DURATION to transcribe in minutes (default: 360 = 6h). Gates ASR cost by audio length, not mp4 size. */
   MAX_VIDEO_TRANSCRIBE_MINUTES: number;
+  /** Re-encode fat downloads (X/Twitter) to YouTube-like bitrates after download (default: true) */
+  VIDEO_COMPRESS_ENABLED: boolean;
+  /** Bitrate allowance per megapixel of frame area before re-encoding kicks in (default: 2000 — YouTube-like) */
+  VIDEO_COMPRESS_KBPS_PER_MEGAPIXEL: number;
+  /** x264 CRF for the re-encode; lower = higher quality/bigger (default: 26) */
+  VIDEO_COMPRESS_CRF: number;
+  /** Downscale videos whose SHORTER side exceeds this (default: 720). Karakeep's yt-dlp grabs YouTube at 360p for reference. */
+  VIDEO_COMPRESS_MAX_HEIGHT: number;
   /** Optional llama.cpp OpenAI-compatible server for round-robin/failover on text-only LLM calls */
   LLAMACPP_HOST?: string;
   /** Bearer token for the llama.cpp server */
@@ -205,6 +213,11 @@ export const env: EnvConfig = {
   MEDIA_DOWNLOAD_TIMEOUT_MS: parseIntegerEnv('MEDIA_DOWNLOAD_TIMEOUT_MS', 300000, { min: 1000 }),
   MAX_PODCAST_AUDIO_BYTES: parseIntegerEnv('MAX_PODCAST_AUDIO_MB', 750, { min: 1 }) * 1024 * 1024,
   MAX_VIDEO_TRANSCRIBE_MINUTES: parseIntegerEnv('MAX_VIDEO_TRANSCRIBE_MINUTES', 360, { min: 1 }),
+  // Post-download video compression (on by default; opt out with 'false')
+  VIDEO_COMPRESS_ENABLED: process.env.VIDEO_COMPRESS_ENABLED !== 'false',
+  VIDEO_COMPRESS_KBPS_PER_MEGAPIXEL: parseIntegerEnv('VIDEO_COMPRESS_KBPS_PER_MEGAPIXEL', 2000, { min: 100 }),
+  VIDEO_COMPRESS_CRF: parseIntegerEnv('VIDEO_COMPRESS_CRF', 26, { min: 0, max: 51 }),
+  VIDEO_COMPRESS_MAX_HEIGHT: parseIntegerEnv('VIDEO_COMPRESS_MAX_HEIGHT', 720, { min: 144 }),
   // Optional llama.cpp failover/round-robin endpoint for text-only LLM calls
   LLAMACPP_HOST: process.env.LLAMACPP_HOST,
   LLAMACPP_API_KEY: process.env.LLAMACPP_API_KEY,
