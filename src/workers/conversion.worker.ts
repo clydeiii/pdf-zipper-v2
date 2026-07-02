@@ -12,7 +12,7 @@ import { writeFile, mkdir, unlink } from 'node:fs/promises';
 import * as path from 'node:path';
 import { savePdfToWeeklyBin } from '../utils/save-pdf.js';
 import { workerConnection } from '../config/redis.js';
-import { QUEUE_NAME } from '../queues/conversion.queue.js';
+import { QUEUE_NAME, conversionQueue } from '../queues/conversion.queue.js';
 import { env } from '../config/env.js';
 import type { ConversionJobData, ConversionJobResult } from '../jobs/types.js';
 import { initBrowser, closeBrowser } from '../browsers/manager.js';
@@ -90,12 +90,18 @@ async function deleteOldFileIfDifferent(oldFilePath: string, newFilePath: string
  */
 /**
  * Failure classes where the original page is access-restricted but an existing
- * archive.today snapshot might still hold the content. Excludes timeouts,
- * navigation errors and generic quality misses (archive won't help those).
+ * archive.today snapshot might still hold the content. Excludes timeouts and
+ * navigation errors (archive won't help those). quality_false_negative_suspected
+ * (truncated/stripped pages) is included because silent bot detection often
+ * strips the article body while leaving nav/footer chrome (e.g. Axios) — the
+ * archive snapshot, crawled with a different fingerprint, usually has the full
+ * text, and captureViaArchive's 1500-char floor keeps equally-stripped
+ * snapshots from being saved.
  */
 function isArchiveFallbackCandidate(message: string): boolean {
   const cls = classifyFailureMessage(message);
-  return cls === 'paywall' || cls === 'auth_required' || cls === 'captcha' || cls === 'bot_detected';
+  return cls === 'paywall' || cls === 'auth_required' || cls === 'captcha' ||
+    cls === 'bot_detected' || cls === 'quality_false_negative_suspected';
 }
 
 async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Promise<ConversionJobResult> {
@@ -121,6 +127,12 @@ async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Pro
       // not retryable false-negatives. (archive_unavailable is non-auto-trigger.)
       if (arch.reason === 'wall') {
         throw new Error(`archive_unavailable: archive.is clearance cookies stale — re-solve captcha and re-upload cookies.txt (original: ${message.slice(0, 80)})`);
+      }
+      // For quality-miss candidates the archive attempt was opportunistic:
+      // keep the original failure class so the auto-fix trigger policy still
+      // sees quality_false_negative_suspected instead of archive_unavailable.
+      if (classifyFailureMessage(message) === 'quality_false_negative_suspected') {
+        throw primaryErr;
       }
       const why = arch.reason === 'not_archived' ? 'no archive.today snapshot exists' : 'archive.today snapshot is a 403/incomplete capture';
       throw new Error(`archive_unavailable: ${why} (original: ${message.slice(0, 80)})`);
@@ -495,6 +507,31 @@ function createConversionWorker(): Worker<ConversionJobData, ConversionJobResult
     console.error('Job failed:', JSON.stringify(errorData, null, 2));
 
     if (job && job.attemptsMade >= (job.opts?.attempts ?? 3)) {
+      // Nitter rate limits clear on their own within minutes, but the queue's
+      // seconds-scale exponential backoff burns all attempts inside a single
+      // limit window, permanently failing tweets that would convert fine an
+      // hour later. Give rate-limited jobs a second life: re-enqueue a delayed
+      // copy (30/60/120 min) up to 3 times before letting the failure stand.
+      if (classifyFailureMessage(error.message) === 'rate_limited') {
+        const requeues = job.data.rateLimitRequeues ?? 0;
+        if (requeues < 3) {
+          const delayMinutes = [30, 60, 120][requeues];
+          try {
+            await conversionQueue.add(
+              job.name,
+              { ...job.data, rateLimitRequeues: requeues + 1 },
+              { jobId: `${job.id}_rl${requeues + 1}`, delay: delayMinutes * 60_000 }
+            );
+            console.log(`[rate-limited] Re-queued ${job.data.url} with ${delayMinutes}min delay (requeue ${requeues + 1}/3)`);
+            // The delayed copy owns the outcome: skip the failed-week index
+            // and Discord failure noise for this attempt.
+            return;
+          } catch (requeueErr) {
+            console.error('[rate-limited] Re-queue failed, letting failure stand:', requeueErr);
+          }
+        }
+      }
+
       const jobWeek = getISOWeekNumber(new Date(job.timestamp));
       const weekId = `${jobWeek.year}-W${jobWeek.week.toString().padStart(2, '0')}`;
       await addJobToWeekIndex({

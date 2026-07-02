@@ -28,6 +28,8 @@ export interface ConversionJobData {
   bookmarkedAt?: string;
   /** Absolute path to old PDF (set by rerun endpoints). Worker deletes if new filename differs. */
   oldFilePath?: string;
+  /** How many delayed re-queues a rate_limited failure has already consumed (max 3). */
+  rateLimitRequeues?: number;
 }
 
 /**
