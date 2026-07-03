@@ -105,6 +105,21 @@ function setupEventListeners() {
   filterClear.addEventListener('click', clearFilter);
   selectNewButton.addEventListener('click', selectNewSinceExport);
 
+  // Filter syntax help popover
+  const filterHelpBtn = document.getElementById('filter-help-btn');
+  const filterHelp = document.getElementById('filter-help');
+  if (filterHelpBtn && filterHelp) {
+    filterHelpBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      filterHelp.classList.toggle('hidden');
+    });
+    document.addEventListener('click', (e) => {
+      if (!filterHelp.classList.contains('hidden') && !filterHelp.contains(e.target)) {
+        filterHelp.classList.add('hidden');
+      }
+    });
+  }
+
   // Sortable column headers: click toggles direction, switching column
   // resets to a sensible default (size → biggest first, date → newest first).
   document.querySelectorAll('th.col-name, th.col-size, th.col-date').forEach((th) => {
@@ -501,13 +516,27 @@ function clearFilter() {
 }
 
 /**
- * Get items matching the current filter
+ * Local calendar day (YYYY-MM-DD) for an ISO timestamp — matches what
+ * formatDate() shows the user, unlike slicing the UTC ISO string.
+ */
+function localDayKey(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/**
+ * Get items matching the current filter.
  *
- * Supports special prefixes:
- *   status:success / status:ok   — only successful files
- *   status:fail / status:failed  — only failed items
- * Remaining text after prefix is matched against filename/URL.
- * Example: "status:success nyt" → successful files matching "nyt"
+ * The filter is a space-separated list of terms, ALL of which must match:
+ *   status:success|ok      — only saved files
+ *   status:fail|failed     — only failed items
+ *   date:2026-07-02        — local capture day; date:20260702 works too, and
+ *                            a prefix (date:2026-07) matches the whole month
+ *   type:pdf|video|audio|transcript — file type
+ *   anything else          — substring match on filename/URL
+ * Example: "date:2026-07-02 type:video" → that day's videos.
+ * (Documented in the ?-help popover in index.html — keep the two in sync.)
  */
 function getFilteredItems() {
   if (!currentFilter) {
@@ -515,32 +544,45 @@ function getFilteredItems() {
   }
 
   let statusFilter = null; // null = no status filter, true = success only, false = failed only
-  let textFilter = currentFilter;
+  let dateFilter = null;   // normalized YYYY-MM-DD prefix
+  let typeFilter = null;
+  const textTerms = [];
 
-  // Parse status: prefix
-  const statusMatch = currentFilter.match(/^status:(\S+)\s*(.*)/);
-  if (statusMatch) {
-    const statusValue = statusMatch[1];
-    textFilter = statusMatch[2] || '';
-    if (statusValue === 'success' || statusValue === 'ok') {
-      statusFilter = true;
-    } else if (statusValue === 'fail' || statusValue === 'failed') {
-      statusFilter = false;
+  for (const term of currentFilter.split(/\s+/).filter(Boolean)) {
+    const kv = term.match(/^(status|date|type):(.*)$/);
+    if (!kv) { textTerms.push(term); continue; }
+    const [, key, rawValue] = kv;
+    if (key === 'status') {
+      if (rawValue === 'success' || rawValue === 'ok') statusFilter = true;
+      else if (rawValue === 'fail' || rawValue === 'failed') statusFilter = false;
+    } else if (key === 'date') {
+      // Accept 20260702 or 2026-07-02, full or prefix; normalize to dashed.
+      const digits = rawValue.replace(/-/g, '');
+      if (/^\d{4,8}$/.test(digits)) {
+        dateFilter = digits.replace(/^(\d{4})(\d{0,2})(\d{0,2})$/, (_, y, m, d) =>
+          y + (m ? '-' + m : '') + (d ? '-' + d : ''));
+      } else {
+        dateFilter = rawValue; // let a malformed value simply match nothing
+      }
+    } else if (key === 'type') {
+      typeFilter = rawValue;
     }
   }
 
   return allItems.filter(item => {
-    // Apply status filter
     if (statusFilter === true && item.isFailed) return false;
     if (statusFilter === false && !item.isFailed) return false;
 
-    // Apply text filter
-    if (textFilter) {
-      if (item.isFailed) {
-        return item.url.toLowerCase().includes(textFilter);
-      } else {
-        return item.name.toLowerCase().includes(textFilter);
-      }
+    if (dateFilter && !localDayKey(item.modified).startsWith(dateFilter)) return false;
+
+    if (typeFilter) {
+      const itemType = item.isFailed ? 'failed' : (item.type || '');
+      if (itemType !== typeFilter) return false;
+    }
+
+    for (const term of textTerms) {
+      const haystack = (item.isFailed ? item.url : item.name).toLowerCase();
+      if (!haystack.includes(term)) return false;
     }
 
     return true;
@@ -586,10 +628,10 @@ function renderFilteredItems() {
   for (let index = 0; index < sorted.length; index++) {
     const item = sorted[index];
     if (sortKey === 'modified') {
-      const day = (item.modified || '').slice(0, 10);
+      const day = localDayKey(item.modified);
       if (day && day !== currentDay) {
         currentDay = day;
-        const dayItems = sorted.filter(i => (i.modified || '').slice(0, 10) === day);
+        const dayItems = sorted.filter(i => localDayKey(i.modified) === day);
         const dayBytes = dayItems.reduce((sum, i) => sum + (i.size || 0), 0);
         const failedCount = dayItems.filter(i => i.isFailed).length;
         const label = new Date(day + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });

@@ -819,3 +819,65 @@ tr.day-sep td {
   padding: 4px 10px;
   border-top: 2px solid #dee2e6;
 }
+
+/* Filter help popover */
+.filter-input-wrapper {
+  position: relative;
+}
+
+.filter-help-btn {
+  border: 1px solid #ced4da;
+  background: #f8f9fa;
+  color: #6c757d;
+  border-radius: 50%;
+  width: 22px;
+  height: 22px;
+  line-height: 1;
+  font-size: 0.8rem;
+  cursor: pointer;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+
+.filter-help-btn:hover {
+  background: #e9ecef;
+  color: #0d6efd;
+}
+
+.filter-help {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 100;
+  background: #fff;
+  border: 1px solid #dee2e6;
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  padding: 10px 12px;
+  font-size: 0.82rem;
+  color: #343a40;
+  max-width: 480px;
+  line-height: 1.5;
+}
+
+.filter-help table {
+  margin: 6px 0;
+  border-collapse: collapse;
+}
+
+.filter-help td {
+  padding: 2px 10px 2px 0;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.filter-help td:last-child {
+  white-space: normal;
+}
+
+.filter-help code {
+  background: #f1f3f5;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 0.78rem;
+}

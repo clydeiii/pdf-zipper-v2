@@ -11,6 +11,7 @@ import { workerConnection } from '../config/redis.js';
 import { downloadMedia } from './collector.js';
 import { enrichVideo } from './video-enrichment.js';
 import { maybeCompressVideo } from './video-compress.js';
+import { findDuplicateVideo, appendVideoCrossRef, removeDuplicateDownload } from './video-dedup.js';
 import { analyzePdfContent } from '../quality/pdf-content.js';
 import { enrichDocumentMetadata } from '../metadata/enrichment.js';
 import { setInfoDictFields } from '../utils/pdf-info-dict.js';
@@ -74,6 +75,29 @@ export async function startMediaWorker(): Promise<void> {
 
         // Post-download enrichment for video files
         if (item.mediaType === 'video' && result.filePath.endsWith('.mp4')) {
+          // Duplicate check BEFORE the expensive compress/transcribe steps.
+          // Bookmarking both a tweet and a quote-tweet of it delivers the
+          // SAME embedded video twice; keep the first copy as canonical,
+          // record this bookmark's URL on it, and drop the fresh download.
+          // Fresh downloads only — a re-enrich of a library file would match
+          // other copies and delete the file it is meant to refresh.
+          if (!existingFilePath) {
+            const dup = await findDuplicateVideo(result.filePath);
+            if (dup) {
+              const crossRefOk = await appendVideoCrossRef(dup.existingPath, item.url);
+              await removeDuplicateDownload(result.filePath);
+              console.log(JSON.stringify({
+                event: 'video_dedup',
+                duplicateOf: dup.existingPath,
+                droppedDownload: result.filePath,
+                bookmarkUrl: item.url,
+                crossRefRecorded: crossRefOk,
+                timestamp: new Date().toISOString(),
+              }));
+              result.filePath = dup.existingPath;
+              return result;
+            }
+          }
           // Compress BEFORE enrichment so metadata/VTT are embedded into the
           // final file. Bitrate-gated: lean YouTube grabs skip, fat X grabs
           // re-encode. Never throws — failure keeps the original file.

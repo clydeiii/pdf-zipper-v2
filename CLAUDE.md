@@ -53,6 +53,9 @@ All videos arrive via Karakeep assets, but sources differ wildly: Karakeep's yt-
 
 Bitrate gating makes it idempotent (compressed output falls below threshold on re-enrich). Audio/subtitle streams are stream-copied; the re-encode is discarded if not ≥10% smaller. Never throws — any failure keeps the original file.
 
+### Duplicate Embedded Videos (`src/media/video-dedup.ts`)
+Bookmarking an original tweet AND a quote-tweet of it delivers the same embedded video twice (different Karakeep assets, near-identical bytes). Before compressing a fresh download, the collection worker probes the whole library: duration ±50ms + aspect ratio ±1% + same has-audio bit, confirmed by an 8x8 perceptual frame hash. A confirmed duplicate is deleted and the new bookmark's URL is appended to the canonical mp4's `also_bookmarked_as` metadata tag (`; `-separated). No state beyond the files themselves — identity is re-derived from probes each time. Dedup is skipped on re-enrich jobs (`existingFilePath` set), which would otherwise match and delete the very file being refreshed. **KB consumers must treat `source_url` + `also_bookmarked_as` as the complete set of tweets referencing a video**; the quote-tweet's own PDF capture carries the quote relationship from the other side. Canonical attribution follows bookmark order (first bookmark wins the filename), so a QT bookmarked before the original keeps the QT's account in the filename — the tags, not the filename, are authoritative.
+
 ### Debug Artifacts
 Failed jobs save the actual PDF (not screenshot) to `data/debug/{jobId}.pdf`. Viewable via failure badge or `GET /api/debug/:jobId`.
 

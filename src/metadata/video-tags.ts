@@ -38,7 +38,9 @@ export async function writeVideoMetadata(filePath: string, meta: VideoMetadataOp
     // standard iTunes atom; standard tags (title/artist/album/comment) still
     // read back fine. Without it the comment-packing fallback is the only
     // place custom metadata survives.
-    const args = ['-i', filePath, '-c', 'copy', '-movflags', 'use_metadata_tags'];
+    // -map 0: without it, ffmpeg's default stream selection SILENTLY DROPS
+    // embedded subtitle tracks on a metadata-only remux.
+    const args = ['-i', filePath, '-map', '0', '-c', 'copy', '-movflags', 'use_metadata_tags'];
 
     // Standard metadata fields
     if (meta.title) args.push('-metadata', `title=${meta.title}`);
@@ -130,6 +132,13 @@ export async function enrichVideoFile(
       vttPath = mp4Path + '.subs.vtt';
       await writeFile(vttPath, vttContent);
       args.push('-i', vttPath);
+      // Replace any existing subtitle track with the new VTT; keep all
+      // video/audio streams from the original.
+      args.push('-map', '0:v', '-map', '0:a?', '-map', '1:0');
+    } else {
+      // Metadata-only remux: without an explicit -map 0, ffmpeg's default
+      // stream selection SILENTLY DROPS embedded subtitle tracks.
+      args.push('-map', '0');
     }
 
     args.push('-c', 'copy');  // Copy video/audio

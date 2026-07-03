@@ -62,8 +62,20 @@
 
         <div class="filter-bar">
           <div class="filter-input-wrapper">
-            <input type="text" id="filter-input" placeholder="Filter by filename..." autocomplete="off">
+            <input type="text" id="filter-input" placeholder="Filter... (try status:fail, date:2026-07-02)" autocomplete="off">
             <button id="filter-clear" class="filter-clear hidden">&times;</button>
+            <button id="filter-help-btn" class="filter-help-btn" title="Filter syntax help" type="button">?</button>
+            <div id="filter-help" class="filter-help hidden">
+              <strong>Filter syntax</strong> — combine any of these, space-separated:
+              <table>
+                <tr><td><code>text</code></td><td>substring match on filename / URL</td></tr>
+                <tr><td><code>status:success</code></td><td>only saved files (alias: <code>status:ok</code>)</td></tr>
+                <tr><td><code>status:fail</code></td><td>only failed items (alias: <code>status:failed</code>)</td></tr>
+                <tr><td><code>date:2026-07-02</code></td><td>only items from that day (local time). <code>date:20260702</code> works; a prefix like <code>date:2026-07</code> matches the month</td></tr>
+                <tr><td><code>type:video</code></td><td>only that file type (<code>pdf</code>, <code>video</code>, <code>audio</code>, <code>transcript</code>)</td></tr>
+              </table>
+              Example: <code>date:2026-07-02 type:video</code>, then click <em>Size</em> to see what ate the disk that day.
+            </div>
           </div>
           <span id="filter-status" class="filter-status"></span>
           <span id="export-status" class="export-status"></span>
