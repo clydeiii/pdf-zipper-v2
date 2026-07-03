@@ -125,7 +125,7 @@ export function classifySnapshotText(text: string): 'good' | 'broken' | 'wall' {
  * afternoon of rescues). Hitting it again during the block only extends it.
  * When a listing request comes back 429, skip archive entirely for a while.
  */
-const RATE_LIMIT_COOLDOWN_MS = 30 * 60 * 1000;
+const RATE_LIMIT_COOLDOWN_MS = 60 * 60 * 1000;
 let archiveCooldownUntil = 0;
 
 export async function captureViaArchive(originalUrl: string): Promise<ArchiveResult> {
@@ -197,7 +197,13 @@ export async function captureViaArchive(originalUrl: string): Promise<ArchiveRes
 
     if (!reachedListing) {
       if (sawWall) {
-        return { ok: false, reason: 'wall', detail: 'archive challenge on all mirrors — clearance cookies likely stale' };
+        // A challenge on every mirror means this requester (IP + fingerprint)
+        // is flagged. The flag decays with TIME — every further request
+        // refreshes it, so back off exactly like a 429. (The challenge is
+        // served with HTTP 200 as often as 429.)
+        archiveCooldownUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+        console.warn(`[archive-fallback] challenge on all mirrors — cooling down ${RATE_LIMIT_COOLDOWN_MS / 60000}min`);
+        return { ok: false, reason: 'wall', detail: 'archive challenge on all mirrors — anti-bot flag or stale clearance; cooling down' };
       }
       return { ok: false, reason: 'error', detail: 'all archive.today mirrors unreachable' };
     }

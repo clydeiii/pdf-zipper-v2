@@ -9,6 +9,8 @@ let selectedFiles = new Set();
 let allItems = [];        // Store full dataset for filtering
 let currentFilter = '';   // Current filter string
 let filterDebounceTimer = null;
+let sortKey = 'modified'; // 'modified' | 'size' | 'name'
+let sortDir = 'desc';     // 'asc' | 'desc'
 let apiToken = localStorage.getItem('pdfzipperApiToken') || '';
 
 // Export tracking — remembers last ZIP download per week
@@ -102,6 +104,25 @@ function setupEventListeners() {
   filterInput.addEventListener('input', handleFilterInput);
   filterClear.addEventListener('click', clearFilter);
   selectNewButton.addEventListener('click', selectNewSinceExport);
+
+  // Sortable column headers: click toggles direction, switching column
+  // resets to a sensible default (size → biggest first, date → newest first).
+  document.querySelectorAll('th.col-name, th.col-size, th.col-date').forEach((th) => {
+    th.classList.add('sortable');
+    th.addEventListener('click', () => {
+      const key = th.classList.contains('col-size') ? 'size'
+        : th.classList.contains('col-name') ? 'name' : 'modified';
+      if (sortKey === key) {
+        sortDir = sortDir === 'desc' ? 'asc' : 'desc';
+      } else {
+        sortKey = key;
+        sortDir = key === 'name' ? 'asc' : 'desc';
+      }
+      updateSortIndicators();
+      renderFilteredItems();
+    });
+  });
+  updateSortIndicators();
 
   // Click telemetry via event delegation on the file table
   filesTbody.addEventListener('click', (e) => {
@@ -544,29 +565,72 @@ function renderFilteredItems() {
     return;
   }
 
-  // Render table rows
-  filesTbody.innerHTML = filtered.map((item, index) => {
-    if (item.isFailed) {
-      return renderFailedRow(item, index);
+  // Sort a copy per the active column (allItems keeps its date order for
+  // "new since export" and selection logic elsewhere).
+  const sorted = [...filtered].sort((a, b) => {
+    let cmp;
+    if (sortKey === 'size') {
+      cmp = (a.size || 0) - (b.size || 0);
+    } else if (sortKey === 'name') {
+      cmp = (a.name || a.url || '').localeCompare(b.name || b.url || '');
     } else {
-      return renderFileRow(item, index);
+      cmp = new Date(a.modified).getTime() - new Date(b.modified).getTime();
     }
-  }).join('');
+    return sortDir === 'desc' ? -cmp : cmp;
+  });
+
+  // Render table rows; in date order, group by capture day with a separator
+  // row carrying that day's file count and total size.
+  const rows = [];
+  let currentDay = null;
+  for (let index = 0; index < sorted.length; index++) {
+    const item = sorted[index];
+    if (sortKey === 'modified') {
+      const day = (item.modified || '').slice(0, 10);
+      if (day && day !== currentDay) {
+        currentDay = day;
+        const dayItems = sorted.filter(i => (i.modified || '').slice(0, 10) === day);
+        const dayBytes = dayItems.reduce((sum, i) => sum + (i.size || 0), 0);
+        const failedCount = dayItems.filter(i => i.isFailed).length;
+        const label = new Date(day + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
+        const failedNote = failedCount > 0 ? ` · ${failedCount} failed` : '';
+        rows.push(`<tr class="day-sep"><td colspan="5">${label} — ${dayItems.length - failedCount} file(s), ${formatFileSize(dayBytes)}${failedNote}</td></tr>`);
+      }
+    }
+    rows.push(item.isFailed ? renderFailedRow(item, index) : renderFileRow(item, index));
+  }
+  filesTbody.innerHTML = rows.join('');
 
   // Restore selection state
   restoreSelectionState();
 
-  // Update filter status
+  // Update filter status (always show the view's total size — the fastest
+  // sanity check on "why is today's bundle huge")
+  const totalBytes = sorted.reduce((sum, i) => sum + (i.size || 0), 0);
   if (currentFilter) {
-    filterStatus.textContent = `Showing ${filtered.length} of ${allItems.length} items`;
+    filterStatus.textContent = `Showing ${filtered.length} of ${allItems.length} items · ${formatFileSize(totalBytes)}`;
   } else {
-    filterStatus.textContent = '';
+    filterStatus.textContent = `${allItems.length} items · ${formatFileSize(totalBytes)}`;
   }
 
   // Update checkbox states and export info
   updateSelectAllState();
   updateDownloadButtonState();
   updateExportStatus();
+}
+
+/**
+ * Show ▼/▲ on the active sort column header
+ */
+function updateSortIndicators() {
+  const labels = { 'col-name': 'Name', 'col-size': 'Size', 'col-date': 'Date' };
+  document.querySelectorAll('th.col-name, th.col-size, th.col-date').forEach((th) => {
+    const cls = th.classList.contains('col-size') ? 'col-size'
+      : th.classList.contains('col-name') ? 'col-name' : 'col-date';
+    const key = cls === 'col-size' ? 'size' : cls === 'col-name' ? 'name' : 'modified';
+    const arrow = sortKey === key ? (sortDir === 'desc' ? ' ▼' : ' ▲') : '';
+    th.textContent = labels[cls] + arrow;
+  });
 }
 
 /**
