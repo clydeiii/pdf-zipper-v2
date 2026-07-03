@@ -225,6 +225,15 @@ manualCaptureRouter.post(
         (body.title ? ` ("${body.title}")` : '')
     );
 
+    // Learn the user's real browser UA: archive.today clearance cookies are
+    // fingerprint-bound, so the archive fallback must present the SAME UA as
+    // the browser that solved the captcha. Every extension capture refreshes
+    // it (survives browser updates). Fire-and-forget.
+    const browserUa = req.header('user-agent');
+    if (browserUa && browserUa.startsWith('Mozilla/5.0')) {
+      queueConnection.set('pdfzipper:browser_ua', browserUa).catch(() => { /* non-fatal */ });
+    }
+
     try {
       // Extract text + run enrichment (same pipeline as the worker)
       let enrichedMetadata: EnrichedMetadata | undefined;

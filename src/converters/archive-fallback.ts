@@ -30,6 +30,29 @@ import { convertUrlToPDF } from './pdf.js';
 const ARCHIVE_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36';
 
+/**
+ * archive.today binds its clearance cookies to the browser that solved the
+ * captcha — same cookies presented under a different User-Agent get challenged
+ * again (observed 2026-07-02: fresh human-solved cookies + this hardcoded UA
+ * → challenge on every mirror, same home IP). The manual-capture route stores
+ * the user's real Chrome UA in Redis on every extension capture; presenting
+ * exactly that UA makes the exported cookies validate. Falls back to the
+ * hardcoded UA until the first extension capture teaches us.
+ */
+export const BROWSER_UA_REDIS_KEY = 'pdfzipper:browser_ua';
+
+async function resolveArchiveUa(): Promise<string> {
+  try {
+    // Lazy import: a top-level redis import opens a connection the moment any
+    // consumer (including the unit tests) loads this module, hanging the test
+    // runner's event loop.
+    const { queueConnection } = await import('../config/redis.js');
+    const learned = await queueConnection.get(BROWSER_UA_REDIS_KEY);
+    if (learned && /^Mozilla\/5\.0 [\x20-\x7e]{10,300}$/.test(learned)) return learned;
+  } catch { /* redis hiccup — fall through */ }
+  return ARCHIVE_UA;
+}
+
 /** Minimum main-document text for a snapshot to count as real article content. */
 const GOOD_TEXT_THRESHOLD = 1500;
 
@@ -113,7 +136,7 @@ export async function captureViaArchive(originalUrl: string): Promise<ArchiveRes
   const browser: Browser = await initBrowser();
   const ctx = await browser.newContext({
     viewport: { width: 1280, height: 800 },
-    userAgent: ARCHIVE_UA,
+    userAgent: await resolveArchiveUa(),
   });
   const cookies = loadCookies();
   if (cookies.length > 0) await ctx.addCookies(cookies);
