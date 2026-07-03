@@ -138,7 +138,11 @@ async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Pro
       if (classifyFailureMessage(message) === 'quality_false_negative_suspected') {
         throw primaryErr;
       }
-      const why = arch.reason === 'not_archived' ? 'no archive.today snapshot exists' : 'archive.today snapshot is a 403/incomplete capture';
+      const why = arch.reason === 'not_archived'
+        ? 'no archive.today snapshot exists'
+        : arch.reason === 'error'
+          ? (arch.detail || 'archive lookup errored')
+          : 'archive.today snapshot is a 403/incomplete capture';
       throw new Error(`archive_unavailable: ${why} (original: ${message.slice(0, 80)})`);
     }
 

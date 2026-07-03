@@ -96,7 +96,20 @@ export function classifySnapshotText(text: string): 'good' | 'broken' | 'wall' {
  * Attempt to capture an existing archive.today snapshot of `originalUrl`.
  * Returns ok:false with a specific reason when no usable snapshot exists.
  */
+/**
+ * Circuit breaker: archive.today 429s the egress IP after bursts of lookups
+ * (observed 2026-07-02: both .is and .ph serving HTTP 429 + CAPTCHA after an
+ * afternoon of rescues). Hitting it again during the block only extends it.
+ * When a listing request comes back 429, skip archive entirely for a while.
+ */
+const RATE_LIMIT_COOLDOWN_MS = 30 * 60 * 1000;
+let archiveCooldownUntil = 0;
+
 export async function captureViaArchive(originalUrl: string): Promise<ArchiveResult> {
+  if (Date.now() < archiveCooldownUntil) {
+    const minLeft = Math.ceil((archiveCooldownUntil - Date.now()) / 60000);
+    return { ok: false, reason: 'error', detail: `archive.today rate-limited this IP — cooling down ${minLeft} more min` };
+  }
   const browser: Browser = await initBrowser();
   const ctx = await browser.newContext({
     viewport: { width: 1280, height: 800 },
@@ -108,28 +121,62 @@ export async function captureViaArchive(originalUrl: string): Promise<ArchiveRes
   try {
     const page = await ctx.newPage();
     const clean = cleanForArchive(originalUrl);
-    const listUrl = `https://archive.is/${clean}`;
 
-    await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForTimeout(3000);
+    // archive.today serves the same archive on several mirror TLDs and has
+    // historically lost/rotated them. Clearance cookies are per-domain, so a
+    // wall on one mirror doesn't imply the others are walled — try each in
+    // turn on nav failure or challenge. (COOKIES_FILE carries clearance for
+    // .is/.ph/.today; Playwright sends whichever matches the mirror.)
+    const ENTRY_HOSTS = ['archive.is', 'archive.ph', 'archive.today'];
+    let snapshots: string[] = [];
+    let sawWall = false;
+    let reachedListing = false;
+    for (const host of ENTRY_HOSTS) {
+      let listResponse;
+      try {
+        listResponse = await page.goto(`https://${host}/${clean}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      } catch {
+        continue; // mirror down/blocked — try the next one
+      }
 
-    // If the listing page itself is a Cloudflare/archive wall, our cookies are stale.
-    const listText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
-    if (WALL_MARKERS.some((m) => m.test(listText)) && listText.length < 1500) {
-      return { ok: false, reason: 'wall', detail: 'archive.is challenge — clearance cookies likely stale' };
+      // HTTP 429 = IP rate limit, NOT stale cookies. All mirrors share the
+      // block (same backend), so trip the breaker instead of trying the rest —
+      // more requests only extend the ban.
+      if (listResponse && listResponse.status() === 429) {
+        archiveCooldownUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+        console.warn(`[archive-fallback] ${host} returned 429 — cooling down ${RATE_LIMIT_COOLDOWN_MS / 60000}min`);
+        return { ok: false, reason: 'error', detail: `archive.today rate-limited this IP (429) — cooling down ${RATE_LIMIT_COOLDOWN_MS / 60000}min` };
+      }
+      await page.waitForTimeout(3000);
+
+      // If the listing page itself is a Cloudflare/archive wall, clearance for
+      // THIS mirror is stale — another mirror's cookies may still be good.
+      const listText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
+      if (WALL_MARKERS.some((m) => m.test(listText)) && listText.length < 1500) {
+        sawWall = true;
+        continue;
+      }
+
+      reachedListing = true;
+      // Collect candidate snapshots: either a direct redirect to one, or listing links.
+      if (isSnapshotUrl(page.url())) {
+        snapshots = [page.url()];
+      } else {
+        snapshots = await page.evaluate(() => {
+          const links = [...document.querySelectorAll('a')]
+            .map((a) => (a as HTMLAnchorElement).href)
+            .filter((h) => /archive\.(is|ph|today)\/\w{4,6}$/.test(h));
+          return [...new Set(links)];
+        });
+      }
+      break;
     }
 
-    // Collect candidate snapshots: either a direct redirect to one, or listing links.
-    let snapshots: string[] = [];
-    if (isSnapshotUrl(page.url())) {
-      snapshots = [page.url()];
-    } else {
-      snapshots = await page.evaluate(() => {
-        const links = [...document.querySelectorAll('a')]
-          .map((a) => (a as HTMLAnchorElement).href)
-          .filter((h) => /archive\.(is|ph|today)\/\w{4,6}$/.test(h));
-        return [...new Set(links)];
-      });
+    if (!reachedListing) {
+      if (sawWall) {
+        return { ok: false, reason: 'wall', detail: 'archive challenge on all mirrors — clearance cookies likely stale' };
+      }
+      return { ok: false, reason: 'error', detail: 'all archive.today mirrors unreachable' };
     }
 
     if (snapshots.length === 0) {
