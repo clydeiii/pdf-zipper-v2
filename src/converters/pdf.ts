@@ -1261,6 +1261,44 @@ export async function convertUrlToPDF(
       }
     }
 
+    // Lift structured tweet relationships from the Nitter DOM before any
+    // print mutations: the quoted-status link, the reply parent (last
+    // .before-tweet in the thread view), and the exact publish timestamp.
+    // These land in the PDF Info Dict (QuotedTweet / InReplyTo / PublishDate)
+    // so the KB's timeline reconstruction gets real edges. Best-effort — a
+    // missing relation must never fail a capture.
+    let tweetRelations: { quotedTweet?: string; inReplyTo?: string; tweetDate?: string } | undefined;
+    if (isTwitterUrl(url) && targetUrl !== url) {
+      try {
+        const raw = await page.evaluate(() => {
+          const toCanonical = (href: string | null): string | undefined => {
+            const m = href && href.match(/^\/([A-Za-z0-9_]+)\/status\/(\d+)/);
+            return m ? `https://x.com/${m[1]}/status/${m[2]}` : undefined;
+          };
+          const quoteLink = document.querySelector('.main-tweet .quote a.quote-link');
+          const beforeLinks = document.querySelectorAll('.before-tweet a.tweet-link');
+          const parentLink = beforeLinks.length ? beforeLinks[beforeLinks.length - 1] : null;
+          const dateLink = document.querySelector('.main-tweet .tweet-date a');
+          return {
+            quotedTweet: quoteLink ? toCanonical(quoteLink.getAttribute('href')) : undefined,
+            inReplyTo: parentLink ? toCanonical(parentLink.getAttribute('href')) : undefined,
+            dateTitle: dateLink ? dateLink.getAttribute('title') : undefined,
+          };
+        });
+        // Nitter renders "Jul 2, 2026 · 3:21 AM UTC" — parseable once the
+        // separator dot is dropped.
+        let tweetDate: string | undefined;
+        if (raw.dateTitle) {
+          const parsed = new Date(raw.dateTitle.replace('·', ''));
+          if (!isNaN(parsed.getTime())) tweetDate = parsed.toISOString();
+        }
+        if (raw.quotedTweet || raw.inReplyTo || tweetDate) {
+          tweetRelations = { quotedTweet: raw.quotedTweet, inReplyTo: raw.inReplyTo, tweetDate };
+          console.log(`Tweet relations for ${url}: ${JSON.stringify(tweetRelations)}`);
+        }
+      } catch { /* best-effort */ }
+    }
+
     // Take screenshot BEFORE any modifications for quality check
     // Wrap in timeout to avoid font loading hangs
     let screenshotBuffer: Buffer;
@@ -1640,6 +1678,7 @@ export async function convertUrlToPDF(
       pageTitle,
       isXArticle: isNitterCapture ? false : undefined,  // false = Nitter tweet, undefined = not Twitter
       expandedUrl: expandedUrl !== url ? expandedUrl : undefined,
+      tweetRelations,
     };
 
   } finally {

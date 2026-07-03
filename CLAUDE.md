@@ -62,9 +62,11 @@ Failed jobs save the actual PDF (not screenshot) to `data/debug/{jobId}.pdf`. Vi
 ### Karpathy Knowledge Base Pattern
 Every output file is self-describing with embedded metadata — a downstream Claude Code instance on another network builds a wiki from these files. Never write sidecar `.md` files; never assume the consuming side has any context beyond the file itself.
 
+The full metadata contract is documented in `public/doex-enrichment-details.md`, which ships at the root of every nightly captures zip. **Whenever metadata semantics change (new Info Dict field, new MP4 tag, changed meaning), update that file in the same commit** — the consuming side has no other way to learn about the change.
+
 | Format | Where metadata lives |
 |---|---|
-| PDF | Info Dict custom fields: Title, Author, Summary, Tags, Language, Translation, Publication, PublishDate, Creator. Use helpers in `src/utils/pdf-info-dict.ts` — don't re-cast `(pdfDoc as any).getInfoDict()` |
+| PDF | Info Dict custom fields: Title, Author, Summary, Tags, Language, Translation, Publication, PublishDate, Creator. Tweet captures also get **QuotedTweet** / **InReplyTo** (canonical x.com URLs lifted from the Nitter DOM) and an exact DOM-derived PublishDate that overrides the LLM's guess — timeline reconstruction should treat these as authoritative graph edges. Use helpers in `src/utils/pdf-info-dict.ts` — don't re-cast `(pdfDoc as any).getInfoDict()` |
 | MP3 | ID3 standard tags + TXXX custom frames (SUMMARY, TAGS, SOURCE_URL, AUDIO_URL, PODCAST_FEED, DURATION_MS, PUBLISHED_AT) via `node-id3` |
 | MP4 | ffmpeg metadata fields (written with `-movflags use_metadata_tags` so custom keys like `source_url`/`doc_type` survive the muxer; `comment` also packs Summary/Tags/Transcript/Source lines as a reader fallback) + embedded VTT subtitles + `.transcript.pdf` sidecar |
 

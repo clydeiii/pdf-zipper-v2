@@ -31,6 +31,16 @@ export interface PDFSuccessResult {
   pageTitle?: string; // Extracted page title for filename generation
   isXArticle?: boolean; // True if this was an X Article captured directly (not via Nitter)
   expandedUrl?: string; // Final URL after expanding short URLs (t.co, apple.news, etc.)
+  /**
+   * Structured relationships lifted from the Nitter DOM (tweet captures only).
+   * Embedded in the PDF Info Dict so timeline reconstruction downstream gets
+   * real graph edges instead of re-deriving them from rendered text.
+   */
+  tweetRelations?: {
+    quotedTweet?: string; // canonical x.com URL of the quoted status
+    inReplyTo?: string;   // canonical x.com URL of the reply parent
+    tweetDate?: string;   // exact publish time (ISO 8601) from Nitter's DOM
+  };
 }
 
 /**

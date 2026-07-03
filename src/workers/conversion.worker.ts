@@ -377,6 +377,14 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
 
   await job.updateProgress(90);
 
+  // Tweet graph edges from the Nitter DOM → Info Dict. The exact DOM
+  // timestamp overrides the LLM's PublishDate guess (extras are applied
+  // after enrichment fields in embedPdfMetadata, so last write wins).
+  const tweetExtras: Record<string, string> = {};
+  if (result.tweetRelations?.quotedTweet) tweetExtras.QuotedTweet = result.tweetRelations.quotedTweet;
+  if (result.tweetRelations?.inReplyTo) tweetExtras.InReplyTo = result.tweetRelations.inReplyTo;
+  if (result.tweetRelations?.tweetDate) tweetExtras.PublishDate = result.tweetRelations.tweetDate;
+
   // Only save PDF after quality check passes
   const pdfPath = await savePdfToWeeklyBin(result.pdfBuffer, {
     url: filenameUrl,
@@ -385,6 +393,7 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
     originalUrl,
     isXArticle,
     enrichedMetadata,
+    extraInfoDictFields: Object.keys(tweetExtras).length > 0 ? tweetExtras : undefined,
   });
   console.log(`PDF saved to: ${pdfPath}`);
 

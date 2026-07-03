@@ -196,8 +196,25 @@ export async function buildCapturesBundle(): Promise<BundleResult> {
       `files: ${files.length}`,
       `uncompressed: ${formatBytes(bytesUncompressed)}`,
       '',
+      'See doex-enrichment-details.md for the full metadata contract embedded in these files.',
+      '',
     ].join('\n');
     archive.append(manifest, { name: 'MANIFEST.txt' });
+
+    // Metadata-contract doc for the consuming side (Karpathy KB rule: the
+    // bundle must explain itself). Lives in public/ so it's editable without
+    // a rebuild and browsable from the web UI. Best-effort: a missing doc
+    // must not block the nightly bundle.
+    const enrichmentDocPath = path.resolve('public/doex-enrichment-details.md');
+    if (fs.existsSync(enrichmentDocPath)) {
+      archive.file(enrichmentDocPath, { name: 'doex-enrichment-details.md' });
+    } else {
+      console.warn(JSON.stringify({
+        event: 'captures_bundle_warning',
+        error: `doex-enrichment-details.md not found at ${enrichmentDocPath}`,
+        timestamp: now.toISOString(),
+      }));
+    }
 
     for (const f of files) {
       archive.file(f.fullPath, { name: f.zipPath });
