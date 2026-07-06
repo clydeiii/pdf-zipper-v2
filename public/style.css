@@ -5,6 +5,11 @@
   box-sizing: border-box;
 }
 
+/* Generic hide — !important so it beats same-specificity display rules (e.g. .modal's flex) */
+.hidden {
+  display: none !important;
+}
+
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
   line-height: 1.6;
