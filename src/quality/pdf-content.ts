@@ -128,7 +128,10 @@ const STRIPPED_PAGE_PATTERNS = [
  */
 const END_OF_ARTICLE_MARKERS = [
   /\babout\s+the\s+author\b/i,
-  /\blatest\s+in\s+\w[\w\s]{0,30}\b/i,    // "Latest in Crypto", "Latest in Tech"
+  // "Latest in Crypto", "Latest in Tech" — deliberately case-sensitive:
+  // widget headers are Title Case, while prose ("the latest in a string of
+  // reported setbacks", CNBC) is lowercase and must not match.
+  /\bLatest\s+in\s+[A-Z][\w\s]{0,30}\b/,
   /\bmost\s+popular\b/i,
   /\brecommended\s+(stories|articles|reading)\b/i,
   /\brelated\s+(stories|articles|posts)\b/i,

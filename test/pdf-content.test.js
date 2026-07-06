@@ -294,3 +294,15 @@ test('flags archived Bloomberg paywall fade (lede duplicated + Terminal chrome)'
   assert.equal(r.passed, false);
   assert.match(r.reason || '', /paywall/i);
 });
+
+test('prose "the latest in a string of" does NOT trip the Latest-in widget marker', async () => {
+  // Real CNBC copy that false-positived when the marker was case-insensitive.
+  const text =
+    'Nvidia Kyber rack system delayed. ' + filler(600) +
+    ' has been delayed by more than 12 months to 2028, according to research firm SemiAnalysis, ' +
+    'the latest in a string of reported setbacks raising questions about the AI giant’s product roadmap. ' +
+    filler(3000);
+  const pdf = await createPdfWithText(text, { pageCount: 3 });
+  const r = await analyzePdfContent(pdf);
+  assert.equal(r.passed, true);
+});
