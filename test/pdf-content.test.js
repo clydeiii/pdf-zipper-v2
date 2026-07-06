@@ -266,3 +266,31 @@ test('does NOT flag a full article that ends with "You Might Also Like" past the
   const r = await analyzePdfContent(pdf);
   assert.equal(r.passed, true);
 });
+
+test('flags archived Bloomberg paywall fade (lede duplicated + Terminal chrome)', async () => {
+  // Real extracted text from an archive.today snapshot that archived Bloomberg's
+  // paywall fence, not the article: headline + lede rendered twice (visible +
+  // fade layer), "Subscribe", then footer. The archive-fallback path runs this
+  // same check on the rendered snapshot — it must fail so the job is marked
+  // failed instead of saving a paywall capture as success.
+  const lede =
+    'Asian technology stocks slumped after a report that Nvidia Corp.’s ' +
+    'next-generation AI server rack system has been delayed by more than a year ' +
+    'due to manufacturing difficulties. Research firm SemiAnalysis said in an X ' +
+    'post that Nvidia’s Kyber NVL144 hit setbacks in the construction of ' +
+    'printed circuit boards for the platform. Nvidia did not respond to a ' +
+    'request for comment outside of regular office hours. ';
+  const text =
+    'Markets Nvidia AI Server Delay Report Sends Asian Tech Stocks Sliding ' +
+    'By Abhishek Vishnoi and Sangmi Cha July 6, 2026 at 5:52 AM UTC ' +
+    'Save Skip to content The Company & its Products Bloomberg Terminal Demo Request ' +
+    'Bloomberg Anywhere Login Customer Support Translate ' +
+    lede + lede +
+    'Subscribe Home BTV+ Market Data Opinion Audio Originals Magazine Events News ' +
+    'Terms of Service Trademarks Privacy Policy Careers Advertise Ad Choices Help ' +
+    '©2026 Bloomberg L.P. All Rights Reserved.';
+  const pdf = await createPdfWithText(text, { pageCount: 2 });
+  const r = await analyzePdfContent(pdf);
+  assert.equal(r.passed, false);
+  assert.match(r.reason || '', /paywall/i);
+});

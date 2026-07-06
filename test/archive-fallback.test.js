@@ -66,3 +66,11 @@ test('rate_limited classifies as transient and does NOT auto-trigger fix', () =>
   assert.equal(classifyFailureMessage('Instance has been rate limited.'), 'rate_limited');
   assert.equal(shouldAutoTriggerFix('rate_limited').allowed, false);
 });
+
+test('paywalled-snapshot failure classifies as archive_unavailable, no auto-fix', () => {
+  // Wording produced by the worker when captureViaArchive returns reason
+  // 'broken' with the paywalled-snapshot detail.
+  const msg = 'archive_unavailable: archive snapshot is itself a paywall capture — Paywall detected: "Bloomberg Terminal". Article content is behind a subscription wall. (original: truncated: ...)';
+  assert.equal(classifyFailureMessage(msg), 'archive_unavailable');
+  assert.equal(shouldAutoTriggerFix('archive_unavailable').allowed, false);
+});

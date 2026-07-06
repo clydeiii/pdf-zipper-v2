@@ -26,6 +26,7 @@ import type { Browser } from 'playwright';
 import { initBrowser } from '../browsers/manager.js';
 import { loadCookies } from '../browsers/cookies.js';
 import { convertUrlToPDF } from './pdf.js';
+import { analyzePdfContent } from '../quality/pdf-content.js';
 
 const ARCHIVE_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36';
@@ -213,6 +214,7 @@ export async function captureViaArchive(originalUrl: string): Promise<ArchiveRes
     }
 
     // Try the newest few (listing is newest-first); first good one wins.
+    let paywalledSnapshotReason: string | undefined;
     for (const snap of snapshots.slice(0, 3)) {
       try {
         await page.goto(snap, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -230,6 +232,18 @@ export async function captureViaArchive(originalUrl: string): Promise<ArchiveRes
         // page.pdf here produced near-empty PDFs, so delegate.
         const rendered = await convertUrlToPDF(snap);
         if (rendered.success && rendered.pdfBuffer.length >= 5000) {
+          // The snapshot can be a faithful copy of the PAYWALL rather than the
+          // article: archive.today's crawler gets walled too, and a lede-only
+          // fade (observed: Bloomberg, lede duplicated + "Subscribe") clears
+          // GOOD_TEXT_THRESHOLD on page chrome alone. Run the rendered PDF
+          // through the same content checks as a primary capture; an older
+          // snapshot may predate the wall, so fall through rather than bail.
+          const content = await analyzePdfContent(rendered.pdfBuffer);
+          if (!content.passed) {
+            console.warn(`[archive-fallback] snapshot ${snap} rendered but failed content check: ${content.reason}`);
+            paywalledSnapshotReason = content.reason;
+            continue;
+          }
           // Carry the snapshot's real headline so enrichment can anchor the
           // title to it (archive.today preserves the original page <title>).
           return { ok: true, pdfBuffer: rendered.pdfBuffer, extractedText: text, snapshotUrl: snap, pageTitle: rendered.pageTitle };
@@ -241,6 +255,9 @@ export async function captureViaArchive(originalUrl: string): Promise<ArchiveRes
       }
     }
 
+    if (paywalledSnapshotReason) {
+      return { ok: false, reason: 'broken', detail: `archive snapshot is itself a paywall capture — ${paywalledSnapshotReason}` };
+    }
     return { ok: false, reason: 'broken' };
   } catch (err) {
     return { ok: false, reason: 'error', detail: err instanceof Error ? err.message : String(err) };
