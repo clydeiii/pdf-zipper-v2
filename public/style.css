@@ -85,6 +85,12 @@ header h1 {
   font-size: 0.9rem;
 }
 
+.week-item .week-range {
+  color: #343a40;
+  font-weight: 500;
+  margin-bottom: 3px;
+}
+
 /* Toolbar */
 .toolbar {
   display: flex;

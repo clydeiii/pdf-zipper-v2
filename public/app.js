@@ -211,6 +211,7 @@ async function loadWeeks() {
     weeksList.innerHTML = weeks.map(week => `
       <div class="week-item" onclick="loadWeek('${week.path}')">
         <h3>${week.path}</h3>
+        <p class="week-range">${formatWeekRange(week.path)}</p>
         <p>${week.fileCount} file${week.fileCount !== 1 ? 's' : ''}</p>
       </div>
     `).join('');
@@ -235,7 +236,8 @@ async function loadWeek(weekId) {
   filterStatus.textContent = '';
 
   // Update UI
-  weekTitle.textContent = `${weekId}`;
+  const rangeText = formatWeekRange(weekId);
+  weekTitle.textContent = rangeText ? `${weekId} (${rangeText})` : `${weekId}`;
   filesTbody.innerHTML = '<tr><td colspan="5" class="loading">Loading files...</td></tr>';
   showFiles();
 
@@ -542,6 +544,18 @@ function isoWeekDayRange(weekId) {
   sunday.setDate(monday.getDate() + 6);
   const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   return { start: fmt(monday), end: fmt(sunday) };
+}
+
+/**
+ * Human-readable Monday–Sunday range for an ISO week id:
+ * "2026-W28" → "Jul 6 – Jul 12". Empty string for malformed ids.
+ */
+function formatWeekRange(weekId) {
+  const range = isoWeekDayRange(weekId);
+  if (!range) return '';
+  const pretty = (key) => new Date(key + 'T12:00:00')
+    .toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  return `${pretty(range.start)} – ${pretty(range.end)}`;
 }
 
 /**
