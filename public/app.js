@@ -526,6 +526,25 @@ function localDayKey(iso) {
 }
 
 /**
+ * Monday..Sunday day-key range for an ISO week id like "2026-W28".
+ * Used to flag day groups whose files were modified after the week ended
+ * (metadata re-embeds bump mtime past the week boundary).
+ */
+function isoWeekDayRange(weekId) {
+  const m = /^(\d{4})-W(\d{2})$/.exec(weekId || '');
+  if (!m) return null;
+  const year = +m[1], week = +m[2];
+  // ISO 8601: week 1 is the week containing Jan 4. Walk back to its Monday,
+  // then forward (week-1) whole weeks.
+  const jan4 = new Date(year, 0, 4);
+  const monday = new Date(year, 0, 4 - ((jan4.getDay() + 6) % 7) + (week - 1) * 7);
+  const sunday = new Date(monday);
+  sunday.setDate(monday.getDate() + 6);
+  const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return { start: fmt(monday), end: fmt(sunday) };
+}
+
+/**
  * Get items matching the current filter.
  *
  * The filter is a space-separated list of terms, ALL of which must match:
@@ -623,6 +642,7 @@ function renderFilteredItems() {
 
   // Render table rows; in date order, group by capture day with a separator
   // row carrying that day's file count and total size.
+  const weekRange = isoWeekDayRange(currentWeekId);
   const rows = [];
   let currentDay = null;
   for (let index = 0; index < sorted.length; index++) {
@@ -636,7 +656,13 @@ function renderFilteredItems() {
         const failedCount = dayItems.filter(i => i.isFailed).length;
         const label = new Date(day + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
         const failedNote = failedCount > 0 ? ` · ${failedCount} failed` : '';
-        rows.push(`<tr class="day-sep"><td colspan="5">${label} — ${dayItems.length - failedCount} file(s), ${formatFileSize(dayBytes)}${failedNote}</td></tr>`);
+        // A file binned to this week but modified after it ended (metadata
+        // re-embed, dedup tag append) groups under its later mtime day —
+        // flag it so the group isn't mistaken for that day's capture volume.
+        const outOfWeekNote = weekRange && day > weekRange.end
+          ? ` · this week's file(s) updated later, not that day's captures — see that date's own week`
+          : '';
+        rows.push(`<tr class="day-sep"><td colspan="5">${label} — ${dayItems.length - failedCount} file(s), ${formatFileSize(dayBytes)}${failedNote}${outOfWeekNote}</td></tr>`);
       }
     }
     rows.push(item.isFailed ? renderFailedRow(item, index) : renderFileRow(item, index));
