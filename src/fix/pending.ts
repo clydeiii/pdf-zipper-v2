@@ -6,7 +6,7 @@
  */
 
 import { queueConnection } from '../config/redis.js';
-import { isInCooldown, recordFixAttempt, updateFixOutcome } from './ledger.js';
+import { getFixLedgerEntry, isInCooldown, recordFixAttempt, updateFixOutcome } from './ledger.js';
 import { classifyFailureMessage } from './failure.js';
 import { shouldAllowManualSubmission, shouldAutoTriggerFix } from './trigger-policy.js';
 import type { FixJobContext, FixHistoryEntry } from '../jobs/fix-types.js';
@@ -24,6 +24,17 @@ const KEYS = {
   /** Prefix for batch detail payloads */
   BATCH_PREFIX: 'fix:batch:',
 };
+
+/**
+ * Max automatic diagnosis attempts per URL. Without a cap, a URL whose fix
+ * can't succeed without human action loops forever: the batch's replay gate
+ * re-runs the URL → it fails again → the failure re-queues itself once its
+ * cooldown (1h for quality classes) lapses before the next 12h processor run.
+ * Observed: one the-decoder URL accumulated 60+ ledger events this way.
+ * Manual "Fix Selected" submissions are exempt — the user is explicitly
+ * re-engaging, usually after merging a fix branch.
+ */
+const MAX_AUTO_ATTEMPTS = 5;
 
 /**
  * Add items to the pending fix queue
@@ -58,6 +69,24 @@ export async function addPendingFixes(items: FixJobContext[]): Promise<number> {
     }
 
     item.triggerReason = triggerDecision.reason;
+
+    // Lifetime attempt cap for automatic requeues (see MAX_AUTO_ATTEMPTS).
+    if (item.requestedBy === 'automatic') {
+      const ledger = await getFixLedgerEntry(item.url);
+      if (ledger && ledger.attemptCount >= MAX_AUTO_ATTEMPTS) {
+        await updateFixOutcome({
+          url: item.url,
+          outcome: 'skipped',
+          failureClass,
+          details: {
+            reason: 'auto_attempt_cap',
+            attemptCount: ledger.attemptCount,
+          },
+        });
+        skipped++;
+        continue;
+      }
+    }
 
     // Cooldown check unless explicitly overridden.
     const inCooldown = await isInCooldown(item.url);
@@ -107,6 +136,28 @@ export async function addPendingFixes(items: FixJobContext[]): Promise<number> {
 
   console.log(`Added ${added} items to fix queue (${skipped} skipped)`);
   return added;
+}
+
+/**
+ * Remove any pending fix requests for a URL. Used by the manual-capture
+ * route: a hand-captured page resolves the failure, so a queued diagnosis
+ * would only churn (its replay gate re-runs a URL that's already saved).
+ *
+ * @returns Number of pending items removed
+ */
+export async function removePendingFixesByUrl(url: string): Promise<number> {
+  const rawItems = await queueConnection.lrange(KEYS.PENDING, 0, -1);
+  let removed = 0;
+  for (const raw of rawItems) {
+    try {
+      const item = JSON.parse(raw) as FixJobContext;
+      if (item.url === url) {
+        removed += await queueConnection.lrem(KEYS.PENDING, 1, raw);
+      }
+    } catch { /* unparseable entry — leave it */ }
+  }
+  await queueConnection.srem(KEYS.PENDING_URLS, url);
+  return removed;
 }
 
 /**

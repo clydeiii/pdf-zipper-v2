@@ -23,6 +23,7 @@ import { analyzePdfContent } from '../quality/pdf-content.js';
 import { getISOWeekNumber } from '../media/organization.js';
 import { notifyJobComplete, notifyJobFailed, isDiscordEnabled } from '../notifications/discord.js';
 import { addPendingFixes } from '../fix/pending.js';
+import { BookmarkDeduplicator } from '../urls/deduplicator.js';
 import { classifyFailureMessage } from '../fix/failure.js';
 import { shouldAutoTriggerFix } from '../fix/trigger-policy.js';
 import { updateFixOutcome } from '../fix/ledger.js';
@@ -425,6 +426,24 @@ async function maybeQueueAutoFix(
   if (!env.FIX_ENABLED) return;
 
   const failureClass = classifyFailureMessage(error.message);
+
+  // A manual Chrome-extension capture of this URL already exists — the
+  // failure is moot, and a queued diagnosis would loop forever (its replay
+  // gate re-runs the URL, the re-run fails, the failure re-queues itself).
+  try {
+    const dedup = new BookmarkDeduplicator(workerConnection);
+    const source = await dedup.getUrlSource(job.data.originalUrl || job.data.url);
+    if ((source as string) === 'manual') {
+      await updateFixOutcome({
+        url: job.data.originalUrl || job.data.url,
+        outcome: 'skipped',
+        failureClass,
+        details: { reason: 'manually_captured', source: 'conversion_final_failure' },
+      });
+      return;
+    }
+  } catch { /* redis hiccup — fall through to normal queueing */ }
+
   const decision = shouldAutoTriggerFix(failureClass);
 
   if (!decision.allowed) {

@@ -24,6 +24,7 @@ import { getISOWeekNumber } from '../../media/organization.js';
 import { BookmarkDeduplicator } from '../../urls/deduplicator.js';
 import { queueConnection } from '../../config/redis.js';
 import { createKarakeepBookmark } from '../../feeds/karakeep-api.js';
+import { removePendingFixesByUrl } from '../../fix/pending.js';
 import { sendDiscordNotification } from '../../notifications/discord.js';
 import { readdir, unlink } from 'node:fs/promises';
 
@@ -405,6 +406,21 @@ manualCaptureRouter.post(
         }
       } catch (error) {
         console.warn('[manual-capture] markUrlSeen failed (non-fatal):', error instanceof Error ? error.message : error);
+      }
+
+      // A hand capture resolves any queued fix diagnosis for this URL —
+      // remove it, or the fix batch's replay gate keeps re-running (and
+      // re-failing) a URL that's already saved.
+      try {
+        let removedPendingFixes = await removePendingFixesByUrl(body.url);
+        if (body.url !== urlForSave) {
+          removedPendingFixes += await removePendingFixesByUrl(urlForSave);
+        }
+        if (removedPendingFixes > 0) {
+          console.log(`[manual-capture] removed ${removedPendingFixes} pending fix request(s) for captured URL`);
+        }
+      } catch (error) {
+        console.warn('[manual-capture] removePendingFixesByUrl failed (non-fatal):', error instanceof Error ? error.message : error);
       }
 
       // Re-capture across ISO weeks: remove the stale copy an earlier capture
