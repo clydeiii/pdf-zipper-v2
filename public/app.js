@@ -450,7 +450,7 @@ function getFailureType(reason) {
  * Handle select-all checkbox toggle
  */
 function handleSelectAll() {
-  const checkboxes = filesTbody.querySelectorAll('input[type="checkbox"]:not(:disabled)');
+  const checkboxes = filesTbody.querySelectorAll('input[type="checkbox"]:not(:disabled):not(.day-select)');
   const isChecked = selectAllCheckbox.checked;
 
   checkboxes.forEach(cb => {
@@ -464,7 +464,45 @@ function handleSelectAll() {
     }
   });
 
+  updateDaySelectState();
   updateDownloadButtonState();
+}
+
+/**
+ * Day-separator checkbox: select/deselect every SAVED (non-failed) file from
+ * that local day in the current filtered view — one click to export a day's zip.
+ */
+function handleDaySelectChange(checkbox) {
+  const day = checkbox.dataset.day;
+  const isChecked = checkbox.checked;
+  getFilteredItems().forEach((item) => {
+    if (item.isFailed || localDayKey(item.modified) !== day) return;
+    const key = `file:${item.path}`;
+    if (isChecked) {
+      selectedFiles.add(key);
+    } else {
+      selectedFiles.delete(key);
+    }
+  });
+  restoreSelectionState();
+  updateSelectAllState();
+  updateDownloadButtonState();
+}
+
+/**
+ * Sync each day-separator checkbox with its day's saved-file selection:
+ * checked when all selected, indeterminate when some are.
+ */
+function updateDaySelectState() {
+  const dayBoxes = filesTbody.querySelectorAll('input.day-select');
+  if (dayBoxes.length === 0) return;
+  const items = getFilteredItems().filter((i) => !i.isFailed);
+  dayBoxes.forEach((box) => {
+    const dayItems = items.filter((i) => localDayKey(i.modified) === box.dataset.day);
+    const selectedCount = dayItems.filter((i) => selectedFiles.has(`file:${i.path}`)).length;
+    box.checked = dayItems.length > 0 && selectedCount === dayItems.length;
+    box.indeterminate = selectedCount > 0 && selectedCount < dayItems.length;
+  });
 }
 
 /**
@@ -676,7 +714,15 @@ function renderFilteredItems() {
         const outOfWeekNote = weekRange && day > weekRange.end
           ? ` · this week's file(s) updated later, not that day's captures — see that date's own week`
           : '';
-        rows.push(`<tr class="day-sep"><td colspan="5">${label} — ${dayItems.length - failedCount} file(s), ${formatFileSize(dayBytes)}${failedNote}${outOfWeekNote}</td></tr>`);
+        const successCount = dayItems.length - failedCount;
+        rows.push(`<tr class="day-sep">
+          <td class="col-checkbox">
+            <input type="checkbox" class="day-select" data-day="${day}"
+              onchange="handleDaySelectChange(this)" ${successCount === 0 ? 'disabled' : ''}
+              title="Select all saved files from ${label}">
+          </td>
+          <td colspan="4">${label} — ${successCount} file(s), ${formatFileSize(dayBytes)}${failedNote}${outOfWeekNote}</td>
+        </tr>`);
       }
     }
     rows.push(item.isFailed ? renderFailedRow(item, index) : renderFileRow(item, index));
@@ -719,29 +765,31 @@ function updateSortIndicators() {
  * Restore checkbox selection state after re-render
  */
 function restoreSelectionState() {
-  const checkboxes = filesTbody.querySelectorAll('input[type="checkbox"]');
+  const checkboxes = filesTbody.querySelectorAll('input[type="checkbox"]:not(.day-select)');
   checkboxes.forEach(cb => {
     const key = getItemKey(cb);
     cb.checked = selectedFiles.has(key);
   });
+  updateDaySelectState();
 }
 
 /**
  * Update select-all checkbox state based on individual checkboxes
  */
 function updateSelectAllState() {
-  const checkboxes = Array.from(filesTbody.querySelectorAll('input[type="checkbox"]:not(:disabled)'));
+  const checkboxes = Array.from(filesTbody.querySelectorAll('input[type="checkbox"]:not(:disabled):not(.day-select)'));
   const checkedCount = checkboxes.filter(cb => cb.checked).length;
 
   selectAllCheckbox.checked = checkboxes.length > 0 && checkedCount === checkboxes.length;
   selectAllCheckbox.indeterminate = checkedCount > 0 && checkedCount < checkboxes.length;
+  updateDaySelectState();
 }
 
 /**
  * Update action buttons enabled/disabled state based on selection
  */
 function updateDownloadButtonState() {
-  const checkboxes = filesTbody.querySelectorAll('input[type="checkbox"]:checked');
+  const checkboxes = filesTbody.querySelectorAll('input[type="checkbox"]:checked:not(.day-select)');
   const hasSelection = checkboxes.length > 0;
 
   downloadButton.disabled = !hasSelection;
@@ -824,7 +872,7 @@ function getRelativeTime(date) {
  * better with Chrome's security policies for file downloads.
  */
 function downloadSelected() {
-  const checkboxes = filesTbody.querySelectorAll('input[type="checkbox"]:checked');
+  const checkboxes = filesTbody.querySelectorAll('input[type="checkbox"]:checked:not(.day-select)');
   // Only include items with a file path (failed items have no file on disk)
   const filePaths = Array.from(checkboxes)
     .map(cb => cb.dataset.path)
@@ -957,7 +1005,7 @@ async function rerunAll() {
  * For failed items: uses the stored URL directly
  */
 async function rerunSelected() {
-  const checkboxes = filesTbody.querySelectorAll('input[type="checkbox"]:checked');
+  const checkboxes = filesTbody.querySelectorAll('input[type="checkbox"]:checked:not(.day-select)');
 
   if (checkboxes.length === 0) {
     showStatus('Please select items to rerun', 'error');
@@ -1030,7 +1078,7 @@ async function rerunSelected() {
  * - Failed items: removed from BullMQ job history
  */
 async function deleteSelected() {
-  const checkboxes = filesTbody.querySelectorAll('input[type="checkbox"]:checked');
+  const checkboxes = filesTbody.querySelectorAll('input[type="checkbox"]:checked:not(.day-select)');
 
   // Separate files and failed items
   const filePaths = [];
@@ -1127,7 +1175,7 @@ async function deleteSelected() {
  * - Failed items → false negative (should have succeeded)
  */
 async function fixSelected() {
-  const checkboxes = filesTbody.querySelectorAll('input[type="checkbox"]:checked');
+  const checkboxes = filesTbody.querySelectorAll('input[type="checkbox"]:checked:not(.day-select)');
 
   if (checkboxes.length === 0) {
     showStatus('Please select items to diagnose', 'error');
