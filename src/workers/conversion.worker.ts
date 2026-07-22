@@ -303,12 +303,25 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
       qualityResult = await scoreScreenshotQuality(result.screenshotBuffer);
       console.log(`Quality score for ${url}: ${qualityResult.score.score} - ${qualityResult.score.reasoning}`);
       if (!qualityResult.passed) {
-        // Save debug PDF before failing (so user can inspect the actual output)
-        await saveDebugPdf(job.id!, result.pdfBuffer);
-        // Quality check failed - throw error to fail the job
-        // This ensures failed PDFs don't get saved and show as clickable failures in UI
-        const issue = qualityResult.score.issue || 'quality_failed';
-        throw new Error(`${issue}: ${qualityResult.score.reasoning}`);
+        // Nitter tweet threads (dark theme, narrow centered column, stat rows)
+        // read as "broken/fragmented layout" to the vision model even when the
+        // capture is complete. When the model can't name a concrete blocker
+        // (paywall/bot/blank/login/error), defer to analyzePdfContent below —
+        // its lenient tweet mode judges the actual extracted text and still
+        // fails truly empty captures. Concrete blockers keep failing here.
+        const softIssues = [undefined, 'quality_failed', 'unknown'];
+        const isTweetCapture = isXArticle === false;
+        if (isTweetCapture && softIssues.includes(qualityResult.score.issue)) {
+          console.log(`Vision layout complaint on tweet capture for ${url} — deferring to PDF content analysis`);
+          qualityResult = { ...qualityResult, passed: true };
+        } else {
+          // Save debug PDF before failing (so user can inspect the actual output)
+          await saveDebugPdf(job.id!, result.pdfBuffer);
+          // Quality check failed - throw error to fail the job
+          // This ensures failed PDFs don't get saved and show as clickable failures in UI
+          const issue = qualityResult.score.issue || 'quality_failed';
+          throw new Error(`${issue}: ${qualityResult.score.reasoning}`);
+        }
       }
     }
   } catch (error) {

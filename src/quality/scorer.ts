@@ -34,8 +34,9 @@ Score the quality from 0-100:
 VALID pages that should score 80+:
 - Article with headline and opening paragraphs visible (even if article continues below)
 - Tweet/post with the content visible
+- Tweet/social thread: a vertical column of short posts with avatars, handles, timestamps, and engagement counts. This is the site's normal layout — do NOT call it "fragmented" or "broken", and do NOT penalize it for lacking a headline or opening paragraphs
 - Blog post with title and beginning of content
-- Dark-themed pages with readable text
+- Dark-themed pages with readable text (including dark pages where content occupies a narrow centered column)
 
 Respond with ONLY valid JSON:
 {"score": <number 0-100>, "issue": "<issue_type or null>", "reasoning": "<brief explanation>"}
