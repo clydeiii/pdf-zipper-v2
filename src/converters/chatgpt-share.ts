@@ -41,6 +41,9 @@ export interface ChatGptShareResult {
 interface HarvestedMessage {
   role: string;
   md: string;
+  /** Index of the message's direct-child container in the thread list — the
+   * conversation's true order regardless of when hydration let us see it. */
+  idx: number;
 }
 
 /** In-page helpers, serialized into the browser context. */
@@ -68,14 +71,39 @@ const PAGE_HELPERS = `
       .replace(/\\n{3,}/g, '\\n\\n')
       .trim();
   };
+  window.__cgsRoot = () => [...document.querySelectorAll('div')]
+    .find(d => d.children.length > 20 && d.getBoundingClientRect().height > 5000);
   window.__cgsHarvest = () => {
+    const root = window.__cgsRoot();
+    if (!root) return 0;
+    const kids = [...root.children];
     document.querySelectorAll('[data-message-id]').forEach(msg => {
       const id = msg.getAttribute('data-message-id');
       if (window.__cgs.seen[id] || (msg.innerText || '').length === 0) return;
-      window.__cgs.seen[id] = { role: msg.getAttribute('data-message-author-role') || 'unknown', md: window.__cgsToMd(msg) };
+      let container = msg;
+      while (container.parentElement && container.parentElement !== root) container = container.parentElement;
+      window.__cgs.seen[id] = {
+        role: msg.getAttribute('data-message-author-role') || 'unknown',
+        md: window.__cgsToMd(msg),
+        idx: kids.indexOf(container),
+      };
       window.__cgs.order.push(id);
     });
     return window.__cgs.order.length;
+  };
+  /** Thread-list child indices that hold a still-unharvested placeholder. */
+  window.__cgsMissing = () => {
+    const root = window.__cgsRoot();
+    if (!root) return [];
+    const harvestedIdx = new Set(Object.values(window.__cgs.seen).map(m => m.idx));
+    return [...root.children]
+      .map((k, i) => ({ i, h: k.getBoundingClientRect().height }))
+      .filter(({ i, h }) => h > 50 && !harvestedIdx.has(i))
+      .map(({ i }) => i);
+  };
+  window.__cgsScrollChildIntoView = (i) => {
+    const root = window.__cgsRoot();
+    if (root && root.children[i]) root.children[i].scrollIntoView({ block: 'center' });
   };
   window.__cgsScroller = () => [...document.querySelectorAll('div')]
     .find(el => el.scrollHeight > el.clientHeight + 2000 && /(auto|scroll)/.test(getComputedStyle(el).overflowY));
@@ -111,11 +139,38 @@ async function harvestConversation(page: Page): Promise<{ messages: HarvestedMes
     }
   }
 
+  // Mop-up: placeholders hydration skipped during the linear passes (often
+  // the very last message) — target each directly and give it time.
+  for (let round = 0; round < 3; round++) {
+    const missing: number[] = await page.evaluate(() => (window as any).__cgsMissing());
+    if (missing.length === 0) break;
+    console.log(`[chatgpt-share] mop-up round ${round + 1}: ${missing.length} unhydrated block(s)`);
+    for (const idx of missing) {
+      if (Date.now() - started > MAX_TOTAL_MS) break;
+      await page.evaluate((i) => (window as any).__cgsScrollChildIntoView(i), idx);
+      await page.waitForTimeout(STALL_DWELL_MS);
+      await page.evaluate(() => (window as any).__cgsHarvest());
+    }
+  }
+
   const raw = await page.evaluate(() => {
     const s = (window as any).__cgs;
-    return { title: document.title, messages: s.order.map((id: string) => s.seen[id]) };
+    return {
+      title: document.title,
+      messages: s.order.map((id: string) => s.seen[id]),
+      stillMissing: (window as any).__cgsMissing().length,
+    };
   });
-  return { messages: raw.messages, title: raw.title };
+  // DOM child index is the conversation's true order — first-seen order is
+  // scroll-pass order, which misplaces pass-2 stragglers at the end.
+  const messages = (raw.messages as HarvestedMessage[]).sort((a, b) => a.idx - b.idx);
+  if (raw.stillMissing > 0) {
+    console.warn(`[chatgpt-share] ${raw.stillMissing} block(s) never hydrated — capture may be missing messages`);
+  }
+  if (messages.length > 0 && messages[messages.length - 1].role === 'user') {
+    console.warn('[chatgpt-share] conversation ends on a user turn — final assistant reply may be missing');
+  }
+  return { messages, title: raw.title };
 }
 
 function escapeHtml(s: string): string {
@@ -141,12 +196,15 @@ function messageBodyHtml(md: string): string {
 }
 
 function buildHtml(title: string, url: string, messages: HarvestedMessage[]): string {
+  // ChatGPT's own visual language: user turns as right-aligned gray bubbles
+  // (no label needed — the bubble is the signal), assistant turns as plain
+  // full-width text.
   const body = messages
-    .map((m) => {
-      const roleClass = m.role === 'user' ? 'user' : 'assistant';
-      const roleLabel = m.role === 'user' ? 'User' : 'Assistant';
-      return `<section class="msg ${roleClass}"><div class="role">${roleLabel}</div>${messageBodyHtml(m.md)}</section>`;
-    })
+    .map((m) =>
+      m.role === 'user'
+        ? `<section class="msg user"><div class="bubble">${messageBodyHtml(m.md)}</div></section>`
+        : `<section class="msg assistant">${messageBodyHtml(m.md)}</section>`
+    )
     .join('\n');
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8">
@@ -155,14 +213,14 @@ function buildHtml(title: string, url: string, messages: HarvestedMessage[]): st
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
 <style>
-  body { font-family: Georgia, 'Times New Roman', serif; font-size: 11.5px; line-height: 1.55; color: #1a1a1a; max-width: 720px; margin: 0 auto; padding: 24px; }
-  h1 { font-size: 19px; margin-bottom: 2px; }
-  .meta { color: #666; font-size: 10px; margin-bottom: 22px; word-break: break-all; }
-  .msg { margin-bottom: 18px; break-inside: avoid-page; }
-  .msg.user { background: #f0f2f5; border-radius: 10px; padding: 10px 14px; }
-  .role { font-weight: bold; font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.08em; color: #888; margin-bottom: 4px; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; font-size: 11px; line-height: 1.6; color: #0d0d0d; max-width: 700px; margin: 0 auto; padding: 24px; }
+  h1 { font-size: 18px; font-weight: 600; margin-bottom: 2px; }
+  .meta { color: #8f8f8f; font-size: 9.5px; margin-bottom: 26px; word-break: break-all; }
+  .msg { margin-bottom: 22px; }
+  .msg.user { display: flex; justify-content: flex-end; break-inside: avoid-page; }
+  .msg.user .bubble { background: #f3f3f3; border-radius: 18px; padding: 9px 16px; max-width: 82%; }
   .prose { white-space: pre-wrap; }
-  .code { background: #f6f6f4; border: 1px solid #e2e2de; border-radius: 6px; padding: 8px 10px; font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 9.5px; white-space: pre-wrap; word-break: break-word; }
+  .code { background: #f9f9f9; border: 1px solid #ececec; border-radius: 12px; padding: 10px 12px; font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 9px; white-space: pre-wrap; word-break: break-word; }
   .katex-display { overflow-x: hidden; margin: 0.4em 0; }
   .katex { font-size: 1.02em; }
 </style>
