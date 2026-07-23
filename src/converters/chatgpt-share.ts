@@ -51,6 +51,20 @@ const PAGE_HELPERS = `
   window.__cgs = window.__cgs || { seen: {}, order: [] };
   window.__cgsToMd = (msgEl) => {
     const clone = msgEl.cloneNode(true);
+    // List markers are CSS pseudo-elements, invisible to innerText — inject
+    // them as real text so bullets/numbering survive into the markdown.
+    clone.querySelectorAll('li').forEach(li => {
+      let depth = 0, el = li.parentElement;
+      while (el && el !== clone) { if (/^(UL|OL)$/.test(el.tagName)) depth++; el = el.parentElement; }
+      let marker = '\\u2022 ';
+      const parent = li.parentElement;
+      if (parent && parent.tagName === 'OL') {
+        const items = [...parent.children].filter(c => c.tagName === 'LI');
+        const start = parseInt(parent.getAttribute('start') || '1', 10) || 1;
+        marker = (start + items.indexOf(li)) + '. ';
+      }
+      li.insertBefore(document.createTextNode('    '.repeat(Math.max(0, depth - 1)) + marker), li.firstChild);
+    });
     clone.querySelectorAll('.katex-display').forEach(el => {
       const tex = el.querySelector('annotation[encoding="application/x-tex"]');
       el.replaceWith(document.createTextNode('\\n$$' + (tex ? tex.textContent : el.textContent) + '$$\\n'));
@@ -68,6 +82,9 @@ const PAGE_HELPERS = `
       .filter(line => !/^(Copy code|Copy|Edit|Share)$/.test(line.trim()))
       .join('\\n')
       .replace(/Show more\\s*Show less/g, '')
+      // The injected marker lands before the li's block-level <p>, so
+      // innerText breaks the line after it — rejoin marker + item text.
+      .replace(/(\\n[ \\t]*(?:\\u2022|\\d+\\.))[ \\t]*\\n+/g, '$1 ')
       .replace(/\\n{3,}/g, '\\n\\n')
       .trim();
   };
