@@ -184,7 +184,11 @@ function escapeHtml(s: string): string {
 function messageBodyHtml(md: string): string {
   // Tighten vertical rhythm: blank lines hugging a display-math block double
   // up with .katex-display margins and read as huge gaps in print.
-  const tightened = md.replace(/\n+\$\$/g, '\n$$').replace(/\$\$\n+/g, '$$\n');
+  // Replacer FUNCTIONS are load-bearing: in a replacement *string*, "$$" is
+  // the escape for one literal "$" — the string form silently rewrote every
+  // display delimiter to a single "$", breaking KaTeX ($-inline math can't
+  // hold \tag) and leaking raw LaTeX into the PDF.
+  const tightened = md.replace(/\n+\$\$/g, () => '\n$$').replace(/\$\$\n+/g, () => '$$\n');
   const parts = tightened.split(/```/);
   return parts
     .map((part, i) =>
