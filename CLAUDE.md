@@ -28,6 +28,7 @@ These are non-obvious rules that aren't derivable from a quick code read. Respec
 - **PDF URLs** (`.pdf`, arxiv `/abs/` `/html/` `/pdf/`) → direct fetch pass-through (skip Playwright). arxiv `/abs/` is rewritten to `/pdf/` first
 - **Karakeep PDF asset** (`content.type: "asset"`, `assetType: "pdf"`) → media collection, download via `/api/assets/{id}`. Filename lives in `bookmark.assets[].fileName`, not `content.fileName`
 - **Twitter/X** → rewritten to local Nitter (`NITTER_HOST`). Exception: X Articles go direct (Nitter can't render)
+- **ChatGPT share links** (`chatgpt.com/share/<id>`) → scroll-harvest converter (`src/converters/chatgpt-share.ts`). The share page is a virtualized list (only ~6 messages hydrated at a time; the rest are empty placeholders that un-hydrate on scroll-away), so ANY direct print — Playwright or the Chrome extension — captures one viewport + blank pages. The converter slow-scrolls to hydrate every message, harvests markdown (KaTeX → original LaTeX via the embedded `<annotation>`), and renders its own clean KaTeX document to PDF. Falls back to regular conversion on harvest failure.
 - Everything else → `conversionQueue` (Playwright)
 
 Rerun endpoints must apply the same routing — both `/weeks/:weekId/rerun` and `/rerun-selected` check `isApplePodcastsUrl()` before queuing.

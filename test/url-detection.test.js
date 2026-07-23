@@ -62,3 +62,12 @@ test('rewriteToPdfUrl passes through non-arxiv URLs unchanged', () => {
     'https://example.com/article'
   );
 });
+
+test('isChatGptShareUrl matches share links only', async () => {
+  const { isChatGptShareUrl } = await import('../dist/converters/chatgpt-share.js');
+  assert.equal(isChatGptShareUrl('https://chatgpt.com/share/6a5fdc7a-d6f8-83e8-bbea-8deb42cfed56'), true);
+  assert.equal(isChatGptShareUrl('https://chatgpt.com/share/6a5fdc7a-d6f8-83e8-bbea-8deb42cfed56/'), true);
+  assert.equal(isChatGptShareUrl('https://chatgpt.com/c/some-conversation'), false);
+  assert.equal(isChatGptShareUrl('https://chatgpt.com/'), false);
+  assert.equal(isChatGptShareUrl('https://example.com/share/abc'), false);
+});

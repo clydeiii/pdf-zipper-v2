@@ -30,6 +30,7 @@ import { updateFixOutcome } from '../fix/ledger.js';
 import { addJobToWeekIndex } from '../jobs/week-index.js';
 import { enrichDocumentMetadata, type EnrichedMetadata } from '../metadata/enrichment.js';
 import { captureViaArchive } from '../converters/archive-fallback.js';
+import { isChatGptShareUrl, captureChatGptShare } from '../converters/chatgpt-share.js';
 
 /** Reference to the worker instance. Created explicitly by startWorker(). */
 let conversionWorker: Worker<ConversionJobData, ConversionJobResult> | null = null;
@@ -187,6 +188,48 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
 
   // Initial progress
   await job.updateProgress(10);
+
+  // ChatGPT share links: the conversation is a virtualized list, so a plain
+  // print captures one viewport + blank pages. Use the scroll-harvest
+  // converter, which rebuilds the full thread with rendered math. On failure
+  // fall through to the regular Playwright path (better than nothing).
+  if (isChatGptShareUrl(originalUrl || url)) {
+    console.log(`ChatGPT share URL detected, using scroll-harvest capture: ${originalUrl || url}`);
+    const shareResult = await captureChatGptShare(originalUrl || url);
+    await job.updateProgress(60);
+    if (shareResult.success && shareResult.pdfBuffer) {
+      const title = jobTitle || shareResult.pageTitle;
+      let enrichedMetadata: EnrichedMetadata | undefined;
+      try {
+        if (shareResult.extractedText && shareResult.extractedText.length > 100) {
+          enrichedMetadata = await enrichDocumentMetadata(shareResult.extractedText, originalUrl || url, title);
+        }
+      } catch { /* non-fatal */ }
+      await job.updateProgress(80);
+      const filePath = await savePdfToWeeklyBin(shareResult.pdfBuffer, {
+        url,
+        title,
+        bookmarkedAt,
+        originalUrl,
+        enrichedMetadata,
+        creatorOverride: 'pdf-zipper-v2-chatgpt-share',
+      });
+      await job.updateProgress(100);
+      console.log(`ChatGPT share capture completed: ${filePath} (${shareResult.messageCount} messages)`);
+      if (oldFilePath) await deleteOldFileIfDifferent(oldFilePath, filePath);
+      return {
+        pdfPath: filePath,
+        pdfSize: shareResult.pdfBuffer.length,
+        completedAt: new Date().toISOString(),
+        url,
+        qualityScore: -1,
+        qualityReasoning: `ChatGPT share scroll-harvest (${shareResult.messageCount} messages)`,
+        summary: enrichedMetadata?.summary || undefined,
+        language: enrichedMetadata?.language || undefined,
+      };
+    }
+    console.warn(`ChatGPT share harvest failed (${shareResult.error}); falling back to regular conversion`);
+  }
 
   // Check if this is a direct PDF URL - use pass-through instead of conversion
   if (isPdfUrl(url)) {
