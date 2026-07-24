@@ -95,15 +95,19 @@ header h1 {
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 20px;
+  flex-wrap: wrap;
+  gap: 12px 20px;
   margin-bottom: 20px;
   padding-bottom: 15px;
   border-bottom: 1px solid #dee2e6;
 }
 
-.toolbar h2 {
-  flex: 1;
-  margin: 0;
+.week-page-title {
+  margin: 0 0 12px;
+}
+
+.toolbar .toolbar-actions {
+  margin-left: auto;
 }
 
 /* Buttons */
@@ -185,6 +189,7 @@ header h1 {
 /* Toolbar actions container */
 .toolbar-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
