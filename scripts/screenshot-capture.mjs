@@ -29,7 +29,7 @@ const { enrichDocumentMetadata } = await import('../dist/metadata/enrichment.js'
 
 const browser = await initBrowser();
 const ctx = await browser.newContext({
-  viewport: { width: 1280, height: 1000 },
+  viewport: { width: 1280, height: 1600 },
   deviceScaleFactor: 2, // crisp text in the rasterized pages
   userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36',
 });
@@ -39,21 +39,68 @@ try {
   await page.goto(renderUrl, { waitUntil: 'networkidle', timeout: 60000 });
   await page.waitForTimeout(10000); // viz apps animate in
 
-  const state = await page.evaluate(() => ({
-    chars: document.body.innerText.length,
-    canvases: document.querySelectorAll('canvas').length,
-    failed: /failed to load|please refresh/i.test(document.body.innerText.slice(0, 300)),
-    title: document.title,
-    text: document.body.innerText,
-  }));
+  // Content may live in (cross-origin) iframes — aggregate over ALL frames.
+  // Playwright reaches into cross-origin frames where page JS cannot.
+  const frameStates = [];
+  for (const frame of page.frames()) {
+    try {
+      frameStates.push(await frame.evaluate(() => ({
+        chars: document.body?.innerText.length ?? 0,
+        canvases: document.querySelectorAll('canvas').length,
+        failed: /failed to load|please refresh/i.test((document.body?.innerText || '').slice(0, 300)),
+        text: document.body?.innerText || '',
+        scrollHeight: document.documentElement.scrollHeight,
+      })));
+    } catch { /* frame detached or inaccessible */ }
+  }
+  const state = {
+    chars: frameStates.reduce((a, f) => a + f.chars, 0),
+    canvases: frameStates.reduce((a, f) => a + f.canvases, 0),
+    failed: frameStates.some(f => f.failed),
+    title: await page.title(),
+    text: frameStates.map(f => f.text).filter(t => t.length > 40).join('\n\n'),
+  };
 
   if (state.failed || state.chars < 500) {
     console.log(`not ready: chars=${state.chars} failed=${state.failed} title="${state.title}"`);
     process.exit(2);
   }
 
-  const png = await page.screenshot({ fullPage: true, type: 'png' });
-  console.log(`screenshot: ${Math.round(png.length / 1024)}KB, text ${state.chars} chars, ${state.canvases} canvas(es)`);
+  // An embedded app usually scrolls INSIDE its iframe; a full-page shot would
+  // only capture the visible window. Expand each iframe element to its
+  // content height (twice — the inner app may relayout when given room).
+  for (let round = 0; round < 2; round++) {
+    const frameHeights = {};
+    for (const frame of page.frames()) {
+      if (frame === page.mainFrame()) continue;
+      try { frameHeights[frame.url()] = await frame.evaluate(() => document.documentElement.scrollHeight); } catch {}
+    }
+    await page.evaluate((heights) => {
+      document.querySelectorAll('iframe').forEach((f) => {
+        const h = heights[f.src];
+        if (h && h > f.clientHeight) f.style.height = h + 'px';
+      });
+      document.documentElement.style.overflow = 'visible';
+      document.body.style.overflow = 'visible';
+    }, frameHeights);
+    await page.waitForTimeout(800);
+  }
+
+  // Clip to real content height — fullPage pads to at least the viewport,
+  // which slices into trailing blank PDF pages on short content.
+  const contentBottom = await page.evaluate(() => {
+    let bottom = 0;
+    document.querySelectorAll('body *').forEach((el) => {
+      const r = el.getBoundingClientRect();
+      if (r.height > 0) bottom = Math.max(bottom, r.bottom + window.scrollY);
+    });
+    return Math.ceil(bottom);
+  });
+  const vp = page.viewportSize();
+  const png = contentBottom > 100
+    ? await page.screenshot({ clip: { x: 0, y: 0, width: vp.width, height: contentBottom + 20 }, type: 'png' })
+    : await page.screenshot({ fullPage: true, type: 'png' });
+  console.log(`screenshot: ${Math.round(png.length / 1024)}KB, text ${state.chars} chars, ${state.canvases} canvas(es) across ${frameStates.length} frame(s)`);
 
   // Slice the tall screenshot into A4 pages (same image drawn with a
   // per-page vertical offset; page bounds clip the rest).
