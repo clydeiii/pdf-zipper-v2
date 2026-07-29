@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { env } from '../config/env.js';
@@ -113,8 +114,12 @@ export async function storeNitterImage(
     const extension = extensionForImage(contentType, fetchUrl);
     const file = imageRelativePath(sha256, extension);
     const absoluteFile = path.join(dataDir, ...file.split('/'));
-    await mkdir(path.dirname(absoluteFile), { recursive: true });
-    await writeFile(absoluteFile, bytes);
+    // Content-addressed: identical bytes from a different URL already live at
+    // this exact path — refer to the existing copy instead of rewriting it.
+    if (!existsSync(absoluteFile)) {
+      await mkdir(path.dirname(absoluteFile), { recursive: true });
+      await writeFile(absoluteFile, bytes);
+    }
     upsertImageIndex(db, {
       url: sourceUrl,
       file,
