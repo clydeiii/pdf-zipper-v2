@@ -4,6 +4,7 @@ import { env } from '../config/env.js';
 import {
   getTwitterDb,
   insertCapture,
+  setPdfPath,
   upsertArticle,
   upsertTweets,
   type TwitterDatabase,
@@ -267,6 +268,9 @@ export async function harvestTweetToDb(options: HarvestTweetOptions): Promise<Tw
       try {
         imagesDownloaded += await hydrateArticleImages(db, article);
         upsertArticle(db, article);
+        // For article-announcing tweets the weekly-bin PDF is the article
+        // render, so the article row carries it alongside the tweet row.
+        if (options.pdfPath) setPdfPath(db, 'article', article.id, options.pdfPath);
         articleHarvested = true;
       } catch {
         // Never let an article image or persistence failure lose the tweet capture.

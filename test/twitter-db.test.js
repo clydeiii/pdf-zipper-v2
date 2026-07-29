@@ -48,7 +48,7 @@ test('migrates from scratch and preserves upsert invariants', async (t) => {
   const db = openTwitterDb({ dataDir });
   t.after(() => db.close());
 
-  assert.equal(db.pragma('user_version', { simple: true }), 2);
+  assert.equal(db.pragma('user_version', { simple: true }), 3);
   assert.equal(db.pragma('journal_mode', { simple: true }), 'wal');
   assert.equal(db.pragma('foreign_keys', { simple: true }), 1);
 
@@ -120,13 +120,31 @@ test('migration v2 adds article tweet_id without losing v1 data', async (t) => {
     );
     INSERT INTO articles (id, title, body_text)
     VALUES ('900', 'Existing v1 article', 'Preserve this body');
+    CREATE TABLE tweets (
+      id TEXT PRIMARY KEY,
+      username TEXT,
+      updated_at TEXT
+    );
+    INSERT INTO tweets (id, username, updated_at)
+    VALUES ('100', 'alice', '2025-01-01T00:00:00.000Z');
+    CREATE TABLE captures (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind TEXT NOT NULL,
+      subject_id TEXT NOT NULL,
+      captured_at TEXT NOT NULL,
+      pdf_path TEXT
+    );
+    INSERT INTO captures (kind, subject_id, captured_at, pdf_path) VALUES
+      ('tweet', '100', '2025-01-02T00:00:00.000Z', 'media/2025-W01/pdfs/old.pdf'),
+      ('tweet', '100', '2025-01-03T00:00:00.000Z', 'media/2025-W01/pdfs/x.com-alice-post-100.pdf'),
+      ('article', '900', '2025-01-02T00:00:00.000Z', 'media/2025-W01/pdfs/x.com-alice-article-900.pdf');
     PRAGMA user_version = 1;
   `);
   v1.close();
 
   const db = openTwitterDb({ dbPath });
   t.after(() => db.close());
-  assert.equal(db.pragma('user_version', { simple: true }), 2);
+  assert.equal(db.pragma('user_version', { simple: true }), 3);
   assert.ok(db.pragma('table_info(articles)').some((column) => column.name === 'tweet_id'));
   assert.deepEqual(
     db.prepare('SELECT id, title, body_text, tweet_id FROM articles WHERE id = ?').get('900'),
@@ -136,5 +154,60 @@ test('migration v2 adds article tweet_id without losing v1 data', async (t) => {
       body_text: 'Preserve this body',
       tweet_id: null,
     },
+  );
+
+  // v3 data migration: pdf_path lands on the subject rows, newest capture wins.
+  assert.equal(
+    db.prepare('SELECT pdf_path FROM tweets WHERE id = ?').get('100').pdf_path,
+    'media/2025-W01/pdfs/x.com-alice-post-100.pdf',
+  );
+  assert.equal(
+    db.prepare('SELECT pdf_path FROM articles WHERE id = ?').get('900').pdf_path,
+    'media/2025-W01/pdfs/x.com-alice-article-900.pdf',
+  );
+});
+
+test('insertCapture stamps pdf_path onto the subject row; latest capture wins', async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'twitter-db-pdf-'));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const db = openTwitterDb({ dataDir });
+  t.after(() => db.close());
+
+  upsertTweet(db, tweet(), '2025-01-01T01:00:00.000Z');
+  insertCapture(db, {
+    kind: 'tweet',
+    subjectId: '100',
+    sourceUrl: 'https://x.com/alice/status/100',
+    pdfPath: 'media/2025-W01/pdfs/x.com-alice-post-100.pdf',
+    origin: 'worker',
+  }, '2025-01-02T00:00:00.000Z');
+  assert.equal(
+    db.prepare('SELECT pdf_path FROM tweets WHERE id = ?').get('100').pdf_path,
+    'media/2025-W01/pdfs/x.com-alice-post-100.pdf',
+  );
+
+  // A rerun that renamed the PDF replaces the stored name.
+  insertCapture(db, {
+    kind: 'tweet',
+    subjectId: '100',
+    sourceUrl: 'https://x.com/alice/status/100',
+    pdfPath: 'media/2025-W02/pdfs/x.com-alice-post-100-renamed.pdf',
+    origin: 'worker',
+  }, '2025-01-09T00:00:00.000Z');
+  assert.equal(
+    db.prepare('SELECT pdf_path FROM tweets WHERE id = ?').get('100').pdf_path,
+    'media/2025-W02/pdfs/x.com-alice-post-100-renamed.pdf',
+  );
+
+  // A capture without a PDF (e.g. backfill with pruned bins) keeps the last name.
+  insertCapture(db, {
+    kind: 'tweet',
+    subjectId: '100',
+    sourceUrl: 'https://x.com/alice/status/100',
+    origin: 'backfill',
+  }, '2025-01-10T00:00:00.000Z');
+  assert.equal(
+    db.prepare('SELECT pdf_path FROM tweets WHERE id = ?').get('100').pdf_path,
+    'media/2025-W02/pdfs/x.com-alice-post-100-renamed.pdf',
   );
 });

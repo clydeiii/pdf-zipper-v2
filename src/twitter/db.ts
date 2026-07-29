@@ -11,7 +11,7 @@ import type {
 
 export type TwitterDatabase = Database.Database;
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 const MIGRATION_V1 = `
 CREATE TABLE users (
@@ -131,6 +131,25 @@ const MIGRATION_V2 = `
 ALTER TABLE articles ADD COLUMN tweet_id TEXT;
 `;
 
+// pdf_path on the subject rows themselves: the weekly-bin PDF that represents
+// the post (and its captured replies) or the article. captures keeps the full
+// provenance history; these columns are the "latest known PDF" convenience the
+// KB consumer reads without a join. Data-migrated from the newest capture row.
+const MIGRATION_V3 = `
+ALTER TABLE tweets ADD COLUMN pdf_path TEXT;
+ALTER TABLE articles ADD COLUMN pdf_path TEXT;
+UPDATE tweets SET pdf_path = (
+  SELECT c.pdf_path FROM captures c
+  WHERE c.kind = 'tweet' AND c.subject_id = tweets.id AND c.pdf_path IS NOT NULL
+  ORDER BY c.captured_at DESC, c.id DESC LIMIT 1
+);
+UPDATE articles SET pdf_path = (
+  SELECT c.pdf_path FROM captures c
+  WHERE c.kind = 'article' AND c.subject_id = articles.id AND c.pdf_path IS NOT NULL
+  ORDER BY c.captured_at DESC, c.id DESC LIMIT 1
+);
+`;
+
 let singleton: TwitterDatabase | null = null;
 
 function nowIso(): string {
@@ -171,6 +190,19 @@ export function openTwitterDb(options: { dataDir?: string; dbPath?: string } = {
     try {
       db.exec(MIGRATION_V2);
       db.pragma('user_version = 2');
+      db.exec('COMMIT');
+      version = 2;
+    } catch (error) {
+      db.exec('ROLLBACK');
+      db.close();
+      throw error;
+    }
+  }
+  if (version === 2) {
+    db.exec('BEGIN');
+    try {
+      db.exec(MIGRATION_V3);
+      db.pragma('user_version = 3');
       db.exec('COMMIT');
     } catch (error) {
       db.exec('ROLLBACK');
@@ -411,6 +443,19 @@ export interface CaptureInput {
   origin: 'worker' | 'backfill' | 'manual';
 }
 
+/** Stamp the subject row's pdf_path (latest capture wins — reruns rename the PDF). */
+export function setPdfPath(
+  db: TwitterDatabase,
+  kind: 'tweet' | 'article',
+  subjectId: string,
+  pdfPath: string,
+  timestamp = nowIso(),
+): void {
+  const table = kind === 'tweet' ? 'tweets' : 'articles';
+  db.prepare(`UPDATE ${table} SET pdf_path = ?, updated_at = ? WHERE id = ?`)
+    .run(pdfPath, timestamp, subjectId);
+}
+
 export function insertCapture(db: TwitterDatabase, capture: CaptureInput, capturedAt = nowIso()): number {
   const result = db.prepare(`
     INSERT INTO captures (
@@ -428,6 +473,9 @@ export function insertCapture(db: TwitterDatabase, capture: CaptureInput, captur
     capture.pagesFetched ?? 0,
     capture.origin,
   );
+  if (capture.pdfPath) {
+    setPdfPath(db, capture.kind, capture.subjectId, capture.pdfPath, capturedAt);
+  }
   return Number(result.lastInsertRowid);
 }
 
