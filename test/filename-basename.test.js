@@ -32,6 +32,13 @@ test('generic stem with no title falls back to path (single .pdf-stripped)', () 
   assert.ok(base.includes('example.org'), base);
 });
 
+test('status captures classified as X Articles use article filenames', () => {
+  assert.equal(
+    buildUrlBaseName('https://x.com/loubohan/status/2082143914924851449', { isXArticle: true }),
+    'x.com-loubohan-article-2082143914924851449',
+  );
+});
+
 import { isGenericPdfBasename } from '../dist/utils/save-pdf.js';
 
 test('isGenericPdfBasename: catches generic + double-extension names', () => {

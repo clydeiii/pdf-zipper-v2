@@ -59,6 +59,17 @@ function articleId(url: string): string | null {
   }
 }
 
+export function twitterHarvestKind(url: string): 'tweet' | 'article' | null {
+  try {
+    const pathname = new URL(url).pathname;
+    if (/\/status\/\d+(?:\/|$)/.test(pathname)) return 'tweet';
+    if (/\/(?:i\/article|[A-Za-z0-9_]+\/article)\/\d+(?:\/|$)/.test(pathname)) return 'article';
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 async function fetchHtml(url: string): Promise<string> {
   const response = await fetch(url, {
     headers: {
@@ -163,7 +174,7 @@ async function hydrateTweetImages(db: TwitterDatabase, tweets: ParsedTweet[]): P
         });
       }
     }
-    if (tweet.card?.imageFetchUrl && tweet.card.imageUrl) {
+    if (!tweet.articleId && tweet.card?.imageFetchUrl && tweet.card.imageUrl) {
       jobs.push(async () => {
         const result = await storeNitterImage(tweet.card!.imageFetchUrl!, {
           db,
@@ -228,10 +239,39 @@ export async function harvestTweetToDb(options: HarvestTweetOptions): Promise<Tw
     ...page.replies,
     ...page.quotedTweets,
   ]));
+  let article: ParsedArticle | null = null;
+  if (subject.articleId) {
+    if (env.TWITTER_DB_FETCH_DELAY_MS > 0) await delay(env.TWITTER_DB_FETCH_DELAY_MS);
+    try {
+      const articleUrl = `${env.NITTER_HOST.replace(/\/+$/, '')}/i/article/${subject.articleId}`;
+      const html = await fetchHtml(articleUrl);
+      pagesFetched++;
+      if (!isNitterErrorPage(html)) {
+        article = parseArticle(html, `https://x.com/i/article/${subject.articleId}`);
+        if (article) {
+          article.announcingTweetId = subject.id;
+          article.publishedAt ??= subject.publishedAt;
+        }
+      }
+    } catch {
+      // Article harvesting is optional; the subject tweet remains authoritative.
+    }
+  }
+
   try {
     const db = getTwitterDb();
-    const imagesDownloaded = await hydrateTweetImages(db, tweets);
+    let imagesDownloaded = await hydrateTweetImages(db, tweets);
     upsertTweets(db, tweets);
+    let articleHarvested = false;
+    if (article) {
+      try {
+        imagesDownloaded += await hydrateArticleImages(db, article);
+        upsertArticle(db, article);
+        articleHarvested = true;
+      } catch {
+        // Never let an article image or persistence failure lose the tweet capture.
+      }
+    }
     const repliesCaptured = new Set(pages.flatMap((page) => page.replies.map((tweet) => tweet.id))).size;
     insertCapture(db, {
       kind: 'tweet',
@@ -245,6 +285,10 @@ export async function harvestTweetToDb(options: HarvestTweetOptions): Promise<Tw
     });
     return {
       tweetId: subject.id,
+      ...(subject.articleId ? {
+        articleId: subject.articleId,
+        articleHarvested,
+      } : {}),
       tweetsUpserted: tweets.length,
       imagesDownloaded,
       pagesFetched,
@@ -264,6 +308,7 @@ function fallbackArticle(options: HarvestArticleOptions, id: string): ParsedArti
   if (!title && !bodyHtml && !bodyText) return null;
   return {
     id,
+    announcingTweetId: id,
     url: `https://x.com/i/article/${id}`,
     authorUsername: fallback.authorUsername?.replace(/^@/, '').trim() || null,
     title,
@@ -321,6 +366,7 @@ export async function harvestArticleToDb(options: HarvestArticleOptions): Promis
   }
   article ??= fallbackArticle(options, id);
   if (!article) throw failure ?? new TwitterHarvestError('parse_failed', `No article content for ${options.url}`);
+  article.announcingTweetId = id;
 
   try {
     const db = getTwitterDb();

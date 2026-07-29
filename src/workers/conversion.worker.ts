@@ -31,7 +31,7 @@ import { addJobToWeekIndex } from '../jobs/week-index.js';
 import { enrichDocumentMetadata, type EnrichedMetadata } from '../metadata/enrichment.js';
 import { captureViaArchive } from '../converters/archive-fallback.js';
 import { isChatGptShareUrl, captureChatGptShare } from '../converters/chatgpt-share.js';
-import { harvestArticleToDb, harvestTweetToDb } from '../twitter/harvest.js';
+import { harvestArticleToDb, harvestTweetToDb, twitterHarvestKind } from '../twitter/harvest.js';
 import type { ArticleFallbackContent } from '../twitter/types.js';
 
 /** Reference to the worker instance. Created explicitly by startWorker(). */
@@ -93,12 +93,14 @@ async function harvestStructuredTwitterCapture(options: {
   articleContent?: ArticleFallbackContent;
 }): Promise<void> {
   if (!env.TWITTER_DB_ENABLED || !isTwitterUrl(options.sourceUrl)) return;
+  const harvestKind = twitterHarvestKind(options.sourceUrl);
+  if (!harvestKind) return;
   const dataRoot = path.resolve(env.DATA_DIR);
   const absolutePdf = path.resolve(options.pdfPath);
   const relative = path.relative(dataRoot, absolutePdf);
   const pdfPath = relative && !relative.startsWith('..') ? relative : options.pdfPath;
   try {
-    const summary = options.isXArticle
+    const summary = harvestKind === 'article'
       ? await harvestArticleToDb({
           url: options.sourceUrl,
           bookmarkedAt: options.bookmarkedAt,
@@ -114,7 +116,7 @@ async function harvestStructuredTwitterCapture(options: {
         });
     console.log(JSON.stringify({
       event: 'twitter_db_harvest',
-      kind: options.isXArticle ? 'article' : 'tweet',
+      kind: harvestKind,
       sourceUrl: options.sourceUrl,
       ...summary,
       timestamp: new Date().toISOString(),
@@ -122,7 +124,7 @@ async function harvestStructuredTwitterCapture(options: {
   } catch (error) {
     console.error(JSON.stringify({
       event: 'twitter_db_error',
-      kind: options.isXArticle ? 'article' : 'tweet',
+      kind: harvestKind,
       sourceUrl: options.sourceUrl,
       error: error instanceof Error ? error.message : String(error),
       timestamp: new Date().toISOString(),
@@ -433,8 +435,8 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
   let contentResult = await analyzePdfContent(result.pdfBuffer, { lenient });
   console.log(`PDF content analysis for ${url}: ${contentResult.charCount} chars, ${contentResult.pageCount} pages, ${contentResult.charsPerKb} chars/KB${lenient ? ' [lenient: tweet]' : ''}`);
 
-  // A capture flagged as an X Article (only via the Nitter article-stub retry)
-  // but with tweet-length content is almost always a mis-flagged short tweet:
+  // A capture flagged as an X Article but with tweet-length content is almost
+  // always a mis-flagged short tweet:
   // the stub heuristic false-fires on quote-tweets, and the X.com logged-out
   // fallback shows limited content. Holding it to the long-form 500-char
   // article minimum drops a real (short) bookmark. Re-check as a tweet; if that

@@ -42,7 +42,7 @@ function statusParts(href: string | undefined): { username: string; id: string }
 
 function canonicalTwitterHref(href: string): string {
   if (/^https?:\/\//i.test(href)) return href;
-  if (/^\/[A-Za-z0-9_]+(?:\/status\/\d+)?(?:[#?].*)?$/.test(href)) {
+  if (href.startsWith('/') && !href.startsWith('//')) {
     return `https://x.com${href}`;
   }
   return href;
@@ -80,14 +80,17 @@ function statFor($item: Cheerio<AnyNode>, iconClass: string): number | null {
   return parseStatCount(icon.parent().text());
 }
 
-function canonicalPbsUrl(nitterPath: string | undefined): string | null {
-  if (!nitterPath) return null;
-  if (/^https?:\/\/pbs\.twimg\.com\//i.test(nitterPath)) return nitterPath;
-  const decoded = decodeUrl(nitterPath);
-  const picIndex = decoded.indexOf('/pic/');
-  const mediaPath = picIndex >= 0 ? decoded.slice(picIndex + 5) : decoded.replace(/^\/+/, '');
-  const normalized = mediaPath.replace(/^orig\//, '');
-  return normalized ? `https://pbs.twimg.com/${normalized}` : null;
+function canonicalTwitterMediaUrl(value: string | undefined): string | null {
+  if (!value) return null;
+  const picIndex = value.indexOf('/pic/');
+  const withoutProxy = (picIndex >= 0 ? value.slice(picIndex + 5) : value)
+    .replace(/^\/+/, '')
+    .replace(/^orig\//, '');
+  const decoded = decodeUrl(withoutProxy);
+  if (!decoded) return null;
+  if (/^https:\/\//i.test(decoded)) return decoded;
+  if (/^(?:pbs|video)\.twimg\.com\//i.test(decoded)) return `https://${decoded}`;
+  return `https://pbs.twimg.com/${decoded}`;
 }
 
 function verifiedType($scope: Cheerio<AnyNode>): string | null {
@@ -112,7 +115,7 @@ function parseUser($scope: Cheerio<AnyNode>, fallbackUsername?: string): ParsedU
       $scope.find('.fullname').first().attr('title') ?? $scope.find('.fullname').first().text(),
     ),
     verified: verifiedType($scope),
-    avatarUrl: canonicalPbsUrl(avatarFetchUrl ?? undefined),
+    avatarUrl: canonicalTwitterMediaUrl(avatarFetchUrl ?? undefined),
     avatarFetchUrl,
   };
 }
@@ -149,7 +152,7 @@ function parseMedia(
   const stills = excludeNestedQuotes ? directOutsideQuote(stillSelection) : stillSelection.toArray();
   for (const element of stills) {
     const fetchUrl = nonEmpty($(element).attr('href'));
-    const origUrl = canonicalPbsUrl(fetchUrl ?? undefined);
+    const origUrl = canonicalTwitterMediaUrl(fetchUrl ?? undefined);
     if (!fetchUrl || !origUrl) continue;
     media.push({
       position: media.length,
@@ -178,9 +181,9 @@ function parseMedia(
     media.push({
       position: media.length,
       kind: isGif ? 'gif' : 'video',
-      origUrl: videoUrl ?? canonicalPbsUrl(posterFetchUrl ?? undefined) ?? '',
+      origUrl: videoUrl ?? canonicalTwitterMediaUrl(posterFetchUrl ?? undefined) ?? '',
       fetchUrl: null,
-      posterUrl: canonicalPbsUrl(posterFetchUrl ?? undefined),
+      posterUrl: canonicalTwitterMediaUrl(posterFetchUrl ?? undefined),
       posterFetchUrl,
       videoUrl,
     });
@@ -196,7 +199,7 @@ function parseCard($scope: Cheerio<AnyNode>): ParsedCard | null {
     url: nonEmpty(card.find('a.card-container[href], a[href]').first().attr('href')),
     title: nonEmpty(card.find('.card-title').first().text()),
     description: nonEmpty(card.find('.card-description').first().text()),
-    imageUrl: canonicalPbsUrl(imageFetchUrl ?? undefined),
+    imageUrl: canonicalTwitterMediaUrl(imageFetchUrl ?? undefined),
     imageFetchUrl,
   };
 }
@@ -232,6 +235,13 @@ function parseRetweetedBy($item: Cheerio<AnyNode>): string | null {
   return nonEmpty(header.text().replace(/\bretweeted\b(?:\s+by)?/i, ''));
 }
 
+function articleCardId($: CheerioAPI, $scope: Cheerio<AnyNode>): string | null {
+  const links = $scope.find('.article-card a.card-container[href*="/i/article/"]');
+  const link = directOutsideQuote(links).at(0);
+  const href = link ? $(link).attr('href') : undefined;
+  return href?.match(/\/i\/article\/(\d+)(?:[/?#]|$)/)?.[1] ?? null;
+}
+
 interface TweetElementOptions {
   fallbackId?: string;
   replyToId?: string | null;
@@ -264,6 +274,7 @@ function parseTweetElement(
 
   return {
     id,
+    articleId: articleCardId($, item),
     username,
     user,
     contentHtml: canonicalizeHtml(content),
@@ -297,7 +308,7 @@ function parseQuote($: CheerioAPI, quoteElement: AnyNode): ParsedTweet | null {
   // Nitter uses a dedicated quote-media-container in some renderer variants.
   quote.find('.quote-media-container a.still-image[href]').each((_index, element) => {
     const fetchUrl = nonEmpty($(element).attr('href'));
-    const origUrl = canonicalPbsUrl(fetchUrl ?? undefined);
+    const origUrl = canonicalTwitterMediaUrl(fetchUrl ?? undefined);
     if (!fetchUrl || !origUrl) return;
     media.push({
       position: media.length,
@@ -312,6 +323,7 @@ function parseQuote($: CheerioAPI, quoteElement: AnyNode): ParsedTweet | null {
 
   return {
     id: parts.id,
+    articleId: null,
     username: parts.username,
     user,
     contentHtml: canonicalizeHtml(text),
@@ -431,7 +443,7 @@ function articleImage(
   if (!fetchUrl) return null;
   return {
     position,
-    origUrl: canonicalPbsUrl(fetchUrl) ?? fetchUrl,
+    origUrl: canonicalTwitterMediaUrl(fetchUrl) ?? fetchUrl,
     fetchUrl: fetchUrl.startsWith('/pic/') ? fetchUrl : null,
   };
 }
@@ -440,37 +452,41 @@ export function parseArticle(html: string, sourceUrl: string): ParsedArticle | n
   const id = articleIdFromUrl(sourceUrl);
   if (!id) return null;
   const $ = load(html);
-  const body = $('.article-body').first();
-  const title = nonEmpty($('.article-title').first().text());
-  const bodyText = nonEmpty(body.text());
+  const body = $('article.article-body').first();
+  const title = nonEmpty($('h1.article-title').first().text());
+  const bodyContent = body.clone();
+  bodyContent.children('h1.article-title, .article-author').remove();
+  const bodyText = nonEmpty(bodyContent.text());
   if (!title && !bodyText) return null;
 
-  const authorLink = $('.article-author-meta a[href^="/"]').first();
-  const authorUsername = nonEmpty(authorLink.attr('href'))?.match(/^\/([A-Za-z0-9_]+)/)?.[1]
-    ?? nonEmpty($('.article-author-meta .username').first().text())?.replace(/^@/, '')
+  const dateLink = $('.article-author a.article-date[href]').first();
+  const announcingTweet = statusParts(dateLink.attr('href'));
+  const authorUsername = nonEmpty($('.article-author .username').first().text())?.replace(/^@/, '')
+    ?? announcingTweet?.username
     ?? null;
-  const coverFetchUrl = nonEmpty(
-    $('.article-cover img[src], .article-cover-image img[src], .article-header img[src]').first().attr('src'),
-  );
+  const cover = $('.article-page img.article-cover').first();
+  const coverFetchUrl = nonEmpty(cover.closest('a[href]').attr('href') ?? cover.attr('src'));
   const media: ParsedArticleMedia[] = [];
-  body.find('img[src]').each((_index, element) => {
-    const parsed = articleImage(nonEmpty($(element).attr('src')), media.length);
+  bodyContent.find('img[src]').each((_index, element) => {
+    const image = $(element);
+    const fetchUrl = nonEmpty(image.closest('a[href]').attr('href') ?? image.attr('src'));
+    const parsed = articleImage(fetchUrl, media.length);
     if (parsed) media.push(parsed);
   });
-  const dateTitle = $('.article-author-meta time[datetime]').first().attr('datetime')
-    ?? $('.article-author-meta a[title]').first().attr('title');
+  const dateTitle = $('.article-author time[datetime]').first().attr('datetime')
+    ?? dateLink.attr('title');
   const date = dateTitle ? new Date(dateTitle.replace('·', '')) : null;
 
   return {
     id,
+    announcingTweetId: announcingTweet?.id ?? null,
     url: `https://x.com/i/article/${id}`,
     authorUsername,
     title,
-    previewText: nonEmpty($('.article-preview, .article-subtitle, meta[name="description"]').first().attr('content')
-      ?? $('.article-preview, .article-subtitle').first().text()),
-    coverImageUrl: canonicalPbsUrl(coverFetchUrl ?? undefined),
+    previewText: bodyText?.slice(0, 280) ?? null,
+    coverImageUrl: canonicalTwitterMediaUrl(coverFetchUrl ?? undefined),
     coverImageFetchUrl: coverFetchUrl,
-    bodyHtml: canonicalizeHtml(body),
+    bodyHtml: canonicalizeHtml(bodyContent),
     bodyText,
     publishedAt: date && !Number.isNaN(date.getTime()) ? date.toISOString() : null,
     harvestedFrom: 'nitter',

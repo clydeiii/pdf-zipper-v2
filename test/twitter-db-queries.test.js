@@ -25,6 +25,7 @@ function tweet(overrides = {}) {
   const username = overrides.username || 'alice';
   return {
     id,
+    articleId: null,
     username,
     user: {
       username,
@@ -88,8 +89,20 @@ test('viewer query helpers return deduplicated list and relation shapes', async 
     contentHtml: 'A reply',
     publishedAt: '2025-01-02T00:00:00.000Z',
   }));
+  upsertTweet(db, tweet({
+    id: '102',
+    articleId: '900',
+    card: {
+      url: '/i/article/900',
+      title: 'Article card',
+      description: 'Stored on the parsed tweet, not as a generic DB card',
+      imageUrl: null,
+      imageFetchUrl: null,
+    },
+  }));
   upsertArticle(db, {
     id: '900',
+    announcingTweetId: '899',
     url: 'https://x.com/alice/article/900',
     authorUsername: 'alice',
     title: 'Structured article',
@@ -106,6 +119,21 @@ test('viewer query helpers return deduplicated list and relation shapes', async 
       fetchUrl: null,
       file: 'twitter/imagestore/bb/article.jpg',
     }],
+  });
+  upsertArticle(db, {
+    id: '900',
+    announcingTweetId: null,
+    url: 'https://x.com/alice/article/900',
+    authorUsername: null,
+    title: null,
+    previewText: null,
+    coverImageUrl: null,
+    coverImageFetchUrl: null,
+    bodyHtml: null,
+    bodyText: null,
+    publishedAt: null,
+    harvestedFrom: 'nitter',
+    media: [],
   });
   upsertImageIndex(db, {
     url: 'https://pbs.twimg.com/media/photo.jpg',
@@ -139,7 +167,7 @@ test('viewer query helpers return deduplicated list and relation shapes', async 
   }, '2025-01-06T00:00:00.000Z');
 
   assert.deepEqual(getTwitterStats(db), {
-    tweets: 2,
+    tweets: 3,
     users: 2,
     articles: 1,
     captures: 3,
@@ -173,9 +201,11 @@ test('viewer query helpers return deduplicated list and relation shapes', async 
 
   assert.equal(getTweetMedia(db, '100').length, 1);
   assert.equal(getTweetCard(db, '100').title, 'Example card');
+  assert.equal(getTweetCard(db, '102'), undefined);
   assert.equal(getTweetPoll(db, '100')[0].label, 'Yes');
   assert.deepEqual(getTweetReplies(db, '100').map((row) => row.id), ['101']);
   assert.equal(getArticleMedia(db, '900').length, 1);
+  assert.equal(db.prepare('SELECT tweet_id FROM articles WHERE id = ?').get('900').tweet_id, '899');
   assert.equal(getCapturesForSubjectKind(db, 'tweet', '100').length, 2);
   assert.equal(hasCaptureForSubject(db, 'tweet', '100'), true);
   assert.equal(hasCaptureForSubject(db, 'article', '100'), false);

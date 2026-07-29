@@ -653,6 +653,50 @@ export async function convertUrlToPDF(
       // Reload attempt failed — capture whatever the original render produced
     }
 
+    // A status page can announce an X Article via a Nitter article card. Hop
+    // the same page to Nitter's full renderer before any capture mutations so
+    // the normal image/scroll/privacy/print pipeline operates on the article.
+    // If the renderer is missing or thin, restore the thread and preserve the
+    // existing direct-X fallback behavior below.
+    let isNitterArticleCapture = false;
+    if (isTwitterUrl(url) && targetUrl !== url) {
+      try {
+        const articleMatch = (await page.content())
+          .match(/(?:href="|x\.com|twitter\.com)\/i\/article\/(\d+)/);
+        if (articleMatch) {
+          const articleUrl = `${env.NITTER_HOST.replace(/\/+$/, '')}/i/article/${articleMatch[1]}`;
+          try {
+            await page.goto(articleUrl, { timeout, waitUntil: 'domcontentloaded' });
+            await page.waitForTimeout(waitAfterLoad);
+            await page.waitForSelector('body', { timeout: 5000 }).catch(() => {});
+            await page.waitForTimeout(2000);
+            const articleLength = await page.evaluate(
+              () => (document.querySelector('.article-body') as HTMLElement | null)?.innerText.trim().length ?? 0
+            );
+            if (articleLength >= 600) {
+              isNitterArticleCapture = true;
+              console.log(`Nitter article renderer loaded for ${url} (${articleLength} chars)`);
+            }
+          } catch (articleError) {
+            console.warn(`Nitter article renderer failed for ${url}: ${articleError instanceof Error ? articleError.message : articleError}`);
+          }
+
+          if (!isNitterArticleCapture) {
+            try {
+              await page.goto(targetUrl, { timeout, waitUntil: 'domcontentloaded' });
+              await page.waitForTimeout(waitAfterLoad);
+              await page.waitForSelector('body', { timeout: 5000 }).catch(() => {});
+              await page.waitForTimeout(2000);
+            } catch (restoreError) {
+              console.warn(`Unable to restore Nitter thread for ${url}: ${restoreError instanceof Error ? restoreError.message : restoreError}`);
+            }
+          }
+        }
+      } catch {
+        // Article detection/navigation is best-effort; continue as a tweet.
+      }
+    }
+
     // HuggingFace Spaces embed the app in a cross-origin iframe (*.hf.space)
     // with a fixed layout height, so printing the huggingface.co shell clips
     // the app to at most one viewport — even a fully rendered app comes out
@@ -731,14 +775,16 @@ export async function convertUrlToPDF(
             if (match) {
               let path: string;
               try {
-                path = decodeURIComponent(match[1]);
+                path = decodeURIComponent(match[1].replace(/^orig\//, ''));
               } catch {
                 // Malformed percent-encoding — skip this image but keep iterating.
                 img.removeAttribute('loading');
                 return;
               }
               let newSrc: string;
-              if (path.startsWith('video.twimg.com/')) {
+              if (path.startsWith('https://')) {
+                newSrc = path;
+              } else if (path.startsWith('video.twimg.com/') || path.startsWith('pbs.twimg.com/')) {
                 newSrc = `https://${path}`;
               } else {
                 newSrc = `https://pbs.twimg.com/${path}`;
@@ -1125,11 +1171,13 @@ export async function convertUrlToPDF(
       // Un-pin failed — capture whatever rendered
     }
 
-    // For Twitter URLs via Nitter: check if this is an article stub
-    // Nitter doesn't support X Articles and just shows a link like "x.com/i/article/..."
-    if (isTwitterUrl(url) && targetUrl !== url) {
+    // For Twitter URLs via Nitter: check whether the restored tweet page is an
+    // article stub/card that still needs the existing direct-X fallback. A
+    // successful hop to Nitter's article renderer must skip this — the article
+    // body itself may mention /i/article/ links and would re-trigger it.
+    if (isTwitterUrl(url) && targetUrl !== url && !isNitterArticleCapture) {
       const pageContent = await page.content();
-      const isArticleStub = pageContent.includes('x.com/i/article/') || pageContent.includes('twitter.com/i/article/');
+      const isArticleStub = /(?:x\.com|twitter\.com)\/i\/article\/|href=["']\/i\/article\//.test(pageContent);
       // Nitter error panel ("Tweet not found", rate-limited instance): the page
       // renders only the error box, so body text is tiny. These are usually
       // transient guest-token failures, not proof the tweet is gone — retry
@@ -1699,8 +1747,8 @@ export async function convertUrlToPDF(
       }
     }
 
-    // For Twitter URLs that went through Nitter, mark as NOT an X Article
-    // (X Articles are captured directly from X.com and have isXArticle: true)
+    // Nitter tweet pages stay lenient; a successful hop to Nitter's full
+    // article renderer is long-form content and gets article naming/checks.
     const isNitterCapture = isTwitterUrl(url) && targetUrl !== url;
 
     return {
@@ -1710,7 +1758,7 @@ export async function convertUrlToPDF(
       url,
       size: pdfBuffer.length,
       pageTitle,
-      isXArticle: isNitterCapture ? false : undefined,  // false = Nitter tweet, undefined = not Twitter
+      isXArticle: isNitterCapture ? isNitterArticleCapture : undefined,
       expandedUrl: expandedUrl !== url ? expandedUrl : undefined,
       tweetRelations,
     };

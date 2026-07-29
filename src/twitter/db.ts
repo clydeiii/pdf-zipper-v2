@@ -11,7 +11,7 @@ import type {
 
 export type TwitterDatabase = Database.Database;
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const MIGRATION_V1 = `
 CREATE TABLE users (
@@ -127,6 +127,10 @@ CREATE INDEX idx_tweets_quoted_id ON tweets(quoted_id);
 CREATE INDEX idx_captures_subject_id ON captures(subject_id);
 `;
 
+const MIGRATION_V2 = `
+ALTER TABLE articles ADD COLUMN tweet_id TEXT;
+`;
+
 let singleton: TwitterDatabase | null = null;
 
 function nowIso(): string {
@@ -144,7 +148,7 @@ export function openTwitterDb(options: { dataDir?: string; dbPath?: string } = {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
 
-  const version = db.pragma('user_version', { simple: true }) as number;
+  let version = db.pragma('user_version', { simple: true }) as number;
   if (version > SCHEMA_VERSION) {
     db.close();
     throw new Error(`Twitter database schema ${version} is newer than supported version ${SCHEMA_VERSION}`);
@@ -153,7 +157,20 @@ export function openTwitterDb(options: { dataDir?: string; dbPath?: string } = {
     db.exec('BEGIN');
     try {
       db.exec(MIGRATION_V1);
-      db.pragma(`user_version = ${SCHEMA_VERSION}`);
+      db.pragma('user_version = 1');
+      db.exec('COMMIT');
+      version = 1;
+    } catch (error) {
+      db.exec('ROLLBACK');
+      db.close();
+      throw error;
+    }
+  }
+  if (version === 1) {
+    db.exec('BEGIN');
+    try {
+      db.exec(MIGRATION_V2);
+      db.pragma('user_version = 2');
       db.exec('COMMIT');
     } catch (error) {
       db.exec('ROLLBACK');
@@ -290,7 +307,7 @@ export function upsertTweet(db: TwitterDatabase, tweet: ParsedTweet, timestamp =
     });
   }
 
-  if (tweet.card) {
+  if (tweet.card && !tweet.articleId) {
     db.prepare(`
       INSERT INTO tweet_cards (tweet_id, url, title, description, image_file)
       VALUES (@tweetId, @url, @title, @description, @imageFile)
@@ -331,15 +348,16 @@ export function upsertTweets(db: TwitterDatabase, tweets: ParsedTweet[], timesta
 export function upsertArticle(db: TwitterDatabase, article: ParsedArticle, timestamp = nowIso()): void {
   db.prepare(`
     INSERT INTO articles (
-      id, url, author_username, title, preview_text, cover_image_url,
+      id, tweet_id, url, author_username, title, preview_text, cover_image_url,
       cover_image_file, body_html, body_text, published_at, harvested_from,
       first_seen_at, updated_at
     ) VALUES (
-      @id, @url, @authorUsername, @title, @previewText, @coverImageUrl,
+      @id, @tweetId, @url, @authorUsername, @title, @previewText, @coverImageUrl,
       @coverImageFile, @bodyHtml, @bodyText, @publishedAt, @harvestedFrom,
       @timestamp, @timestamp
     )
     ON CONFLICT(id) DO UPDATE SET
+      tweet_id = COALESCE(excluded.tweet_id, articles.tweet_id),
       url = COALESCE(excluded.url, articles.url),
       author_username = COALESCE(excluded.author_username, articles.author_username),
       title = COALESCE(excluded.title, articles.title),
@@ -356,6 +374,7 @@ export function upsertArticle(db: TwitterDatabase, article: ParsedArticle, times
       updated_at = excluded.updated_at
   `).run({
     id: article.id,
+    tweetId: nullable(article.announcingTweetId),
     url: article.url,
     authorUsername: nullable(article.authorUsername),
     title: nullable(article.title),

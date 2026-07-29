@@ -90,30 +90,64 @@ test('canonicalizes internal content links and parses stat edge cases', () => {
   assert.equal(parseStatCount(''), null);
 });
 
-test('parses a synthetic Nitter article renderer fixture', () => {
-  // Synthetic: class names mirror Nitter's article.nim renderer contract.
+test('parses a real Nitter article card from its announcing tweet', async () => {
+  const parsed = parseThreadPage(
+    await fixture('loubohan-article-tweet.html'),
+    'https://x.com/loubohan/status/2082143914924851449',
+  );
+  assert.ok(parsed.mainTweet);
+  assert.equal(parsed.mainTweet.articleId, '2082143914924851449');
+  assert.equal(parsed.mainTweet.card.title, 'How China’s Venture Ecosystem Works');
+  assert.match(parsed.mainTweet.card.description, /^I went to China last month/);
+});
+
+test('parses a real Nitter article body without author chrome or inline images', async () => {
+  const article = parseArticle(
+    await fixture('loubohan-article.html'),
+    'https://x.com/i/article/2082143914924851449',
+  );
+  assert.ok(article);
+  assert.equal(article.title, 'How China’s Venture Ecosystem Works');
+  assert.equal(article.authorUsername, 'loubohan');
+  assert.equal(article.coverImageUrl, 'https://pbs.twimg.com/media/HOSuNOXWkAAcN0y.jpg');
+  assert.equal(article.announcingTweetId, '2082143914924851449');
+  assert.match(article.bodyText, /^I went to China last month/);
+  assert.doesNotMatch(article.bodyHtml, /<img/i);
+  assert.doesNotMatch(article.bodyHtml, /article-author/);
+  assert.doesNotMatch(article.bodyText, /204,477/);
+  assert.equal(article.publishedAt, null);
+  assert.equal(article.previewText, article.bodyText.slice(0, 280));
+});
+
+test('keeps tolerant article date, link, and full-resolution media edge cases', () => {
   const html = `
-    <main>
-      <h1 class="article-title">A synthetic long-form article</h1>
-      <div class="article-author-meta">
-        <a href="/alice">@alice</a>
-        <time datetime="2026-07-20T10:30:00Z"></time>
-      </div>
-      <div class="article-cover"><img src="/pic/orig/media%2FCOVER.jpg"></div>
-      <p class="article-preview">A short preview.</p>
+    <main class="article-page">
+      <a href="/pic/orig/pbs.twimg.com%2Fmedia%2FCOVER.jpg">
+        <img class="article-cover" src="/pic/pbs.twimg.com%2Fmedia%2FCOVER.jpg%3Fname%3Dsmall">
+      </a>
       <article class="article-body">
+        <h1 class="article-title">A synthetic long-form article</h1>
+        <div class="article-author">
+          <a class="username" href="/alice">@alice</a>
+          <time datetime="2026-07-20T10:30:00Z"></time>
+          <a class="article-date" href="/alice/status/987" title="Jul 20, 2026 · 10:30 AM UTC">9d</a>
+        </div>
         <p>First paragraph with <a href="/bob">Bob</a>.</p>
-        <img src="/pic/orig/media%2FBODY.png">
+        <a href="/pic/orig/video.twimg.com%2Ftweet_video%2FBODY.mp4">
+          <img src="/pic/pbs.twimg.com%2Fmedia%2FBODY.png%3Fname%3Dsmall">
+        </a>
       </article>
     </main>`;
   const article = parseArticle(html, 'https://x.com/i/article/123456789');
   assert.ok(article);
   assert.equal(article.id, '123456789');
   assert.equal(article.authorUsername, 'alice');
+  assert.equal(article.announcingTweetId, '987');
   assert.equal(article.title, 'A synthetic long-form article');
   assert.equal(article.publishedAt, '2026-07-20T10:30:00.000Z');
   assert.match(article.bodyHtml, /https:\/\/x\.com\/bob/);
   assert.doesNotMatch(article.bodyHtml, /<img/);
   assert.equal(article.media.length, 1);
+  assert.equal(article.media[0].origUrl, 'https://video.twimg.com/tweet_video/BODY.mp4');
   assert.equal(article.coverImageUrl, 'https://pbs.twimg.com/media/COVER.jpg');
 });

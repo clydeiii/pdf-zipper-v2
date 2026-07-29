@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
+import Database from 'better-sqlite3';
 import {
   insertCapture,
   openTwitterDb,
@@ -12,6 +13,7 @@ import {
 function tweet(overrides = {}) {
   return {
     id: '100',
+    articleId: null,
     username: 'alice',
     user: {
       username: 'alice',
@@ -46,7 +48,7 @@ test('migrates from scratch and preserves upsert invariants', async (t) => {
   const db = openTwitterDb({ dataDir });
   t.after(() => db.close());
 
-  assert.equal(db.pragma('user_version', { simple: true }), 1);
+  assert.equal(db.pragma('user_version', { simple: true }), 2);
   assert.equal(db.pragma('journal_mode', { simple: true }), 'wal');
   assert.equal(db.pragma('foreign_keys', { simple: true }), 1);
 
@@ -103,4 +105,36 @@ test('migrates from scratch and preserves upsert invariants', async (t) => {
   assert.equal(capture.subject_id, '100');
   assert.equal(capture.replies_captured, 36);
   assert.equal(capture.pages_fetched, 2);
+});
+
+test('migration v2 adds article tweet_id without losing v1 data', async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'twitter-db-v1-'));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const dbPath = path.join(dataDir, 'twitter.db');
+  const v1 = new Database(dbPath);
+  v1.exec(`
+    CREATE TABLE articles (
+      id TEXT PRIMARY KEY,
+      title TEXT,
+      body_text TEXT
+    );
+    INSERT INTO articles (id, title, body_text)
+    VALUES ('900', 'Existing v1 article', 'Preserve this body');
+    PRAGMA user_version = 1;
+  `);
+  v1.close();
+
+  const db = openTwitterDb({ dbPath });
+  t.after(() => db.close());
+  assert.equal(db.pragma('user_version', { simple: true }), 2);
+  assert.ok(db.pragma('table_info(articles)').some((column) => column.name === 'tweet_id'));
+  assert.deepEqual(
+    db.prepare('SELECT id, title, body_text, tweet_id FROM articles WHERE id = ?').get('900'),
+    {
+      id: '900',
+      title: 'Existing v1 article',
+      body_text: 'Preserve this body',
+      tweet_id: null,
+    },
+  );
 });

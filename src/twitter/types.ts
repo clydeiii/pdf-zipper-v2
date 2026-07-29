@@ -39,6 +39,7 @@ export interface ParsedPollOption {
 
 export interface ParsedTweet {
   id: string;
+  articleId: string | null;
   username: string;
   user: ParsedUser;
   contentHtml: string | null;
@@ -77,6 +78,7 @@ export interface ParsedArticleMedia {
 
 export interface ParsedArticle {
   id: string;
+  announcingTweetId: string | null;
   url: string;
   authorUsername: string | null;
   title: string | null;
@@ -111,6 +113,8 @@ export interface HarvestArticleOptions extends HarvestTweetOptions {
 
 export interface TweetHarvestSummary {
   tweetId: string;
+  articleId?: string;
+  articleHarvested?: boolean;
   tweetsUpserted: number;
   imagesDownloaded: number;
   pagesFetched: number;
