@@ -55,6 +55,7 @@ export interface ParsedTweet {
   viewsCount: number | null;
   sourceUrl: string;
   isStub: boolean;
+  links: string[];
   media: ParsedMedia[];
   card: ParsedCard | null;
   poll: ParsedPollOption[];
@@ -90,6 +91,7 @@ export interface ParsedArticle {
   bodyText: string | null;
   publishedAt: string | null;
   harvestedFrom: 'nitter' | 'x.com';
+  links: string[];
   media: ParsedArticleMedia[];
 }
 

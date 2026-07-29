@@ -5,11 +5,13 @@ import { load } from 'cheerio';
 import { env } from '../../config/env.js';
 import {
   getArticleById,
+  getArticleByTweetId,
   getArticleMedia,
   getCapturesForSubjectKind,
   getTweetById,
   getTweetCard,
   getTweetMedia,
+  getTweetLinks,
   getTweetPoll,
   getTweetReplies,
   getTwitterDb,
@@ -130,6 +132,7 @@ function tweetView(
     content_html: sanitizeTwitterHtml(tweet.content_html),
     user: username ? getUserByUsername(db, username) ?? null : null,
     media: mediaWithLocalPaths(db, id, videos),
+    links: getTweetLinks(db, id),
     ...(includeExtras
       ? {
           card: getTweetCard(db, id) ?? null,
@@ -216,12 +219,23 @@ twitterRouter.get('/thread/:id', async (req: Request, res: Response): Promise<vo
       })),
     }));
     const quotedId = typeof subject.quoted_id === 'string' ? subject.quoted_id : null;
+    const linkedArticle = getArticleByTweetId(db, String(subject.id));
+    const article = linkedArticle
+      ? {
+          id: linkedArticle.id,
+          title: linkedArticle.title,
+          preview_text: linkedArticle.preview_text,
+          cover_image_file: linkedArticle.cover_image_file,
+          ...('pdf_path' in linkedArticle ? { pdf_path: linkedArticle.pdf_path } : {}),
+        }
+      : null;
 
     res.json({
       subject: tweetView(db, subject, videos, true),
       ancestors,
       replies,
       quoted: quotedId ? quotedTweetView(db, quotedId, videos, 1) : null,
+      article,
       captures: getCapturesForSubjectKind(db, 'tweet', String(subject.id)),
     });
   } catch (error) {
@@ -245,12 +259,16 @@ twitterRouter.get('/article/:id', (req: Request, res: Response): void => {
     const authorUsername = typeof article.author_username === 'string'
       ? article.author_username
       : null;
+    const announcingTweetId = typeof article.tweet_id === 'string'
+      ? article.tweet_id
+      : req.params.id;
     res.json({
       article: {
         ...article,
         body_html: sanitizeTwitterHtml(article.body_html),
       },
       media: getArticleMedia(db, req.params.id),
+      links: getTweetLinks(db, announcingTweetId),
       captures: getCapturesForSubjectKind(db, 'article', req.params.id),
       author: authorUsername ? getUserByUsername(db, authorUsername) ?? null : null,
     });

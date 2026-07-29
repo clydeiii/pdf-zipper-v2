@@ -26,6 +26,8 @@
     .capture-name, .tweet-name { font-weight: 700; color: #212529; }
     .capture-username, .tweet-username, .capture-date, .tweet-date { color: #6c757d; font-size: .9rem; }
     .capture-text { margin: 6px 0; color: #343a40; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .capture-article-title { margin: 7px 0; color: #0758a8; font-weight: 600; }
+    .capture-article-title .badge { margin-right: 5px; vertical-align: 1px; }
     .capture-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
     .badge { display: inline-block; padding: 2px 7px; border-radius: 999px; background: #e9ecef; color: #495057; font-size: .76rem; }
     .badge-article { background: #dcecff; color: #0758a8; }
@@ -44,6 +46,9 @@
     .tweet-content { margin: 8px 0; overflow-wrap: anywhere; }
     .tweet-content p { margin: 0 0 .55em; }
     .tweet-content a { color: #087cc1; }
+    .tweet-links { display: flex; gap: 6px; flex-wrap: wrap; margin: 9px 0; }
+    .link-chip { display: inline-block; max-width: 100%; padding: 4px 9px; border: 1px solid #ced4da; border-radius: 999px; color: #087cc1; font-size: .78rem; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .link-chip.captured { border-color: #69b58a; background: #e7f6ed; color: #17643a; font-weight: 600; }
     .verified { color: #1d9bf0; font-size: .9rem; }
     .media-gallery { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; margin-top: 10px; }
     .media-gallery.single { grid-template-columns: 1fr; }
@@ -58,6 +63,13 @@
     .link-card-description { color: #6c757d; font-size: .9rem; }
     .link-card img { width: 130px; height: 100%; max-height: 120px; object-fit: cover; }
     .quoted-box { padding: 12px; background: #fbfcfd; }
+    .tweet-article-box { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; margin-top: 11px; padding: 12px; border: 1px solid #b9d7ee; border-radius: 8px; background: #f4faff; }
+    .tweet-article-copy { min-width: 0; }
+    .tweet-article-title { margin: 3px 0 5px; font-weight: 700; }
+    .tweet-article-preview { margin: 0 0 9px; color: #5c6770; font-size: .88rem; }
+    .tweet-article-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+    .tweet-article-actions .btn { padding: 5px 9px; font-size: .78rem; }
+    .tweet-article-cover { width: 120px; height: 92px; border-radius: 6px; object-fit: cover; background: #dce3ea; }
     .quoted-box .avatar { width: 34px; height: 34px; }
     .quoted-box .avatar-slot { width: 34px; height: 34px; }
     .quoted-box .tweet-layout { grid-template-columns: 34px minmax(0, 1fr); gap: 9px; }
@@ -83,9 +95,14 @@
       .capture-row, .tweet-card, .article-card { color: #e6edf3; background: #161b22; border-color: #30363d; }
       .capture-row:hover, .tweet-card.ancestor, .quoted-box { background: #1c2128; }
       .capture-name, .tweet-name, .capture-text { color: #e6edf3; }
+      .capture-article-title { color: #79c0ff; }
       .badge { color: #c9d1d9; background: #30363d; }
       .badge-article { color: #79c0ff; background: #153c5a; }
       .link-card, .quoted-box { border-color: #30363d; }
+      .link-chip { border-color: #48515b; color: #79c0ff; }
+      .link-chip.captured { border-color: #347d55; background: #173d29; color: #7ee2a8; }
+      .tweet-article-box { border-color: #285a7a; background: #132632; }
+      .tweet-article-preview { color: #aab5bf; }
       .poll-option { background: #30363d; }
       .poll-fill { background: #174c70; }
     }
@@ -100,6 +117,8 @@
       .tweet-layout > .avatar-slot .avatar { width: 38px; height: 38px; }
       .quoted-box .tweet-layout > .avatar-slot, .quoted-box .tweet-layout > .avatar-slot .avatar { width: 34px; height: 34px; }
       .media-gallery { grid-template-columns: 1fr; }
+      .tweet-article-box { grid-template-columns: 1fr; }
+      .tweet-article-cover { width: 100%; height: 160px; grid-row: 1; }
       .reply-chain, .reply-chain.nested { margin-left: 10px; padding-left: 8px; }
     }
   </style>

@@ -11,7 +11,7 @@ import type {
 
 export type TwitterDatabase = Database.Database;
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 const MIGRATION_V1 = `
 CREATE TABLE users (
@@ -150,6 +150,33 @@ UPDATE articles SET pdf_path = (
 );
 `;
 
+const MIGRATION_V4 = `
+CREATE TABLE tweet_links (
+  tweet_id TEXT NOT NULL REFERENCES tweets(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  url TEXT NOT NULL,
+  url_normalized TEXT,
+  pdf_path TEXT,
+  matched_at TEXT,
+  PRIMARY KEY (tweet_id, position)
+);
+
+CREATE INDEX idx_tweet_links_url_normalized ON tweet_links(url_normalized);
+CREATE INDEX idx_tweet_links_unmatched ON tweet_links(tweet_id) WHERE pdf_path IS NULL;
+
+CREATE TABLE pdf_index (
+  pdf_path TEXT PRIMARY KEY,
+  url TEXT,
+  url_normalized TEXT,
+  url_no_query TEXT,
+  mtime_ms REAL,
+  indexed_at TEXT
+);
+
+CREATE INDEX idx_pdf_index_url_normalized ON pdf_index(url_normalized);
+CREATE INDEX idx_pdf_index_url_no_query ON pdf_index(url_no_query);
+`;
+
 let singleton: TwitterDatabase | null = null;
 
 function nowIso(): string {
@@ -203,6 +230,19 @@ export function openTwitterDb(options: { dataDir?: string; dbPath?: string } = {
     try {
       db.exec(MIGRATION_V3);
       db.pragma('user_version = 3');
+      db.exec('COMMIT');
+      version = 3;
+    } catch (error) {
+      db.exec('ROLLBACK');
+      db.close();
+      throw error;
+    }
+  }
+  if (version === 3) {
+    db.exec('BEGIN');
+    try {
+      db.exec(MIGRATION_V4);
+      db.pragma('user_version = 4');
       db.exec('COMMIT');
     } catch (error) {
       db.exec('ROLLBACK');
@@ -541,6 +581,9 @@ export interface TwitterCaptureListItem {
   avatarFile: string | null;
   publishedAt: string | null;
   textPreview: string | null;
+  articleId: string | null;
+  articleTitle: string | null;
+  articlePreview: string | null;
   mediaCount: number;
   repliesCaptured: number;
   stats: {
@@ -584,6 +627,7 @@ const CAPTURE_SEARCH_WHERE = `
     OR COALESCE(u.fullname, '') LIKE @pattern COLLATE NOCASE
     OR COALESCE(t.content_text, '') LIKE @pattern COLLATE NOCASE
     OR COALESCE(a.title, '') LIKE @pattern COLLATE NOCASE
+    OR COALESCE(ta.title, '') LIKE @pattern COLLATE NOCASE
   )
 `;
 
@@ -614,6 +658,15 @@ export function listLatestTwitterCaptures(
     FROM latest_captures c
     LEFT JOIN tweets t ON c.kind = 'tweet' AND t.id = c.subject_id
     LEFT JOIN articles a ON c.kind = 'article' AND a.id = c.subject_id
+    LEFT JOIN articles ta ON c.kind = 'tweet'
+      AND ta.tweet_id = t.id
+      AND ta.id = (
+        SELECT newer_article.id
+        FROM articles newer_article
+        WHERE newer_article.tweet_id = t.id
+        ORDER BY newer_article.updated_at DESC, newer_article.id DESC
+        LIMIT 1
+      )
     LEFT JOIN users u ON u.username = COALESCE(t.username, a.author_username)
   `;
   const rows = db.prepare(`
@@ -638,6 +691,9 @@ export function listLatestTwitterCaptures(
         1,
         200
       ) AS textPreview,
+      ta.id AS articleId,
+      ta.title AS articleTitle,
+      COALESCE(ta.preview_text, SUBSTR(ta.body_text, 1, 280)) AS articlePreview,
       CASE
         WHEN c.kind = 'tweet'
           THEN (SELECT COUNT(*) FROM tweet_media tm WHERE tm.tweet_id = c.subject_id)
@@ -650,7 +706,7 @@ export function listLatestTwitterCaptures(
       t.views_count AS views
     ${joins}
     ${CAPTURE_SEARCH_WHERE}
-    ORDER BY c.captured_at DESC, c.id DESC
+    ORDER BY COALESCE(t.published_at, a.published_at, c.bookmarked_at, c.captured_at) DESC, c.id DESC
     LIMIT @limit OFFSET @offset
   `).all(parameters) as CaptureListDbRow[];
   const count = db.prepare(`
@@ -674,6 +730,9 @@ export function listLatestTwitterCaptures(
       avatarFile: row.avatarFile,
       publishedAt: row.publishedAt,
       textPreview: row.textPreview,
+      articleId: row.articleId,
+      articleTitle: row.articleTitle,
+      articlePreview: row.articlePreview,
       mediaCount: row.mediaCount,
       repliesCaptured: row.repliesCaptured,
       stats: {
@@ -714,6 +773,18 @@ export function getTweetPoll(
   ).all(tweetId) as Array<Record<string, unknown>>;
 }
 
+export function getTweetLinks(
+  db: TwitterDatabase,
+  tweetId: string,
+): Array<{ url: string; pdfPath: string | null }> {
+  return db.prepare(`
+    SELECT url, pdf_path AS pdfPath
+    FROM tweet_links
+    WHERE tweet_id = ?
+    ORDER BY position
+  `).all(tweetId) as Array<{ url: string; pdfPath: string | null }>;
+}
+
 export function getTweetReplies(
   db: TwitterDatabase,
   tweetId: string,
@@ -733,6 +804,19 @@ export function getArticleMedia(
   return db.prepare(
     'SELECT * FROM article_media WHERE article_id = ? ORDER BY position',
   ).all(articleId) as Array<Record<string, unknown>>;
+}
+
+export function getArticleByTweetId(
+  db: TwitterDatabase,
+  tweetId: string,
+): Record<string, unknown> | undefined {
+  return db.prepare(`
+    SELECT *
+    FROM articles
+    WHERE tweet_id = ?
+    ORDER BY updated_at DESC, id DESC
+    LIMIT 1
+  `).get(tweetId) as Record<string, unknown> | undefined;
 }
 
 export function getCapturesForSubjectKind(

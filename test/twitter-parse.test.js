@@ -66,6 +66,37 @@ test('parses full-resolution main attachments and self-thread/quote edges', asyn
   assert.equal(gary.quotedTweets.length, 1);
   assert.equal(gary.quotedTweets[0].id, '2082158585635914104');
   assert.equal(gary.quotedTweets[0].isStub, true);
+  assert.deepEqual(gary.quotedTweets[0].links, ['https://chessbench.ai/timeline']);
+});
+
+test('extracts real external links in appearance order and de-duplicates them per tweet', async () => {
+  const parsed = parseThreadPage(
+    await fixture('jack-status-20.html'),
+    'https://x.com/jack/status/20',
+  );
+  const tweets = [
+    parsed.mainTweet,
+    ...parsed.ancestors,
+    ...parsed.continuation,
+    ...parsed.replies,
+    ...parsed.quotedTweets,
+  ].filter(Boolean);
+  const linkedTweets = tweets.filter((tweet) => tweet.links.length > 0);
+
+  assert.deepEqual(
+    linkedTweets.flatMap((tweet) => tweet.links),
+    [
+      'https://summit.sfu.ca/item/8129',
+      'https://www.newsbreak.com/news/2278004219772/nft-has-entered-the-american-dictionary-yet-many-unknown-pain-points-prevail',
+      'https://app.rarible.com/token/0x60f80121c31a0d46b5279700f9df786054aa5ee5:297233:0x1e3c6f4bac19c8b218677a8ba09fcd377518dd52',
+    ],
+  );
+  assert.equal(
+    linkedTweets.find((tweet) => tweet.id === '1403995086220709891').links.length,
+    1,
+  );
+  assert.ok(linkedTweets.every((tweet) =>
+    tweet.links.every((url) => !/x\.com\/(?:search|[A-Za-z0-9_]+)\/?$/i.test(url))));
 });
 
 test('canonicalizes internal content links and parses stat edge cases', () => {
@@ -74,7 +105,15 @@ test('canonicalizes internal content links and parses stat edge cases', () => {
       <div class="timeline-item" data-username="alice">
         <div class="tweet-date"><a href="/alice/status/99" title="Jan 2, 2025 · 3:04 PM UTC"></a></div>
         <a class="fullname" title="Alice"></a><a class="username">@alice</a>
-        <div class="tweet-content"><a href="/bob">@bob</a><img src="/pic/foo.jpg"> hello</div>
+        <div class="tweet-content">
+          <a href="/bob">@bob</a>
+          <a href="/search?f=tweets&q=%23testing">#testing</a>
+          <a href="https://example.com/story">story</a>
+          <a href="https://example.com/story">story again</a>
+          <a href="https://twitter.com/alice/status/99?s=20">this thread</a>
+          <a href="https://x.com/charlie/status/123?s=20">another tweet</a>
+          <img src="/pic/foo.jpg"> hello
+        </div>
         <div class="tweet-stats">
           <span><span class="icon-heart"></span> 1,234</span>
           <span><span class="icon-views"></span></span>
@@ -86,6 +125,10 @@ test('canonicalizes internal content links and parses stat edge cases', () => {
   assert.doesNotMatch(parsed.mainTweet.contentHtml, /<img/);
   assert.equal(parsed.mainTweet.likesCount, 1234);
   assert.equal(parsed.mainTweet.viewsCount, null);
+  assert.deepEqual(parsed.mainTweet.links, [
+    'https://example.com/story',
+    'https://x.com/charlie/status/123?s=20',
+  ]);
   assert.equal(parseStatCount(' 1,234'), 1234);
   assert.equal(parseStatCount(''), null);
 });

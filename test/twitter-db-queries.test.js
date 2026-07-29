@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import {
   getArticleMedia,
+  getArticleByTweetId,
   getCapturesForSubjectKind,
   getTweetCard,
   getTweetMedia,
@@ -48,6 +49,7 @@ function tweet(overrides = {}) {
     viewsCount: 4,
     sourceUrl: `https://x.com/${username}/status/${id}`,
     isStub: false,
+    links: [],
     media: [],
     card: null,
     poll: [],
@@ -209,4 +211,47 @@ test('viewer query helpers return deduplicated list and relation shapes', async 
   assert.equal(getCapturesForSubjectKind(db, 'tweet', '100').length, 2);
   assert.equal(hasCaptureForSubject(db, 'tweet', '100'), true);
   assert.equal(hasCaptureForSubject(db, 'article', '100'), false);
+});
+
+test('capture list surfaces chained article summaries for card-only posts', async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'twitter-query-article-'));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const db = openTwitterDb({ dataDir });
+  t.after(() => db.close());
+
+  upsertTweet(db, tweet({
+    id: '500',
+    articleId: '500',
+    contentHtml: null,
+    contentText: null,
+  }));
+  upsertArticle(db, {
+    id: '500',
+    announcingTweetId: '500',
+    url: 'https://x.com/i/article/500',
+    authorUsername: 'alice',
+    title: 'Why we are buzzing',
+    previewText: 'The chained article preview.',
+    coverImageUrl: null,
+    coverImageFetchUrl: null,
+    bodyHtml: '<p>The chained article body.</p>',
+    bodyText: 'The chained article body.',
+    publishedAt: '2025-01-01T00:00:00.000Z',
+    harvestedFrom: 'nitter',
+    links: [],
+    media: [],
+  });
+  insertCapture(db, {
+    kind: 'tweet',
+    subjectId: '500',
+    sourceUrl: 'https://x.com/alice/status/500',
+    origin: 'worker',
+  });
+
+  const item = listLatestTwitterCaptures(db, { limit: 10, offset: 0 }).items[0];
+  assert.equal(item.textPreview, null);
+  assert.equal(item.articleId, '500');
+  assert.equal(item.articleTitle, 'Why we are buzzing');
+  assert.equal(item.articlePreview, 'The chained article preview.');
+  assert.equal(getArticleByTweetId(db, '500').id, '500');
 });

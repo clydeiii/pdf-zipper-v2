@@ -9,6 +9,7 @@ import {
   openTwitterDb,
   upsertTweet,
 } from '../dist/twitter/db.js';
+import { matchUrlToPdf, upsertTweetLinks } from '../dist/twitter/link-match.js';
 
 function tweet(overrides = {}) {
   return {
@@ -35,6 +36,7 @@ function tweet(overrides = {}) {
     viewsCount: 4,
     sourceUrl: 'https://x.com/alice/status/100',
     isStub: false,
+    links: [],
     media: [],
     card: null,
     poll: [],
@@ -48,7 +50,7 @@ test('migrates from scratch and preserves upsert invariants', async (t) => {
   const db = openTwitterDb({ dataDir });
   t.after(() => db.close());
 
-  assert.equal(db.pragma('user_version', { simple: true }), 3);
+  assert.equal(db.pragma('user_version', { simple: true }), 4);
   assert.equal(db.pragma('journal_mode', { simple: true }), 'wal');
   assert.equal(db.pragma('foreign_keys', { simple: true }), 1);
 
@@ -144,7 +146,7 @@ test('migration v2 adds article tweet_id without losing v1 data', async (t) => {
 
   const db = openTwitterDb({ dbPath });
   t.after(() => db.close());
-  assert.equal(db.pragma('user_version', { simple: true }), 3);
+  assert.equal(db.pragma('user_version', { simple: true }), 4);
   assert.ok(db.pragma('table_info(articles)').some((column) => column.name === 'tweet_id'));
   assert.deepEqual(
     db.prepare('SELECT id, title, body_text, tweet_id FROM articles WHERE id = ?').get('900'),
@@ -165,6 +167,109 @@ test('migration v2 adds article tweet_id without losing v1 data', async (t) => {
     db.prepare('SELECT pdf_path FROM articles WHERE id = ?').get('900').pdf_path,
     'media/2025-W01/pdfs/x.com-alice-article-900.pdf',
   );
+});
+
+test('matches normalized URLs and preserves existing tweet link matches', async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'twitter-db-links-'));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const db = openTwitterDb({ dataDir });
+  t.after(() => db.close());
+  upsertTweet(db, tweet());
+
+  const insertPdf = db.prepare(`
+    INSERT INTO pdf_index (
+      pdf_path, url, url_normalized, url_no_query, mtime_ms, indexed_at
+    ) VALUES (?, ?, ?, ?, 1, '2026-01-01T00:00:00.000Z')
+  `);
+  insertPdf.run(
+    'media/2026-W01/pdfs/story.pdf',
+    'https://example.com/story',
+    'https://example.com/story',
+    'https://example.com/story',
+  );
+  insertPdf.run(
+    'media/2026-W01/pdfs/status.pdf',
+    'https://twitter.com/alice/status/123',
+    'https://twitter.com/alice/status/123',
+    'https://twitter.com/alice/status/123',
+  );
+  insertPdf.run(
+    'media/2026-W01/pdfs/short.pdf',
+    'https://t.co/abc',
+    'https://t.co/abc',
+    'https://t.co/abc',
+  );
+
+  assert.equal(
+    matchUrlToPdf(db, 'https://www.example.com/story/?utm_source=x&s=20'),
+    'media/2026-W01/pdfs/story.pdf',
+  );
+  assert.equal(
+    matchUrlToPdf(db, 'https://x.com/alice/status/123?s=20'),
+    'media/2026-W01/pdfs/status.pdf',
+  );
+  assert.equal(matchUrlToPdf(db, 'not a URL'), null);
+
+  await upsertTweetLinks(db, '100', [
+    'https://www.example.com/story/?utm_source=x&s=20',
+    'https://unmatched.example/path',
+    'https://t.co/abc',
+  ], {
+    resolver: async (url) => url === 'https://t.co/abc'
+      ? 'https://expanded.example/article'
+      : url,
+    timestamp: '2026-01-02T00:00:00.000Z',
+  });
+  let rows = db.prepare(
+    'SELECT position, url, pdf_path, matched_at FROM tweet_links WHERE tweet_id = ? ORDER BY position',
+  ).all('100');
+  assert.deepEqual(rows, [
+    {
+      position: 0,
+      url: 'https://www.example.com/story/?utm_source=x&s=20',
+      pdf_path: 'media/2026-W01/pdfs/story.pdf',
+      matched_at: '2026-01-02T00:00:00.000Z',
+    },
+    {
+      position: 1,
+      url: 'https://unmatched.example/path',
+      pdf_path: null,
+      matched_at: null,
+    },
+    {
+      position: 2,
+      url: 'https://expanded.example/article',
+      pdf_path: 'media/2026-W01/pdfs/short.pdf',
+      matched_at: '2026-01-02T00:00:00.000Z',
+    },
+  ]);
+
+  db.prepare('DELETE FROM pdf_index').run();
+  await upsertTweetLinks(db, '100', [
+    'https://www.example.com/story/?utm_source=x&s=20',
+    'https://different.example/path',
+  ], {
+    resolver: async (url) => url,
+    timestamp: '2026-01-03T00:00:00.000Z',
+  });
+  await upsertTweetLinks(db, '100', []);
+  rows = db.prepare(
+    'SELECT position, url, pdf_path, matched_at FROM tweet_links WHERE tweet_id = ? ORDER BY position',
+  ).all('100');
+  assert.deepEqual(rows, [
+    {
+      position: 0,
+      url: 'https://www.example.com/story/?utm_source=x&s=20',
+      pdf_path: 'media/2026-W01/pdfs/story.pdf',
+      matched_at: '2026-01-02T00:00:00.000Z',
+    },
+    {
+      position: 1,
+      url: 'https://different.example/path',
+      pdf_path: null,
+      matched_at: null,
+    },
+  ]);
 });
 
 test('insertCapture stamps pdf_path onto the subject row; latest capture wins', async (t) => {

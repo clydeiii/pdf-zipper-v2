@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { env } from '../config/env.js';
 import {
   getTwitterDb,
+  getTweetById,
   insertCapture,
   setPdfPath,
   upsertArticle,
@@ -10,7 +11,16 @@ import {
   type TwitterDatabase,
 } from './db.js';
 import { storeNitterImage } from './imagestore.js';
-import { isNitterErrorPage, parseArticle, parseThreadPage } from './parse.js';
+import { upsertTweetLinks } from './link-match.js';
+import { refreshPdfIndex } from './pdf-index.js';
+import {
+  excludeSameThreadLinks,
+  extractExternalLinksFromHtml,
+  filterExternalLinks,
+  isNitterErrorPage,
+  parseArticle,
+  parseThreadPage,
+} from './parse.js';
 import type {
   ArticleHarvestSummary,
   HarvestArticleOptions,
@@ -21,6 +31,9 @@ import type {
 } from './types.js';
 
 const DESKTOP_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
+const PDF_INDEX_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
+
+let lastPdfIndexRefreshAt = 0;
 
 export type TwitterHarvestErrorCode = 'invalid_url' | 'fetch_failed' | 'error_page' | 'parse_failed' | 'database_failed';
 
@@ -95,6 +108,39 @@ function uniqueTweets(tweets: ParsedTweet[]): ParsedTweet[] {
     if (!existing || (existing.isStub && !tweet.isStub)) byId.set(tweet.id, tweet);
   }
   return [...byId.values()];
+}
+
+async function refreshPdfIndexIfDue(db: TwitterDatabase): Promise<void> {
+  const now = Date.now();
+  if (now - lastPdfIndexRefreshAt < PDF_INDEX_REFRESH_INTERVAL_MS) return;
+  lastPdfIndexRefreshAt = now;
+  await refreshPdfIndex(db);
+}
+
+async function persistTweetLinks(
+  db: TwitterDatabase,
+  tweets: ParsedTweet[],
+  article: ParsedArticle | null,
+  subjectId: string,
+): Promise<void> {
+  excludeSameThreadLinks(tweets);
+  const articleLinks = article
+    ? filterExternalLinks(article.links, {
+        sameThreadTweetIds: tweets.map((tweet) => tweet.id),
+        sameThreadArticleIds: [article.id],
+      })
+    : [];
+  for (const tweet of tweets) {
+    if (tweet.isStub) continue;
+    const links = tweet.id === subjectId
+      ? [...tweet.links, ...articleLinks]
+      : tweet.links;
+    try {
+      await upsertTweetLinks(db, tweet.id, links);
+    } catch {
+      // Link expansion and matching are supplementary to the harvested post.
+    }
+  }
 }
 
 async function findLocalVideo(tweet: ParsedTweet): Promise<string | null> {
@@ -276,6 +322,12 @@ export async function harvestTweetToDb(options: HarvestTweetOptions): Promise<Tw
         // Never let an article image or persistence failure lose the tweet capture.
       }
     }
+    try {
+      await refreshPdfIndexIfDue(db);
+      await persistTweetLinks(db, tweets, article, subject.id);
+    } catch {
+      // PDF indexing/link matching is non-fatal, like image hydration.
+    }
     const repliesCaptured = new Set(pages.flatMap((page) => page.replies.map((tweet) => tweet.id))).size;
     insertCapture(db, {
       kind: 'tweet',
@@ -323,6 +375,7 @@ function fallbackArticle(options: HarvestArticleOptions, id: string): ParsedArti
     bodyText,
     publishedAt: null,
     harvestedFrom: 'x.com',
+    links: extractExternalLinksFromHtml(bodyHtml),
     media: [],
   };
 }
@@ -376,6 +429,21 @@ export async function harvestArticleToDb(options: HarvestArticleOptions): Promis
     const db = getTwitterDb();
     const imagesDownloaded = await hydrateArticleImages(db, article);
     upsertArticle(db, article);
+    try {
+      await refreshPdfIndexIfDue(db);
+      if (getTweetById(db, article.announcingTweetId ?? id)) {
+        await upsertTweetLinks(
+          db,
+          article.announcingTweetId ?? id,
+          filterExternalLinks(article.links, {
+            sameThreadTweetIds: [article.announcingTweetId ?? id],
+            sameThreadArticleIds: [article.id],
+          }),
+        );
+      }
+    } catch {
+      // Link indexing is supplementary to the article capture.
+    }
     insertCapture(db, {
       kind: 'article',
       subjectId: id,

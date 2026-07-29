@@ -29,6 +29,9 @@ import { buildUrlBaseName } from '../src/utils/save-pdf.js';
 
 const PAGE_LIMIT = 100;
 const MAX_PAGES = 10_000;
+const RATE_LIMIT_FAILURE_STREAK = 8;
+const RATE_LIMIT_PAUSE_MS = 15 * 60 * 1000;
+const MAX_RATE_LIMIT_PAUSES = 20;
 const TWITTER_HOSTS = new Set(['x.com', 'www.x.com', 'twitter.com', 'www.twitter.com']);
 
 interface Options {
@@ -66,6 +69,7 @@ interface Summary {
   skipped: number;
   failed: number;
   attempted: number;
+  pauses: number;
 }
 
 let stopRequested = false;
@@ -251,6 +255,7 @@ function logSummary(summary: Summary, dryRun: boolean, interrupted: boolean): vo
     `skipped=${summary.skipped}`,
     `failed=${summary.failed}`,
     `attempted=${summary.attempted}`,
+    `pauses=${summary.pauses}`,
     interrupted ? 'interrupted=true' : '',
   ].filter(Boolean).join(' '));
 }
@@ -265,6 +270,7 @@ async function main(): Promise<void> {
     skipped: 0,
     failed: 0,
     attempted: 0,
+    pauses: 0,
   };
 
   console.log(`Twitter/X backfill: cutoff=${cutoff.toISOString()} delay=${options.delayMs}ms${options.dryRun ? ' dry-run' : ''}`);
@@ -274,6 +280,8 @@ async function main(): Promise<void> {
   ]);
   const db = getTwitterDb();
   let eligible = 0;
+  let consecutiveRateLimitFailures = 0;
+  let rateLimitStopped = false;
 
   for (let index = 0; index < bookmarks.length; index++) {
     if (stopRequested) break;
@@ -303,43 +311,79 @@ async function main(): Promise<void> {
     }
 
     summary.attempted++;
-    try {
-      if (classified.kind === 'tweet') {
-        const result = await harvestTweetToDb({
-          url: classified.url,
-          bookmarkedAt: bookmark.createdAt,
-          pdfPath,
-          origin: 'backfill',
-        });
-        summary.harvested++;
-        summary.tweetsUpserted += result.tweetsUpserted;
-        summary.imagesDownloaded += result.imagesDownloaded;
-        console.log(`${label} ok tweet ${result.tweetId} tweets=${result.tweetsUpserted} images=${result.imagesDownloaded} pages=${result.pagesFetched} pdf=${pdfPath ?? 'none'}`);
-      } else {
-        const result = await harvestArticleToDb({
-          url: classified.url,
-          bookmarkedAt: bookmark.createdAt,
-          pdfPath,
-          origin: 'backfill',
-        });
-        summary.harvested++;
-        summary.imagesDownloaded += result.imagesDownloaded;
-        console.log(`${label} ok article ${result.articleId} images=${result.imagesDownloaded} pages=${result.pagesFetched} from=${result.harvestedFrom} pdf=${pdfPath ?? 'none'}`);
+    let retryAfterPause = false;
+    let retried = false;
+    let itemFailed = false;
+    do {
+      retryAfterPause = false;
+      try {
+        if (classified.kind === 'tweet') {
+          const result = await harvestTweetToDb({
+            url: classified.url,
+            bookmarkedAt: bookmark.createdAt,
+            pdfPath,
+            origin: 'backfill',
+          });
+          summary.harvested++;
+          summary.tweetsUpserted += result.tweetsUpserted;
+          summary.imagesDownloaded += result.imagesDownloaded;
+          console.log(`${label} ok tweet ${result.tweetId} tweets=${result.tweetsUpserted} images=${result.imagesDownloaded} pages=${result.pagesFetched} pdf=${pdfPath ?? 'none'}${retried ? ' retry=true' : ''}`);
+        } else {
+          const result = await harvestArticleToDb({
+            url: classified.url,
+            bookmarkedAt: bookmark.createdAt,
+            pdfPath,
+            origin: 'backfill',
+          });
+          summary.harvested++;
+          summary.imagesDownloaded += result.imagesDownloaded;
+          console.log(`${label} ok article ${result.articleId} images=${result.imagesDownloaded} pages=${result.pagesFetched} from=${result.harvestedFrom} pdf=${pdfPath ?? 'none'}${retried ? ' retry=true' : ''}`);
+        }
+        consecutiveRateLimitFailures = 0;
+        itemFailed = false;
+      } catch (error) {
+        itemFailed = true;
+        const code = error instanceof TwitterHarvestError ? error.code : 'unexpected';
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`${label} fail ${classified.kind} ${classified.subjectId} [${code}] ${message}${retried ? ' retry=true' : ''}`);
+        const rateLimitFailure = code === 'fetch_failed' || code === 'error_page';
+        consecutiveRateLimitFailures = rateLimitFailure
+          ? consecutiveRateLimitFailures + 1
+          : 0;
+        if (rateLimitFailure && consecutiveRateLimitFailures >= RATE_LIMIT_FAILURE_STREAK) {
+          if (summary.pauses >= MAX_RATE_LIMIT_PAUSES) {
+            console.log(`rate-limit pause cap reached (${MAX_RATE_LIMIT_PAUSES}); stopping with partial progress`);
+            rateLimitStopped = true;
+          } else {
+            summary.pauses++;
+            console.log(`rate-limit pause ${summary.pauses}/${MAX_RATE_LIMIT_PAUSES}: ${RATE_LIMIT_FAILURE_STREAK} consecutive fetch failures; sleeping 15 minutes, then retrying the same bookmark once`);
+            await delay(RATE_LIMIT_PAUSE_MS);
+            consecutiveRateLimitFailures = 0;
+            if (!retried) {
+              retried = true;
+              retryAfterPause = true;
+            }
+          }
+        }
       }
-    } catch (error) {
+    } while (retryAfterPause && !stopRequested && !rateLimitStopped);
+    if (itemFailed) {
       summary.failed++;
-      const code = error instanceof TwitterHarvestError ? error.code : 'unexpected';
-      const message = error instanceof Error ? error.message : String(error);
-      console.error(`${label} fail ${classified.kind} ${classified.subjectId} [${code}] ${message}`);
     }
 
+    if (rateLimitStopped) break;
     if (!stopRequested && options.delayMs > 0 && index < bookmarks.length - 1) {
       await delay(options.delayMs);
     }
   }
 
-  logSummary(summary, options.dryRun, stopRequested);
-  if (!options.dryRun && summary.attempted > 0 && summary.failed === summary.attempted) {
+  logSummary(summary, options.dryRun, stopRequested || rateLimitStopped);
+  if (
+    !options.dryRun
+    && !rateLimitStopped
+    && summary.attempted > 0
+    && summary.failed === summary.attempted
+  ) {
     process.exitCode = 1;
   }
 }

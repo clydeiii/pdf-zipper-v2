@@ -14,6 +14,7 @@ import type {
 const STATUS_PATH_RE = /^\/([A-Za-z0-9_]+)\/status\/(\d+)/;
 const ARTICLE_PATH_RE = /\/(?:i\/article|[A-Za-z0-9_]+\/article)\/(\d+)/;
 const NITTER_ERROR_RE = /tweet not found|user not found|instance has been rate limited|page not found/i;
+const TWITTER_HOSTS = new Set(['x.com', 'www.x.com', 'twitter.com', 'www.twitter.com']);
 
 function nonEmpty(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
@@ -58,6 +59,84 @@ function canonicalizeHtml($content: Cheerio<AnyNode>): string | null {
   });
   clone.find('img, video, source, picture').remove();
   return nonEmpty(clone.html());
+}
+
+function twitterLinkTarget(url: URL): { kind: 'status' | 'article'; id: string } | null {
+  if (!TWITTER_HOSTS.has(url.hostname.toLowerCase())) return null;
+  const status = url.pathname.match(/^\/[A-Za-z0-9_]+\/status\/(\d+)(?:[/?#]|$)/);
+  if (status) return { kind: 'status', id: status[1] };
+  const article = url.pathname.match(
+    /^\/(?:i\/article|[A-Za-z0-9_]+\/article)\/(\d+)(?:[/?#]|$)/,
+  );
+  return article ? { kind: 'article', id: article[1] } : null;
+}
+
+export function extractExternalLinksFromHtml(
+  html: string | null | undefined,
+  options: {
+    cardUrl?: string | null;
+    sameThreadTweetIds?: Iterable<string>;
+    sameThreadArticleIds?: Iterable<string>;
+  } = {},
+): string[] {
+  const candidates: string[] = [];
+  if (html) {
+    const $ = load(html, null, false);
+    $('a[href]').each((_index, element) => {
+      const href = $(element).attr('href')?.trim();
+      if (href) candidates.push(href);
+    });
+  }
+  if (options.cardUrl) candidates.push(options.cardUrl.trim());
+
+  return filterExternalLinks(candidates, options);
+}
+
+export function filterExternalLinks(
+  candidates: string[],
+  options: {
+    sameThreadTweetIds?: Iterable<string>;
+    sameThreadArticleIds?: Iterable<string>;
+  },
+): string[] {
+  const tweetIds = new Set(options.sameThreadTweetIds ?? []);
+  const articleIds = new Set(options.sameThreadArticleIds ?? []);
+  const links: string[] = [];
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    if (!/^https?:\/\//i.test(candidate)) continue;
+    let parsed: URL;
+    try {
+      parsed = new URL(candidate);
+    } catch {
+      continue;
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') continue;
+    const target = twitterLinkTarget(parsed);
+    if (TWITTER_HOSTS.has(parsed.hostname.toLowerCase())) {
+      if (!target) continue;
+      if (target.kind === 'status' && tweetIds.has(target.id)) continue;
+      if (target.kind === 'article' && (articleIds.has(target.id) || tweetIds.has(target.id))) continue;
+    }
+    const url = parsed.toString();
+    if (seen.has(url)) continue;
+    seen.add(url);
+    links.push(url);
+  }
+  return links;
+}
+
+export function excludeSameThreadLinks(tweets: ParsedTweet[]): void {
+  const tweetIds = new Set(tweets.map((tweet) => tweet.id));
+  const articleIds = new Set(
+    tweets.map((tweet) => tweet.articleId).filter((id): id is string => Boolean(id)),
+  );
+  for (const tweet of tweets) {
+    tweet.links = filterExternalLinks(tweet.links, {
+      sameThreadTweetIds: tweetIds,
+      sameThreadArticleIds: articleIds,
+    });
+  }
 }
 
 function parseDate(title: string | undefined): string | null {
@@ -192,7 +271,10 @@ function parseMedia(
 }
 
 function parseCard($scope: Cheerio<AnyNode>): ParsedCard | null {
-  const card = $scope.find('.card:has(.card-title), .card:has(.card-description), .card:has(.card-container)').first();
+  const cards = $scope.find(
+    '.card:has(.card-title), .card:has(.card-description), .card:has(.card-container)',
+  );
+  const card = cards.filter((index) => cards.eq(index).parents('.quote').length === 0).first();
   if (!card.length) return null;
   const imageFetchUrl = nonEmpty(card.find('img[src]').first().attr('src'));
   return {
@@ -271,13 +353,15 @@ function parseTweetElement(
     .filter((value): value is string => Boolean(value));
   const quoteParts = statusParts(item.find('.quote a.quote-link[href]').first().attr('href'));
   const dateTitle = item.find('.tweet-date a[title]').first().attr('title');
+  const contentHtml = canonicalizeHtml(content);
+  const card = parseCard(item);
 
   return {
     id,
     articleId: articleCardId($, item),
     username,
     user,
-    contentHtml: canonicalizeHtml(content),
+    contentHtml,
     contentText: nonEmpty(content.text()),
     publishedAt: parseDate(dateTitle),
     replyToId: options.replyToId ?? null,
@@ -290,8 +374,9 @@ function parseTweetElement(
     viewsCount: statFor(item, 'icon-views'),
     sourceUrl: `https://x.com/${username}/status/${id}`,
     isStub: options.isStub ?? false,
+    links: extractExternalLinksFromHtml(content.html(), { cardUrl: card?.url }),
     media: parseMedia($, item),
-    card: parseCard(item),
+    card,
     poll: parsePoll(item),
   };
 }
@@ -341,6 +426,7 @@ function parseQuote($: CheerioAPI, quoteElement: AnyNode): ParsedTweet | null {
     viewsCount: null,
     sourceUrl: `https://x.com/${parts.username}/status/${parts.id}`,
     isStub: true,
+    links: extractExternalLinksFromHtml(text.html()),
     media,
     card: null,
     poll: [],
@@ -418,7 +504,7 @@ export function parseThreadPage(html: string, sourceUrl: string): ParsedThreadPa
   const cursorHref = nonEmpty($('#r.replies .show-more a[href], .show-more a[href*="cursor="]').last().attr('href'));
   const nextCursor = cursorHref ? cursorHref.replace(/#.*$/, '') : null;
 
-  return {
+  const result = {
     mainTweet,
     ancestors: uniqueTweets(ancestors),
     continuation: uniqueTweets(continuation),
@@ -426,6 +512,14 @@ export function parseThreadPage(html: string, sourceUrl: string): ParsedThreadPa
     quotedTweets,
     nextCursor,
   };
+  excludeSameThreadLinks(uniqueTweets([
+    ...(result.mainTweet ? [result.mainTweet] : []),
+    ...result.ancestors,
+    ...result.continuation,
+    ...result.replies,
+    ...result.quotedTweets,
+  ]));
+  return result;
 }
 
 function articleIdFromUrl(sourceUrl: string): string | null {
@@ -490,6 +584,7 @@ export function parseArticle(html: string, sourceUrl: string): ParsedArticle | n
     bodyText,
     publishedAt: date && !Number.isNaN(date.getTime()) ? date.toISOString() : null,
     harvestedFrom: 'nitter',
+    links: extractExternalLinksFromHtml(bodyContent.html()),
     media,
   };
 }

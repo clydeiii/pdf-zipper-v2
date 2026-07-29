@@ -42,6 +42,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }, 250);
   });
   captureList.addEventListener('click', handleListClick);
+  threadContent.addEventListener('click', handleThreadClick);
 });
 
 async function loadStats() {
@@ -108,9 +109,16 @@ function renderCaptureList() {
             ${capture.username ? `<span class="capture-username">@${escapeHtml(capture.username)}</span>` : ''}
             <span class="capture-date">${escapeHtml(formatDate(date))}</span>
           </div>
-          <div class="capture-text">${escapeHtml(capture.textPreview || 'No text captured')}</div>
+          ${capture.textPreview
+            ? `<div class="capture-text">${escapeHtml(capture.textPreview)}</div>`
+            : (!capture.articleTitle ? '<div class="capture-text">No text captured</div>' : '')}
+          ${capture.articleTitle ? `
+            <div class="capture-article-title">
+              <span class="badge badge-article">Article</span>${escapeHtml(capture.articleTitle)}
+            </div>
+          ` : ''}
           <div class="capture-meta">
-            ${capture.kind === 'article' ? '<span class="badge badge-article">Article</span>' : ''}
+            ${capture.kind === 'article' && !capture.articleTitle ? '<span class="badge badge-article">Article</span>' : ''}
             ${capture.mediaCount ? `<span class="badge">${escapeHtml(String(capture.mediaCount))} media</span>` : ''}
             ${capture.repliesCaptured ? `<span class="badge">${escapeHtml(String(capture.repliesCaptured))} replies captured</span>` : ''}
             ${capture.kind === 'tweet' ? `
@@ -141,6 +149,11 @@ function handleListClick(event) {
   else loadThread(button.dataset.id);
 }
 
+function handleThreadClick(event) {
+  const button = event.target.closest('.open-article');
+  if (button) loadArticle(button.dataset.id);
+}
+
 async function loadThread(id) {
   showView(threadView);
   threadContent.innerHTML = '<p class="loading">Loading thread…</p>';
@@ -157,6 +170,8 @@ async function loadThread(id) {
           quoted: data.quoted,
           captures: data.captures,
           showStats: true,
+          article: data.article,
+          articlePdfFallback: (data.captures || []).find((capture) => capture.pdf_path)?.pdf_path,
         })}
       </div>
       <h2 class="replies-heading">Replies</h2>
@@ -192,9 +207,11 @@ function renderTweet(tweet, options = {}) {
             ${tweet.username ? `<span class="tweet-username">@${escapeHtml(tweet.username)}</span>` : ''}
           </div>
           <div class="tweet-content">${content}</div>
+          ${renderLinks(tweet.links || [])}
           ${renderMedia(tweet.media || [])}
           ${renderLinkCard(tweet.card)}
           ${renderPoll(tweet.poll || [])}
+          ${options.article ? renderTweetArticle(options.article, options.articlePdfFallback) : ''}
           ${options.quoted ? renderQuoted(options.quoted, 0) : ''}
           <div class="tweet-date">${escapeHtml(formatDate(tweet.published_at))}</div>
           ${options.showStats ? renderStats(tweet) : ''}
@@ -202,6 +219,40 @@ function renderTweet(tweet, options = {}) {
         </div>
       </div>
     </article>
+  `;
+}
+
+function renderLinks(links) {
+  if (!links.length) return '';
+  return `
+    <div class="tweet-links">
+      ${links.map((link) => {
+        const externalUrl = safeHttpUrl(link.url);
+        if (!externalUrl) return '';
+        const captured = Boolean(link.pdfPath);
+        const href = captured ? fileUrl(link.pdfPath) : externalUrl;
+        return `<a class="link-chip${captured ? ' captured' : ''}" href="${escapeHtml(href)}" target="_blank" rel="noopener" title="${escapeHtml(link.url)}">${captured ? 'Captured · ' : ''}${escapeHtml(linkLabel(link.url))}</a>`;
+      }).join('')}
+    </div>
+  `;
+}
+
+function renderTweetArticle(article, capturePdfPath) {
+  if (!article) return '';
+  const pdfPath = article.pdf_path || capturePdfPath;
+  return `
+    <div class="tweet-article-box">
+      <div class="tweet-article-copy">
+        <span class="badge badge-article">Article</span>
+        <div class="tweet-article-title">${escapeHtml(article.title || 'Untitled X Article')}</div>
+        ${article.preview_text ? `<p class="tweet-article-preview">${escapeHtml(article.preview_text)}</p>` : ''}
+        <div class="tweet-article-actions">
+          <button class="btn btn-primary open-article" data-id="${escapeHtml(article.id)}">Read article</button>
+          ${pdfPath ? `<a class="btn btn-secondary" href="${escapeHtml(fileUrl(pdfPath))}" target="_blank" rel="noopener">PDF</a>` : ''}
+        </div>
+      </div>
+      ${article.cover_image_file ? `<img class="tweet-article-cover" src="${escapeHtml(fileUrl(article.cover_image_file))}" alt="" loading="lazy">` : ''}
+    </div>
   `;
 }
 
@@ -322,6 +373,7 @@ async function loadArticle(id) {
         </div>
         ${article.cover_image_file ? `<a href="${escapeHtml(fileUrl(article.cover_image_file))}" target="_blank" rel="noopener"><img class="article-cover" src="${escapeHtml(fileUrl(article.cover_image_file))}" alt="" loading="lazy"></a>` : ''}
         <div class="article-body">${article.body_html || escapeHtml(article.body_text || article.preview_text || '')}</div>
+        ${renderLinks(data.links || [])}
         ${renderArticleMedia(data.media || [])}
         ${renderProvenance(data.captures || [])}
       </article>
@@ -393,6 +445,15 @@ function safeHttpUrl(value) {
     return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : '';
   } catch {
     return '';
+  }
+}
+
+function linkLabel(value) {
+  try {
+    const url = new URL(value);
+    return `${url.hostname.replace(/^www\./, '')}${url.pathname === '/' ? '' : url.pathname}`;
+  } catch {
+    return value;
   }
 }
 
