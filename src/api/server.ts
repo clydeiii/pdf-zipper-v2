@@ -24,6 +24,7 @@ import { fixRouter } from './routes/fix.js';
 import { telemetryRouter } from './routes/telemetry.js';
 import { manualCaptureRouter } from './routes/manual-capture.js';
 import { auditRouter } from './routes/audit.js';
+import { twitterRouter } from './routes/twitter.js';
 import { serverAdapter } from './monitoring.js';
 import { env } from '../config/env.js';
 
@@ -68,6 +69,7 @@ app.use('/api/debug', debugRouter);
 app.use('/api/fix', fixRouter);
 app.use('/api/telemetry', telemetryRouter);
 app.use('/api/audit', auditRouter);
+app.use('/api/twitter', twitterRouter);
 app.use('/api', serveRouter);
 
 // Mount Bull Board dashboard

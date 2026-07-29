@@ -451,3 +451,242 @@ export function getCapturesForSubject(
 ): Array<Record<string, unknown>> {
   return db.prepare('SELECT * FROM captures WHERE subject_id = ? ORDER BY id').all(subjectId) as Array<Record<string, unknown>>;
 }
+
+export interface TwitterStats {
+  tweets: number;
+  users: number;
+  articles: number;
+  captures: number;
+  images: number;
+  imagestoreBytes: number;
+}
+
+export interface TwitterCaptureListItem {
+  kind: 'tweet' | 'article';
+  subjectId: string;
+  capturedAt: string;
+  bookmarkedAt: string | null;
+  origin: 'worker' | 'backfill' | 'manual';
+  pdfPath: string | null;
+  sourceUrl: string;
+  username: string | null;
+  fullname: string | null;
+  avatarFile: string | null;
+  publishedAt: string | null;
+  textPreview: string | null;
+  mediaCount: number;
+  repliesCaptured: number;
+  stats: {
+    replies: number | null;
+    retweets: number | null;
+    likes: number | null;
+    views: number | null;
+  };
+}
+
+export interface TwitterCaptureListResult {
+  items: TwitterCaptureListItem[];
+  total: number;
+}
+
+interface CaptureListDbRow extends Omit<TwitterCaptureListItem, 'stats'> {
+  replies: number | null;
+  retweets: number | null;
+  likes: number | null;
+  views: number | null;
+}
+
+const LATEST_CAPTURES_CTE = `
+  WITH latest_captures AS (
+    SELECT c.*
+    FROM captures c
+    WHERE c.id = (
+      SELECT newer.id
+      FROM captures newer
+      WHERE newer.kind = c.kind AND newer.subject_id = c.subject_id
+      ORDER BY newer.captured_at DESC, newer.id DESC
+      LIMIT 1
+    )
+  )
+`;
+
+const CAPTURE_SEARCH_WHERE = `
+  WHERE (
+    @query = ''
+    OR COALESCE(t.username, a.author_username, '') LIKE @pattern COLLATE NOCASE
+    OR COALESCE(u.fullname, '') LIKE @pattern COLLATE NOCASE
+    OR COALESCE(t.content_text, '') LIKE @pattern COLLATE NOCASE
+    OR COALESCE(a.title, '') LIKE @pattern COLLATE NOCASE
+  )
+`;
+
+export function getTwitterStats(db: TwitterDatabase): TwitterStats {
+  return db.prepare(`
+    SELECT
+      (SELECT COUNT(*) FROM tweets) AS tweets,
+      (SELECT COUNT(*) FROM users) AS users,
+      (SELECT COUNT(*) FROM articles) AS articles,
+      (SELECT COUNT(*) FROM captures) AS captures,
+      (SELECT COUNT(*) FROM images) AS images,
+      (SELECT COALESCE(SUM(bytes), 0) FROM images WHERE file IS NOT NULL) AS imagestoreBytes
+  `).get() as TwitterStats;
+}
+
+export function listLatestTwitterCaptures(
+  db: TwitterDatabase,
+  options: { limit: number; offset: number; query?: string },
+): TwitterCaptureListResult {
+  const query = options.query?.trim() ?? '';
+  const parameters = {
+    query,
+    pattern: `%${query}%`,
+    limit: options.limit,
+    offset: options.offset,
+  };
+  const joins = `
+    FROM latest_captures c
+    LEFT JOIN tweets t ON c.kind = 'tweet' AND t.id = c.subject_id
+    LEFT JOIN articles a ON c.kind = 'article' AND a.id = c.subject_id
+    LEFT JOIN users u ON u.username = COALESCE(t.username, a.author_username)
+  `;
+  const rows = db.prepare(`
+    ${LATEST_CAPTURES_CTE}
+    SELECT
+      c.kind AS kind,
+      c.subject_id AS subjectId,
+      c.captured_at AS capturedAt,
+      c.bookmarked_at AS bookmarkedAt,
+      c.origin AS origin,
+      c.pdf_path AS pdfPath,
+      c.source_url AS sourceUrl,
+      COALESCE(t.username, a.author_username) AS username,
+      u.fullname AS fullname,
+      u.avatar_file AS avatarFile,
+      COALESCE(t.published_at, a.published_at) AS publishedAt,
+      SUBSTR(
+        CASE
+          WHEN c.kind = 'tweet' THEN t.content_text
+          ELSE COALESCE(a.preview_text, a.body_text, a.title)
+        END,
+        1,
+        200
+      ) AS textPreview,
+      CASE
+        WHEN c.kind = 'tweet'
+          THEN (SELECT COUNT(*) FROM tweet_media tm WHERE tm.tweet_id = c.subject_id)
+        ELSE (SELECT COUNT(*) FROM article_media am WHERE am.article_id = c.subject_id)
+      END AS mediaCount,
+      c.replies_captured AS repliesCaptured,
+      t.replies_count AS replies,
+      t.retweets_count AS retweets,
+      t.likes_count AS likes,
+      t.views_count AS views
+    ${joins}
+    ${CAPTURE_SEARCH_WHERE}
+    ORDER BY c.captured_at DESC, c.id DESC
+    LIMIT @limit OFFSET @offset
+  `).all(parameters) as CaptureListDbRow[];
+  const count = db.prepare(`
+    ${LATEST_CAPTURES_CTE}
+    SELECT COUNT(*) AS total
+    ${joins}
+    ${CAPTURE_SEARCH_WHERE}
+  `).get(parameters) as { total: number };
+
+  return {
+    items: rows.map((row) => ({
+      kind: row.kind,
+      subjectId: row.subjectId,
+      capturedAt: row.capturedAt,
+      bookmarkedAt: row.bookmarkedAt,
+      origin: row.origin,
+      pdfPath: row.pdfPath,
+      sourceUrl: row.sourceUrl,
+      username: row.username,
+      fullname: row.fullname,
+      avatarFile: row.avatarFile,
+      publishedAt: row.publishedAt,
+      textPreview: row.textPreview,
+      mediaCount: row.mediaCount,
+      repliesCaptured: row.repliesCaptured,
+      stats: {
+        replies: row.replies,
+        retweets: row.retweets,
+        likes: row.likes,
+        views: row.views,
+      },
+    })),
+    total: count.total,
+  };
+}
+
+export function getTweetMedia(
+  db: TwitterDatabase,
+  tweetId: string,
+): Array<Record<string, unknown>> {
+  return db.prepare(
+    'SELECT * FROM tweet_media WHERE tweet_id = ? ORDER BY position',
+  ).all(tweetId) as Array<Record<string, unknown>>;
+}
+
+export function getTweetCard(
+  db: TwitterDatabase,
+  tweetId: string,
+): Record<string, unknown> | undefined {
+  return db.prepare('SELECT * FROM tweet_cards WHERE tweet_id = ?').get(tweetId) as
+    | Record<string, unknown>
+    | undefined;
+}
+
+export function getTweetPoll(
+  db: TwitterDatabase,
+  tweetId: string,
+): Array<Record<string, unknown>> {
+  return db.prepare(
+    'SELECT * FROM tweet_polls WHERE tweet_id = ? ORDER BY option_index',
+  ).all(tweetId) as Array<Record<string, unknown>>;
+}
+
+export function getTweetReplies(
+  db: TwitterDatabase,
+  tweetId: string,
+): Array<Record<string, unknown>> {
+  return db.prepare(`
+    SELECT *
+    FROM tweets
+    WHERE reply_to_id = ?
+    ORDER BY published_at IS NULL, published_at, first_seen_at, id
+  `).all(tweetId) as Array<Record<string, unknown>>;
+}
+
+export function getArticleMedia(
+  db: TwitterDatabase,
+  articleId: string,
+): Array<Record<string, unknown>> {
+  return db.prepare(
+    'SELECT * FROM article_media WHERE article_id = ? ORDER BY position',
+  ).all(articleId) as Array<Record<string, unknown>>;
+}
+
+export function getCapturesForSubjectKind(
+  db: TwitterDatabase,
+  kind: 'tweet' | 'article',
+  subjectId: string,
+): Array<Record<string, unknown>> {
+  return db.prepare(`
+    SELECT *
+    FROM captures
+    WHERE kind = ? AND subject_id = ?
+    ORDER BY captured_at DESC, id DESC
+  `).all(kind, subjectId) as Array<Record<string, unknown>>;
+}
+
+export function hasCaptureForSubject(
+  db: TwitterDatabase,
+  kind: 'tweet' | 'article',
+  subjectId: string,
+): boolean {
+  return Boolean(db.prepare(
+    'SELECT 1 FROM captures WHERE kind = ? AND subject_id = ? LIMIT 1',
+  ).get(kind, subjectId));
+}

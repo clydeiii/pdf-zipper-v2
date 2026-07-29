@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Twitter/X Database</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/style.css">
+  <style>
+    .twitter-container { max-width: 1050px; }
+    .twitter-header { padding-bottom: 22px; }
+    .twitter-header-row { display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap; }
+    .twitter-header-row h1 { margin: 0; }
+    .twitter-header .header-nav { margin: 0; }
+    .twitter-search { max-width: 520px; margin: 18px auto 6px; }
+    .twitter-search input { width: 100%; padding: 11px 14px; border: 1px solid #ced4da; border-radius: 6px; font-size: 1rem; }
+    .twitter-stats { min-height: 1.5em; color: #6c757d; font-size: .92rem; }
+    .capture-list { display: grid; gap: 12px; }
+    .capture-row { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 12px; padding: 16px; cursor: default; }
+    .capture-row:hover { transform: none; }
+    .avatar { width: 48px; height: 48px; border-radius: 50%; object-fit: cover; background: #dce3ea; }
+    .avatar-slot { display: block; width: 48px; height: 48px; }
+    .avatar-placeholder { display: flex; align-items: center; justify-content: center; color: #5b6570; font-weight: 700; }
+    .capture-main { min-width: 0; }
+    .capture-head, .tweet-head { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
+    .capture-name, .tweet-name { font-weight: 700; color: #212529; }
+    .capture-username, .tweet-username, .capture-date, .tweet-date { color: #6c757d; font-size: .9rem; }
+    .capture-text { margin: 6px 0; color: #343a40; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .capture-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    .badge { display: inline-block; padding: 2px 7px; border-radius: 999px; background: #e9ecef; color: #495057; font-size: .76rem; }
+    .badge-article { background: #dcecff; color: #0758a8; }
+    .capture-counts { color: #6c757d; font-size: .84rem; display: flex; gap: 10px; flex-wrap: wrap; }
+    .capture-actions { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+    .capture-actions .btn, .detail-toolbar .btn { padding: 6px 11px; font-size: .82rem; text-decoration: none; }
+    .list-footer { padding: 20px 0; text-align: center; }
+    .empty-state { padding: 45px 20px; text-align: center; color: #6c757d; }
+    .detail-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 16px; }
+    .thread-stack { display: grid; gap: 10px; }
+    .tweet-card { position: relative; padding: 16px; border: 1px solid #dee2e6; border-radius: 8px; background: #fff; overflow: hidden; }
+    .tweet-card.subject { border: 2px solid #1d9bf0; box-shadow: 0 3px 14px rgba(29,155,240,.12); }
+    .tweet-card.ancestor { opacity: .72; background: #f8f9fa; }
+    .tweet-card.ancestor::after { content: ""; position: absolute; left: 39px; top: 64px; bottom: -13px; width: 2px; background: #ced4da; }
+    .tweet-layout { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 12px; }
+    .tweet-content { margin: 8px 0; overflow-wrap: anywhere; }
+    .tweet-content p { margin: 0 0 .55em; }
+    .tweet-content a { color: #087cc1; }
+    .verified { color: #1d9bf0; font-size: .9rem; }
+    .media-gallery { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; margin-top: 10px; }
+    .media-gallery.single { grid-template-columns: 1fr; }
+    .media-gallery img, .media-gallery video { display: block; width: 100%; max-height: 520px; object-fit: contain; border-radius: 7px; background: #111; }
+    .video-fallback { position: relative; min-height: 120px; border-radius: 7px; overflow: hidden; background: #15191d; }
+    .video-fallback img { opacity: .7; }
+    .video-fallback a { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: white; font-size: 1rem; text-decoration: none; text-shadow: 0 1px 4px #000; }
+    .link-card, .quoted-box { margin-top: 10px; border: 1px solid #ced4da; border-radius: 8px; overflow: hidden; }
+    .link-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; color: inherit; text-decoration: none; }
+    .link-card-copy { padding: 12px; }
+    .link-card-title { font-weight: 700; }
+    .link-card-description { color: #6c757d; font-size: .9rem; }
+    .link-card img { width: 130px; height: 100%; max-height: 120px; object-fit: cover; }
+    .quoted-box { padding: 12px; background: #fbfcfd; }
+    .quoted-box .avatar { width: 34px; height: 34px; }
+    .quoted-box .avatar-slot { width: 34px; height: 34px; }
+    .quoted-box .tweet-layout { grid-template-columns: 34px minmax(0, 1fr); gap: 9px; }
+    .poll { margin-top: 10px; display: grid; gap: 7px; }
+    .poll-option { position: relative; overflow: hidden; border-radius: 5px; background: #e9ecef; padding: 5px 8px; font-size: .86rem; }
+    .poll-fill { position: absolute; inset: 0 auto 0 0; background: #b8dcf5; }
+    .poll-label { position: relative; display: flex; justify-content: space-between; gap: 8px; }
+    .tweet-stats { display: flex; gap: 16px; flex-wrap: wrap; color: #6c757d; font-size: .88rem; margin-top: 8px; }
+    .capture-provenance { border-top: 1px solid #e9ecef; margin-top: 11px; padding-top: 8px; color: #6c757d; font-size: .78rem; }
+    .capture-provenance a { color: #087cc1; }
+    .replies-heading { margin: 26px 0 10px; }
+    .reply-chain { margin-left: 26px; padding-left: 14px; border-left: 2px solid #dee2e6; }
+    .reply-chain.nested { margin-top: 8px; margin-left: 34px; }
+    .article-card { padding: 22px; border: 1px solid #dee2e6; border-radius: 8px; }
+    .article-card h2 { line-height: 1.25; margin-bottom: 6px; }
+    .article-cover { display: block; max-width: 100%; max-height: 520px; margin: 18px auto; border-radius: 8px; object-fit: contain; }
+    .article-body { margin-top: 20px; overflow-wrap: anywhere; }
+    .article-body img { max-width: 100%; height: auto; }
+    @media (prefers-color-scheme: dark) {
+      body { color: #e6edf3; background: #0d1117; }
+      .container { background: #161b22; }
+      .twitter-search input { color: #e6edf3; background: #0d1117; border-color: #30363d; }
+      .capture-row, .tweet-card, .article-card { color: #e6edf3; background: #161b22; border-color: #30363d; }
+      .capture-row:hover, .tweet-card.ancestor, .quoted-box { background: #1c2128; }
+      .capture-name, .tweet-name, .capture-text { color: #e6edf3; }
+      .badge { color: #c9d1d9; background: #30363d; }
+      .badge-article { color: #79c0ff; background: #153c5a; }
+      .link-card, .quoted-box { border-color: #30363d; }
+      .poll-option { background: #30363d; }
+      .poll-fill { background: #174c70; }
+    }
+    @media (max-width: 620px) {
+      .twitter-header-row { flex-direction: column; }
+      .capture-row { grid-template-columns: 40px minmax(0, 1fr); padding: 12px; }
+      .capture-row > .avatar-slot, .capture-row > .avatar, .capture-row > .avatar-placeholder { width: 40px; height: 40px; }
+      .capture-row > .avatar-slot .avatar { width: 40px; height: 40px; }
+      .capture-actions { width: 100%; margin-left: 0; }
+      .tweet-layout { grid-template-columns: 38px minmax(0, 1fr); gap: 9px; }
+      .tweet-layout > .avatar-slot, .tweet-layout > .avatar, .tweet-layout > .avatar-placeholder { width: 38px; height: 38px; }
+      .tweet-layout > .avatar-slot .avatar { width: 38px; height: 38px; }
+      .quoted-box .tweet-layout > .avatar-slot, .quoted-box .tweet-layout > .avatar-slot .avatar { width: 34px; height: 34px; }
+      .media-gallery { grid-template-columns: 1fr; }
+      .reply-chain, .reply-chain.nested { margin-left: 10px; padding-left: 8px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container twitter-container">
+    <header class="twitter-header">
+      <div class="twitter-header-row">
+        <h1>Twitter/X Database</h1>
+        <nav class="header-nav">
+          <a href="/" class="btn btn-secondary">&larr; PDF Zipper</a>
+        </nav>
+      </div>
+      <div class="twitter-search">
+        <input id="twitter-search" type="search" placeholder="Search people and posts…" autocomplete="off">
+      </div>
+      <p id="twitter-stats" class="twitter-stats">Loading database stats…</p>
+    </header>
+
+    <main>
+      <section id="list-view" class="view">
+        <div id="capture-list" class="capture-list">
+          <p class="loading">Loading captures…</p>
+        </div>
+        <div class="list-footer">
+          <button id="load-more" class="btn btn-secondary hidden">Load More</button>
+        </div>
+      </section>
+
+      <section id="thread-view" class="view hidden">
+        <div class="detail-toolbar">
+          <button class="btn btn-secondary back-to-list">&larr; Back to list</button>
+          <a id="detail-source" class="btn btn-secondary" target="_blank" rel="noopener">Source</a>
+        </div>
+        <div id="thread-content"></div>
+      </section>
+
+      <section id="article-view" class="view hidden">
+        <div class="detail-toolbar">
+          <button class="btn btn-secondary back-to-list">&larr; Back to list</button>
+          <a id="article-source" class="btn btn-secondary" target="_blank" rel="noopener">Source</a>
+        </div>
+        <div id="article-content"></div>
+      </section>
+    </main>
+  </div>
+  <script src="/twitter.js"></script>
+</body>
+</html>
