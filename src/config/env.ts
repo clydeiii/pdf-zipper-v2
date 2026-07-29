@@ -63,6 +63,12 @@ interface EnvConfig {
   WHISPER_HOST_FALLBACK?: string;
   /** Nitter server URL for Twitter/X conversion (default: http://localhost:8080) */
   NITTER_HOST: string;
+  /** Persist structured Twitter/X captures alongside PDFs (default: true) */
+  TWITTER_DB_ENABLED: boolean;
+  /** Maximum number of Nitter reply cursor pages after the subject page (default: 3) */
+  TWITTER_DB_REPLY_PAGES: number;
+  /** Delay between Nitter thread page requests in milliseconds (default: 500) */
+  TWITTER_DB_FETCH_DELAY_MS: number;
   /** Ollama model for transcript formatting - use larger model for better results (default: same as OLLAMA_MODEL) */
   TRANSCRIPT_FORMAT_MODEL: string;
   /** Comma-separated list of terms to filter from PDF captures for privacy (optional) */
@@ -195,6 +201,9 @@ export const env: EnvConfig = {
   WHISPER_HOST_FALLBACK: process.env.WHISPER_HOST_FALLBACK,
   // Nitter server for Twitter/X conversion
   NITTER_HOST: process.env.NITTER_HOST || 'http://localhost:8080',
+  TWITTER_DB_ENABLED: process.env.TWITTER_DB_ENABLED !== 'false',
+  TWITTER_DB_REPLY_PAGES: parseIntegerEnv('TWITTER_DB_REPLY_PAGES', 3, { min: 0, max: 100 }),
+  TWITTER_DB_FETCH_DELAY_MS: parseIntegerEnv('TWITTER_DB_FETCH_DELAY_MS', 500, { min: 0 }),
   // Ollama model for transcript formatting (larger = better quality, slower)
   TRANSCRIPT_FORMAT_MODEL: process.env.TRANSCRIPT_FORMAT_MODEL || process.env.OLLAMA_MODEL || 'gemma4:latest',
   // Privacy filter terms (comma-separated list of names/handles to hide from captures)

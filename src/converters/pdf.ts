@@ -1191,6 +1191,39 @@ export async function convertUrlToPDF(
             reason: 'rate_limited',
           };
         }
+        // X Articles are rendered directly because the Nitter tweet page only
+        // contains a stub link. Lift the article body before privacy/print DOM
+        // mutations so the structured Twitter database has an x.com fallback
+        // when Nitter's article renderer is unavailable. Best-effort: PDF
+        // capture remains authoritative and must not fail on selector drift.
+        let articleContent: {
+          title?: string;
+          bodyHtml?: string;
+          bodyText?: string;
+          authorUsername?: string;
+        } | undefined;
+        if (isArticleStub) {
+          try {
+            articleContent = await directPage.evaluate(() => {
+              const article = document.querySelector(
+                '[data-testid="twitterArticleRichTextView"], [data-testid="articleRichTextView"], [data-testid="ArticleBody"], article',
+              ) as HTMLElement | null;
+              const title = document.querySelector('h1')?.textContent?.trim()
+                || document.querySelector('meta[property="og:title"]')?.getAttribute('content')?.trim()
+                || undefined;
+              const authorHref = document.querySelector(
+                '[data-testid="User-Name"] a[href^="/"], article a[href^="/"]',
+              )?.getAttribute('href');
+              const authorUsername = authorHref?.match(/^\/([A-Za-z0-9_]+)/)?.[1];
+              const bodyHtml = article?.innerHTML.trim() || undefined;
+              const bodyText = article?.innerText.trim() || undefined;
+              if (!title && !bodyHtml && !bodyText) return undefined;
+              return { title, bodyHtml, bodyText, authorUsername };
+            });
+          } catch {
+            // Structured extraction is non-fatal; the worker logs harvest misses.
+          }
+        }
         // Apply privacy filtering for direct X.com capture too
         await applyPrivacyFilter(directPage);
         // Continue with directPage for PDF generation
@@ -1257,6 +1290,7 @@ export async function convertUrlToPDF(
           // text backs up the article classification.
           isXArticle: isArticleStub && directText.trim().length >= 2000,
           expandedUrl: expandedUrl !== url ? expandedUrl : undefined,
+          articleContent,
         };
       }
     }

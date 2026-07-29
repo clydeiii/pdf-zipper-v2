@@ -41,6 +41,13 @@ export interface PDFSuccessResult {
     inReplyTo?: string;   // canonical x.com URL of the reply parent
     tweetDate?: string;   // exact publish time (ISO 8601) from Nitter's DOM
   };
+  /** Best-effort structured body lifted before print mutations during direct X Article fallback. */
+  articleContent?: {
+    title?: string;
+    bodyHtml?: string;
+    bodyText?: string;
+    authorUsername?: string;
+  };
 }
 
 /**

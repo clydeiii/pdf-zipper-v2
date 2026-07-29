@@ -10,7 +10,7 @@
 import { Worker, Job } from 'bullmq';
 import { writeFile, mkdir, unlink } from 'node:fs/promises';
 import * as path from 'node:path';
-import { savePdfToWeeklyBin } from '../utils/save-pdf.js';
+import { isTwitterUrl, savePdfToWeeklyBin } from '../utils/save-pdf.js';
 import { workerConnection } from '../config/redis.js';
 import { QUEUE_NAME, conversionQueue } from '../queues/conversion.queue.js';
 import { env } from '../config/env.js';
@@ -31,6 +31,8 @@ import { addJobToWeekIndex } from '../jobs/week-index.js';
 import { enrichDocumentMetadata, type EnrichedMetadata } from '../metadata/enrichment.js';
 import { captureViaArchive } from '../converters/archive-fallback.js';
 import { isChatGptShareUrl, captureChatGptShare } from '../converters/chatgpt-share.js';
+import { harvestArticleToDb, harvestTweetToDb } from '../twitter/harvest.js';
+import type { ArticleFallbackContent } from '../twitter/types.js';
 
 /** Reference to the worker instance. Created explicitly by startWorker(). */
 let conversionWorker: Worker<ConversionJobData, ConversionJobResult> | null = null;
@@ -80,6 +82,51 @@ async function deleteOldFileIfDifferent(oldFilePath: string, newFilePath: string
     } else {
       console.error(`Failed to delete old PDF ${oldNorm}:`, error);
     }
+  }
+}
+
+async function harvestStructuredTwitterCapture(options: {
+  sourceUrl: string;
+  bookmarkedAt?: string;
+  pdfPath: string;
+  isXArticle: boolean;
+  articleContent?: ArticleFallbackContent;
+}): Promise<void> {
+  if (!env.TWITTER_DB_ENABLED || !isTwitterUrl(options.sourceUrl)) return;
+  const dataRoot = path.resolve(env.DATA_DIR);
+  const absolutePdf = path.resolve(options.pdfPath);
+  const relative = path.relative(dataRoot, absolutePdf);
+  const pdfPath = relative && !relative.startsWith('..') ? relative : options.pdfPath;
+  try {
+    const summary = options.isXArticle
+      ? await harvestArticleToDb({
+          url: options.sourceUrl,
+          bookmarkedAt: options.bookmarkedAt,
+          pdfPath,
+          origin: 'worker',
+          fallbackContent: options.articleContent,
+        })
+      : await harvestTweetToDb({
+          url: options.sourceUrl,
+          bookmarkedAt: options.bookmarkedAt,
+          pdfPath,
+          origin: 'worker',
+        });
+    console.log(JSON.stringify({
+      event: 'twitter_db_harvest',
+      kind: options.isXArticle ? 'article' : 'tweet',
+      sourceUrl: options.sourceUrl,
+      ...summary,
+      timestamp: new Date().toISOString(),
+    }));
+  } catch (error) {
+    console.error(JSON.stringify({
+      event: 'twitter_db_error',
+      kind: options.isXArticle ? 'article' : 'tweet',
+      sourceUrl: options.sourceUrl,
+      error: error instanceof Error ? error.message : String(error),
+      timestamp: new Date().toISOString(),
+    }));
   }
 }
 
@@ -440,6 +487,14 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
     extraInfoDictFields: Object.keys(tweetExtras).length > 0 ? tweetExtras : undefined,
   });
   console.log(`PDF saved to: ${pdfPath}`);
+
+  await harvestStructuredTwitterCapture({
+    sourceUrl: originalUrl || url,
+    bookmarkedAt,
+    pdfPath,
+    isXArticle: isXArticle === true,
+    articleContent: result.articleContent,
+  });
 
   if (oldFilePath) await deleteOldFileIfDifferent(oldFilePath, pdfPath);
 

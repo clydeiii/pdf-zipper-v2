@@ -60,6 +60,9 @@ services:
 
       # Nitter for Twitter URLs (container name on proxy-network)
       - NITTER_HOST=http://nitter:8080
+      - TWITTER_DB_ENABLED=${TWITTER_DB_ENABLED:-true}
+      - TWITTER_DB_REPLY_PAGES=${TWITTER_DB_REPLY_PAGES:-3}
+      - TWITTER_DB_FETCH_DELAY_MS=${TWITTER_DB_FETCH_DELAY_MS:-500}
 
       # Quality threshold (0-100)
       - QUALITY_THRESHOLD=50

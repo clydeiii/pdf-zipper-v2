@@ -51,6 +51,7 @@ import { startKarakeepCleaner, stopKarakeepCleaner } from './maintenance/karakee
 // Import nightly captures zipper (bundles the last 24h of captures into captures-latest.zip)
 import { startCapturesZipper, stopCapturesZipper } from './maintenance/captures-zipper.js';
 import { startCaptureAuditor, stopCaptureAuditor } from './maintenance/capture-auditor.js';
+import { closeTwitterDb } from './twitter/db.js';
 import type { Server } from 'node:http';
 
 console.log(`Environment: ${env.NODE_ENV}`);
@@ -133,6 +134,9 @@ async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
     await stopFeedPollWorker();
     await stopMetadataWorker();
     console.log('Feed workers closed');
+
+    closeTwitterDb();
+    console.log('Twitter database closed');
 
     await closeQueuesAndRedis();
   } catch (error) {

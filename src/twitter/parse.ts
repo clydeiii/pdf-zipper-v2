@@ -1,0 +1,479 @@
+import { load, type Cheerio, type CheerioAPI } from 'cheerio';
+import type { AnyNode } from 'domhandler';
+import type {
+  ParsedArticle,
+  ParsedArticleMedia,
+  ParsedCard,
+  ParsedMedia,
+  ParsedPollOption,
+  ParsedThreadPage,
+  ParsedTweet,
+  ParsedUser,
+} from './types.js';
+
+const STATUS_PATH_RE = /^\/([A-Za-z0-9_]+)\/status\/(\d+)/;
+const ARTICLE_PATH_RE = /\/(?:i\/article|[A-Za-z0-9_]+\/article)\/(\d+)/;
+const NITTER_ERROR_RE = /tweet not found|user not found|instance has been rate limited|page not found/i;
+
+function nonEmpty(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+function decodeUrl(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function statusParts(href: string | undefined): { username: string; id: string } | null {
+  if (!href) return null;
+  let pathname = href;
+  try {
+    pathname = new URL(href, 'https://x.com').pathname;
+  } catch {
+    // The regex below will reject malformed paths.
+  }
+  const match = pathname.match(STATUS_PATH_RE);
+  return match ? { username: match[1], id: match[2] } : null;
+}
+
+function canonicalTwitterHref(href: string): string {
+  if (/^https?:\/\//i.test(href)) return href;
+  if (/^\/[A-Za-z0-9_]+(?:\/status\/\d+)?(?:[#?].*)?$/.test(href)) {
+    return `https://x.com${href}`;
+  }
+  return href;
+}
+
+function canonicalizeHtml($content: Cheerio<AnyNode>): string | null {
+  if (!$content.length) return null;
+  const clone = $content.clone();
+  clone.find('a[href]').each((index) => {
+    const link = clone.find('a[href]').eq(index);
+    const href = link.attr('href');
+    if (href) link.attr('href', canonicalTwitterHref(href));
+  });
+  clone.find('img, video, source, picture').remove();
+  return nonEmpty(clone.html());
+}
+
+function parseDate(title: string | undefined): string | null {
+  if (!title) return null;
+  const parsed = new Date(title.replace('·', ''));
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
+export function parseStatCount(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const digits = value.replace(/,/g, '').match(/\d+/)?.[0];
+  if (!digits) return null;
+  const parsed = Number.parseInt(digits, 10);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function statFor($item: Cheerio<AnyNode>, iconClass: string): number | null {
+  const icon = $item.find(`.tweet-stats .${iconClass}`).first();
+  if (!icon.length) return null;
+  return parseStatCount(icon.parent().text());
+}
+
+function canonicalPbsUrl(nitterPath: string | undefined): string | null {
+  if (!nitterPath) return null;
+  if (/^https?:\/\/pbs\.twimg\.com\//i.test(nitterPath)) return nitterPath;
+  const decoded = decodeUrl(nitterPath);
+  const picIndex = decoded.indexOf('/pic/');
+  const mediaPath = picIndex >= 0 ? decoded.slice(picIndex + 5) : decoded.replace(/^\/+/, '');
+  const normalized = mediaPath.replace(/^orig\//, '');
+  return normalized ? `https://pbs.twimg.com/${normalized}` : null;
+}
+
+function verifiedType($scope: Cheerio<AnyNode>): string | null {
+  const badge = $scope.find('.verified-icon').first();
+  if (!badge.length) return null;
+  const type = (badge.attr('class') ?? '')
+    .split(/\s+/)
+    .find((className) => className !== 'verified-icon');
+  return type ?? 'verified';
+}
+
+function parseUser($scope: Cheerio<AnyNode>, fallbackUsername?: string): ParsedUser {
+  const username = nonEmpty($scope.find('.username').first().text())?.replace(/^@/, '')
+    ?? fallbackUsername
+    ?? '';
+  const avatarFetchUrl = nonEmpty(
+    $scope.find('.tweet-avatar img.avatar, img.avatar').first().attr('src'),
+  );
+  return {
+    username,
+    fullname: nonEmpty(
+      $scope.find('.fullname').first().attr('title') ?? $scope.find('.fullname').first().text(),
+    ),
+    verified: verifiedType($scope),
+    avatarUrl: canonicalPbsUrl(avatarFetchUrl ?? undefined),
+    avatarFetchUrl,
+  };
+}
+
+function directOutsideQuote(selection: Cheerio<AnyNode>): AnyNode[] {
+  return selection.toArray().filter((_element, index) => selection.eq(index).parents('.quote').length === 0);
+}
+
+function decodeVideoUrl(href: string | undefined): string | null {
+  if (!href) return null;
+  const marker = href.match(/^\/video\/[^/]+\/(.+)$/)?.[1];
+  if (!marker) return /^https?:\/\/video\.twimg\.com\//i.test(href) ? href : null;
+  const decoded = decodeUrl(marker);
+  return /^https?:\/\/video\.twimg\.com\//i.test(decoded) ? decoded : null;
+}
+
+function decodeGifSource(source: string | undefined): string | null {
+  if (!source) return null;
+  const decoded = decodeUrl(source);
+  if (/^https?:\/\/video\.twimg\.com\//i.test(decoded)) return decoded;
+  if (decoded.startsWith('/pic/')) {
+    return `https://video.twimg.com/${decoded.slice('/pic/'.length).replace(/^orig\//, '')}`;
+  }
+  return null;
+}
+
+function parseMedia(
+  $: CheerioAPI,
+  $scope: Cheerio<AnyNode>,
+  excludeNestedQuotes = true,
+): ParsedMedia[] {
+  const media: ParsedMedia[] = [];
+  const stillSelection = $scope.find('.attachments a.still-image[href]');
+  const stills = excludeNestedQuotes ? directOutsideQuote(stillSelection) : stillSelection.toArray();
+  for (const element of stills) {
+    const fetchUrl = nonEmpty($(element).attr('href'));
+    const origUrl = canonicalPbsUrl(fetchUrl ?? undefined);
+    if (!fetchUrl || !origUrl) continue;
+    media.push({
+      position: media.length,
+      kind: 'photo',
+      origUrl,
+      fetchUrl,
+      posterUrl: null,
+      posterFetchUrl: null,
+      videoUrl: null,
+    });
+  }
+
+  const videoSelection = $scope.find('.attachments .attachment').filter((_index, element) =>
+    $(element).find('a.video-download[href], video.gif, video source[src]').length > 0,
+  );
+  const videos = excludeNestedQuotes ? directOutsideQuote(videoSelection) : videoSelection.toArray();
+  for (const element of videos) {
+    const attachment = $(element);
+    const download = attachment.find('a.video-download[href]').first().attr('href');
+    const source = attachment.find('video source[src], video.gif[src]').first().attr('src');
+    const videoUrl = decodeVideoUrl(download) ?? decodeGifSource(source);
+    const posterFetchUrl = nonEmpty(
+      attachment.find('video[poster]').first().attr('poster') ?? attachment.find('img[src]').first().attr('src'),
+    );
+    const isGif = attachment.find('video.gif').length > 0;
+    media.push({
+      position: media.length,
+      kind: isGif ? 'gif' : 'video',
+      origUrl: videoUrl ?? canonicalPbsUrl(posterFetchUrl ?? undefined) ?? '',
+      fetchUrl: null,
+      posterUrl: canonicalPbsUrl(posterFetchUrl ?? undefined),
+      posterFetchUrl,
+      videoUrl,
+    });
+  }
+  return media;
+}
+
+function parseCard($scope: Cheerio<AnyNode>): ParsedCard | null {
+  const card = $scope.find('.card:has(.card-title), .card:has(.card-description), .card:has(.card-container)').first();
+  if (!card.length) return null;
+  const imageFetchUrl = nonEmpty(card.find('img[src]').first().attr('src'));
+  return {
+    url: nonEmpty(card.find('a.card-container[href], a[href]').first().attr('href')),
+    title: nonEmpty(card.find('.card-title').first().text()),
+    description: nonEmpty(card.find('.card-description').first().text()),
+    imageUrl: canonicalPbsUrl(imageFetchUrl ?? undefined),
+    imageFetchUrl,
+  };
+}
+
+function parsePoll($scope: Cheerio<AnyNode>): ParsedPollOption[] {
+  const options: ParsedPollOption[] = [];
+  const choices = $scope.find('.poll .poll-choice');
+  choices.each((index) => {
+    const choice = choices.eq(index);
+    const percentText = choice.find('.poll-choice-value, .poll-choice-percent').first().text()
+      || choice.attr('style')
+      || '';
+    const percent = percentText.match(/(\d+(?:\.\d+)?)\s*%/);
+    const labelNode = choice.find('.poll-choice-label, span').first();
+    const label = nonEmpty(labelNode.text()) ?? nonEmpty(choice.clone().children().remove().end().text());
+    if (label) {
+      options.push({
+        optionIndex: index,
+        label,
+        valuePercent: percent ? Number.parseFloat(percent[1]) : null,
+      });
+    }
+  });
+  return options;
+}
+
+function parseRetweetedBy($item: Cheerio<AnyNode>): string | null {
+  const header = $item.find('.retweet-header').first();
+  if (!header.length) return null;
+  const href = header.find('a[href]').first().attr('href');
+  const username = href?.match(/^\/([A-Za-z0-9_]+)/)?.[1];
+  if (username) return username;
+  return nonEmpty(header.text().replace(/\bretweeted\b(?:\s+by)?/i, ''));
+}
+
+interface TweetElementOptions {
+  fallbackId?: string;
+  replyToId?: string | null;
+  isStub?: boolean;
+}
+
+function parseTweetElement(
+  $: CheerioAPI,
+  element: AnyNode,
+  options: TweetElementOptions = {},
+): ParsedTweet | null {
+  const item = $(element);
+  if (item.hasClass('unavailable')) return null;
+  const linkParts = statusParts(
+    item.children('a.tweet-link').first().attr('href')
+      ?? item.find('.tweet-date a[href*="/status/"]').first().attr('href'),
+  );
+  const id = linkParts?.id ?? options.fallbackId;
+  const username = item.attr('data-username') ?? linkParts?.username;
+  if (!id || !username) return null;
+
+  const user = parseUser(item, username);
+  user.username = username;
+  const content = item.find('.tweet-content').first();
+  const replyingTo = item.find('.replying-to').first().find('a').toArray()
+    .map((anchor) => nonEmpty($(anchor).text())?.replace(/^@/, ''))
+    .filter((value): value is string => Boolean(value));
+  const quoteParts = statusParts(item.find('.quote a.quote-link[href]').first().attr('href'));
+  const dateTitle = item.find('.tweet-date a[title]').first().attr('title');
+
+  return {
+    id,
+    username,
+    user,
+    contentHtml: canonicalizeHtml(content),
+    contentText: nonEmpty(content.text()),
+    publishedAt: parseDate(dateTitle),
+    replyToId: options.replyToId ?? null,
+    replyToUsers: replyingTo,
+    quotedId: quoteParts?.id ?? null,
+    retweetedBy: parseRetweetedBy(item),
+    repliesCount: statFor(item, 'icon-comment'),
+    retweetsCount: statFor(item, 'icon-retweet'),
+    likesCount: statFor(item, 'icon-heart'),
+    viewsCount: statFor(item, 'icon-views'),
+    sourceUrl: `https://x.com/${username}/status/${id}`,
+    isStub: options.isStub ?? false,
+    media: parseMedia($, item),
+    card: parseCard(item),
+    poll: parsePoll(item),
+  };
+}
+
+function parseQuote($: CheerioAPI, quoteElement: AnyNode): ParsedTweet | null {
+  const quote = $(quoteElement);
+  const parts = statusParts(quote.find('a.quote-link[href]').first().attr('href'));
+  if (!parts) return null;
+  const user = parseUser(quote, parts.username);
+  user.username = parts.username;
+  const text = quote.find('.quote-text').first();
+  const media = parseMedia($, quote, false);
+
+  // Nitter uses a dedicated quote-media-container in some renderer variants.
+  quote.find('.quote-media-container a.still-image[href]').each((_index, element) => {
+    const fetchUrl = nonEmpty($(element).attr('href'));
+    const origUrl = canonicalPbsUrl(fetchUrl ?? undefined);
+    if (!fetchUrl || !origUrl) return;
+    media.push({
+      position: media.length,
+      kind: 'photo',
+      origUrl,
+      fetchUrl,
+      posterUrl: null,
+      posterFetchUrl: null,
+      videoUrl: null,
+    });
+  });
+
+  return {
+    id: parts.id,
+    username: parts.username,
+    user,
+    contentHtml: canonicalizeHtml(text),
+    contentText: nonEmpty(text.text()),
+    publishedAt: parseDate(quote.find('.tweet-date a[title]').first().attr('title')),
+    replyToId: null,
+    replyToUsers: quote.find('.replying-to a').toArray()
+      .map((anchor) => nonEmpty($(anchor).text())?.replace(/^@/, ''))
+      .filter((value): value is string => Boolean(value)),
+    quotedId: null,
+    retweetedBy: null,
+    repliesCount: null,
+    retweetsCount: null,
+    likesCount: null,
+    viewsCount: null,
+    sourceUrl: `https://x.com/${parts.username}/status/${parts.id}`,
+    isStub: true,
+    media,
+    card: null,
+    poll: [],
+  };
+}
+
+function uniqueTweets(tweets: ParsedTweet[]): ParsedTweet[] {
+  const byId = new Map<string, ParsedTweet>();
+  for (const tweet of tweets) {
+    const previous = byId.get(tweet.id);
+    if (!previous || (previous.isStub && !tweet.isStub)) byId.set(tweet.id, tweet);
+  }
+  return [...byId.values()];
+}
+
+export function isNitterErrorPage(html: string): boolean {
+  const $ = load(html);
+  if ($('.main-thread .main-tweet .timeline-item[data-username], .article-title, .article-body').length > 0) {
+    return false;
+  }
+  return NITTER_ERROR_RE.test($('body').text());
+}
+
+export function parseThreadPage(html: string, sourceUrl: string): ParsedThreadPage {
+  const $ = load(html);
+  const sourceParts = statusParts(new URL(sourceUrl).pathname);
+  const ancestorElements = $('.main-thread .before-tweet .timeline-item[data-username]').toArray();
+  const ancestors: ParsedTweet[] = [];
+  let ancestorParent: string | null = null;
+  for (const element of ancestorElements) {
+    const tweet = parseTweetElement($, element, { replyToId: ancestorParent });
+    if (!tweet) continue;
+    ancestors.push(tweet);
+    ancestorParent = tweet.id;
+  }
+
+  const mainElement = $('.main-thread .main-tweet .timeline-item[data-username]').first();
+  const mainTweet = mainElement.length
+    ? parseTweetElement($, mainElement.get(0)!, {
+        fallbackId: sourceParts?.id,
+        replyToId: ancestors.at(-1)?.id ?? null,
+      })
+    : null;
+
+  const continuation: ParsedTweet[] = [];
+  let continuationParent = mainTweet?.id ?? null;
+  $('.main-thread .after-tweet .timeline-item[data-username]').each((_index, element) => {
+    const tweet = parseTweetElement($, element, { replyToId: continuationParent });
+    if (!tweet) return;
+    continuation.push(tweet);
+    continuationParent = tweet.id;
+  });
+
+  const replies: ParsedTweet[] = [];
+  $('#r.replies > .reply').each((_replyIndex, replyElement) => {
+    let parentId = mainTweet?.id ?? null;
+    $(replyElement).find('.timeline-item[data-username]').each((_index, element) => {
+      const tweet = parseTweetElement($, element, { replyToId: parentId });
+      if (!tweet) return;
+      replies.push(tweet);
+      parentId = tweet.id;
+    });
+  });
+
+  const quoteScopes = [
+    ...(mainElement.length ? mainElement.find('.quote').toArray() : []),
+    ...ancestorElements.flatMap((element) => $(element).find('.quote').toArray()),
+    ...$('.main-thread .after-tweet .timeline-item .quote').toArray(),
+    ...$('#r.replies > .reply .timeline-item .quote').toArray(),
+  ];
+  const quotedTweets = uniqueTweets(
+    quoteScopes.map((element) => parseQuote($, element)).filter((tweet): tweet is ParsedTweet => Boolean(tweet)),
+  );
+
+  const cursorHref = nonEmpty($('#r.replies .show-more a[href], .show-more a[href*="cursor="]').last().attr('href'));
+  const nextCursor = cursorHref ? cursorHref.replace(/#.*$/, '') : null;
+
+  return {
+    mainTweet,
+    ancestors: uniqueTweets(ancestors),
+    continuation: uniqueTweets(continuation),
+    replies: uniqueTweets(replies),
+    quotedTweets,
+    nextCursor,
+  };
+}
+
+function articleIdFromUrl(sourceUrl: string): string | null {
+  try {
+    return new URL(sourceUrl).pathname.match(ARTICLE_PATH_RE)?.[1] ?? null;
+  } catch {
+    return sourceUrl.match(ARTICLE_PATH_RE)?.[1] ?? null;
+  }
+}
+
+function articleImage(
+  fetchUrl: string | null,
+  position: number,
+): ParsedArticleMedia | null {
+  if (!fetchUrl) return null;
+  return {
+    position,
+    origUrl: canonicalPbsUrl(fetchUrl) ?? fetchUrl,
+    fetchUrl: fetchUrl.startsWith('/pic/') ? fetchUrl : null,
+  };
+}
+
+export function parseArticle(html: string, sourceUrl: string): ParsedArticle | null {
+  const id = articleIdFromUrl(sourceUrl);
+  if (!id) return null;
+  const $ = load(html);
+  const body = $('.article-body').first();
+  const title = nonEmpty($('.article-title').first().text());
+  const bodyText = nonEmpty(body.text());
+  if (!title && !bodyText) return null;
+
+  const authorLink = $('.article-author-meta a[href^="/"]').first();
+  const authorUsername = nonEmpty(authorLink.attr('href'))?.match(/^\/([A-Za-z0-9_]+)/)?.[1]
+    ?? nonEmpty($('.article-author-meta .username').first().text())?.replace(/^@/, '')
+    ?? null;
+  const coverFetchUrl = nonEmpty(
+    $('.article-cover img[src], .article-cover-image img[src], .article-header img[src]').first().attr('src'),
+  );
+  const media: ParsedArticleMedia[] = [];
+  body.find('img[src]').each((_index, element) => {
+    const parsed = articleImage(nonEmpty($(element).attr('src')), media.length);
+    if (parsed) media.push(parsed);
+  });
+  const dateTitle = $('.article-author-meta time[datetime]').first().attr('datetime')
+    ?? $('.article-author-meta a[title]').first().attr('title');
+  const date = dateTitle ? new Date(dateTitle.replace('·', '')) : null;
+
+  return {
+    id,
+    url: `https://x.com/i/article/${id}`,
+    authorUsername,
+    title,
+    previewText: nonEmpty($('.article-preview, .article-subtitle, meta[name="description"]').first().attr('content')
+      ?? $('.article-preview, .article-subtitle').first().text()),
+    coverImageUrl: canonicalPbsUrl(coverFetchUrl ?? undefined),
+    coverImageFetchUrl: coverFetchUrl,
+    bodyHtml: canonicalizeHtml(body),
+    bodyText,
+    publishedAt: date && !Number.isNaN(date.getTime()) ? date.toISOString() : null,
+    harvestedFrom: 'nitter',
+    media,
+  };
+}

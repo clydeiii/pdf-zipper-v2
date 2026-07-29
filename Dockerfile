@@ -27,7 +27,7 @@ COPY public ./public
 COPY helper-chrome-plugins ./helper-chrome-plugins
 
 # Install dev dependencies for build, then remove them
-RUN npm install --save-dev typescript @types/node @types/express @types/archiver && \
+RUN npm install --save-dev typescript @types/node @types/express @types/archiver @types/better-sqlite3 && \
     npm run build && \
     npm prune --omit=dev
 
