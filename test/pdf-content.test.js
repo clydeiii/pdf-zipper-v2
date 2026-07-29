@@ -24,6 +24,21 @@ async function createPdfWithText(text, { pageCount = 1 } = {}) {
 }
 
 /**
+ * Helper: incompressible pseudo-random bytes (xorshift32). A periodic
+ * pattern deflates to ~nothing inside the PDF, so size-inflation attachments
+ * must be genuinely random-looking to push files past LARGE_PDF_THRESHOLD.
+ */
+function pseudoRandomNoise(length) {
+  const noise = Buffer.alloc(length);
+  let x = 123456789;
+  for (let i = 0; i < length; i++) {
+    x ^= x << 13; x ^= x >>> 17; x ^= x << 5; x |= 0;
+    noise[i] = x & 0xff;
+  }
+  return noise;
+}
+
+/**
  * Helper: generate filler text of a given length
  */
 function filler(length) {
@@ -193,9 +208,7 @@ test('analyzePdfContent passes image-heavy direct X post capture (low density)',
     page.drawText(text.slice(i * 400, (i + 1) * 400), { x: 50, y: 700, size: 10, font, maxWidth: 500 });
   }
   // Inflate file size past the 500KB large-PDF threshold (stand-in for images)
-  const noise = Buffer.alloc(700 * 1024);
-  for (let i = 0; i < noise.length; i++) noise[i] = (i * 2654435761) & 0xff;
-  await doc.attach(noise, 'image-noise.bin', { mimeType: 'application/octet-stream' });
+  await doc.attach(pseudoRandomNoise(700 * 1024), 'image-noise.bin', { mimeType: 'application/octet-stream' });
   const bytes = await doc.save();
   const result = await analyzePdfContent(Buffer.from(bytes));
   assert.equal(result.passed, true, `X post chrome should exempt size/density checks; got: ${result.reason}`);
@@ -218,6 +231,59 @@ test('analyzePdfContent still fails chrome-only X shell (status did not render)'
   const result = await analyzePdfContent(pdf);
   assert.equal(result.passed, false);
   assert.ok(result.reason?.includes('Social post'), `expected social-post floor reason, got: ${result.reason}`);
+});
+
+/**
+ * Helper: multi-page PDF with explicit per-page text, size-inflated past the
+ * 500KB large-PDF threshold (stand-in for heavy raster content).
+ */
+async function createLargePdfWithPages(pageTexts) {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  for (const pageText of pageTexts) {
+    const page = doc.addPage([612, 792]);
+    if (pageText) {
+      page.drawText(pageText.slice(0, 2000), { x: 50, y: 700, size: 10, font, maxWidth: 500 });
+    }
+  }
+  await doc.attach(pseudoRandomNoise(700 * 1024), 'image-noise.bin', { mimeType: 'application/octet-stream' });
+  return Buffer.from(await doc.save());
+}
+
+test('classifies blur-obfuscated paywall as paywall (every.to shape)', async () => {
+  // Real case (job 21206, every.to/vibe-check/opus-5): textful lede page,
+  // blurred raster body pages with zero extractable text, then textful
+  // bio/footer page. Must fail with "Paywall detected" so the failure
+  // classifies as paywall (archive candidate) instead of a suspected
+  // quality false-negative.
+  const pdf = await createLargePdfWithPages([
+    'Skip to content. ' + filler(320), // lede
+    '',                                // blurred body
+    '',                                // blurred body
+    filler(600),                       // author bios + footer
+    'Pricing FAQ Terms Site map',      // footer overflow
+  ]);
+  const result = await analyzePdfContent(pdf);
+  assert.equal(result.passed, false);
+  assert.match(result.reason || '', /Paywall detected/, `expected paywall reason, got: ${result.reason}`);
+});
+
+test('plain large-PDF truncation keeps the truncated-article reason', async () => {
+  // Text spread across pages (SPA shell / hero-image truncation) — no
+  // textless run sandwiched between textful pages, so it must keep the
+  // "Large PDF" wording (quality_false_negative_suspected downstream).
+  const pdf = await createLargePdfWithPages([filler(400), filler(400), filler(200)]);
+  const result = await analyzePdfContent(pdf);
+  assert.equal(result.passed, false);
+  assert.match(result.reason || '', /Large PDF/, `expected truncation reason, got: ${result.reason}`);
+});
+
+test('trailing blank overflow pages do not trigger the blur-paywall reason', async () => {
+  // Blank pages at the END (print overflow) are not a blurred body.
+  const pdf = await createLargePdfWithPages([filler(500), filler(300), '', '']);
+  const result = await analyzePdfContent(pdf);
+  assert.equal(result.passed, false);
+  assert.match(result.reason || '', /Large PDF/, `expected truncation reason, got: ${result.reason}`);
 });
 
 // --- Extracted text ---

@@ -600,6 +600,25 @@ export async function analyzePdfContent(
       charCount < MIN_CHARS_FOR_LARGE_PDF &&
       !legitimatelyShort
     ) {
+      // A textful lede followed by one or more blank middle pages and then
+      // textful author/footer pages is the print shape of CSS-blurred paywalls:
+      // the rasterized blur carries bytes but exposes no extractable text.
+      // Require text on both sides of the blank run so trailing print-overflow
+      // pages and ordinary image-heavy articles keep the generic truncation
+      // classification below.
+      const pageChars = textResult.pages.map((page) => page.text.replace(/\s+/g, ' ').trim().length);
+      const hasSandwichedBlankRun = pageChars.some((count, index) =>
+        count === 0 &&
+        pageChars.slice(0, index).some((earlier) => earlier >= 100) &&
+        pageChars.slice(index + 1).some((later) => later >= 100)
+      );
+      if (hasSandwichedBlankRun) {
+        return {
+          ...baseResult,
+          passed: false,
+          reason: `Paywall detected: large PDF contains textless body pages between a rendered lede and footer content.`,
+        };
+      }
       return {
         ...baseResult,
         passed: false,

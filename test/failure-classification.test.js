@@ -28,6 +28,18 @@ test('classifyFailureMessage detects quality false-negative suspects', () => {
   );
 });
 
+test('classifyFailureMessage classifies blur-paywall truncation reason as paywall', () => {
+  // pdf-content.ts Check 2 blur-signature wording — "Paywall detected" must
+  // win over the "truncated:" prefix so archive fallback treats it as a hard
+  // blocker and auto-fix skips it.
+  assert.equal(
+    classifyFailureMessage(
+      'truncated: Blurred body: lede and footer extract text but interior body pages have none (898KB PDF, 1013 chars). Paywall detected (blur-obfuscated subscriber gate).'
+    ),
+    'paywall'
+  );
+});
+
 test('classifyFailureMessage defaults to unknown', () => {
   assert.equal(classifyFailureMessage('some random error text'), 'unknown');
   assert.equal(classifyFailureMessage(undefined), 'unknown');
