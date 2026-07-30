@@ -112,6 +112,12 @@ Join them by stripping exactly one leading `media/` segment:
 `media/2026-W27/pdfs/foo.pdf` → `2026-W27/pdfs/foo.pdf`.
 Values under `twitter/imagestore/...`, by contrast, match zip entries verbatim.
 
+Resolve those paths against your **accumulated** extraction of all bundles, not
+a single bundle: the DB is a full snapshot referencing every capture since
+inception, while each bundle carries only its own window of media. A `pdf_path`
+that resolves to nothing yet means that PDF shipped in an earlier bundle (or
+predates this feed) — it is not an error.
+
 Tables (schema version in `PRAGMA user_version`; columns may grow over time —
 read by name, not position):
 
