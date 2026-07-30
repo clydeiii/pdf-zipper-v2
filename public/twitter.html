@@ -43,7 +43,10 @@
     .tweet-card.ancestor { opacity: .72; background: #f8f9fa; }
     .tweet-card.ancestor::after { content: ""; position: absolute; left: 39px; top: 64px; bottom: -13px; width: 2px; background: #ced4da; }
     .tweet-layout { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 12px; }
-    .tweet-content { margin: 8px 0; overflow-wrap: anywhere; }
+    /* Nitter stores tweet line breaks as literal newlines in the markup and
+       relies on pre-wrap to show them — mirror that or multi-line tweets
+       collapse into one paragraph. */
+    .tweet-content { margin: 8px 0; overflow-wrap: anywhere; white-space: pre-wrap; }
     .tweet-content p { margin: 0 0 .55em; }
     .tweet-content a { color: #087cc1; }
     .tweet-links { display: flex; gap: 6px; flex-wrap: wrap; margin: 9px 0; }
@@ -51,7 +54,7 @@
     .link-chip.captured { border-color: #69b58a; background: #e7f6ed; color: #17643a; font-weight: 600; }
     .community-note { margin: 8px 0; padding: 9px 12px; border: 1px solid #d5dbe1; border-left: 3px solid #1d9bf0; border-radius: 8px; background: #f4f8fb; }
     .community-note-header { font-size: .78rem; font-weight: 700; color: #38444d; margin-bottom: 4px; }
-    .community-note-text { font-size: .88rem; color: #23303a; overflow-wrap: anywhere; }
+    .community-note-text { font-size: .88rem; color: #23303a; overflow-wrap: anywhere; white-space: pre-wrap; }
     .community-note-text a { color: #087cc1; }
     .verified { color: #1d9bf0; font-size: .9rem; }
     .media-gallery { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; margin-top: 10px; }
