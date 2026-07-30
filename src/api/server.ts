@@ -37,13 +37,19 @@ const __dirname = path.dirname(__filename);
  */
 export const app = express();
 
-app.use((_req: Request, res: Response, next) => {
-  res.setHeader(
-    'Content-Security-Policy',
-    "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
-  );
-  res.setHeader('X-Content-Type-Options', 'nosniff');
+app.use((req: Request, res: Response, next) => {
   res.setHeader('Referrer-Policy', 'no-referrer');
+  // Bull Board's bundled UI sets its own document base URI, pulls Google Fonts,
+  // and serves its CSS with a MIME type nosniff rejects — CSP/nosniff blank the
+  // page. It renders no user-controlled capture data, so scope both to the
+  // app's own pages, where the XSS surface (tweet HTML, display names) lives.
+  if (!req.path.startsWith('/admin')) {
+    res.setHeader(
+      'Content-Security-Policy',
+      "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
+    );
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+  }
   next();
 });
 
