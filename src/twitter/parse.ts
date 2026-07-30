@@ -87,6 +87,7 @@ export function canonicalTwitterHref(href: string): string {
         || TWITTER_ONLY_I_ROUTE_RE.test(parsed.pathname)
         || /^\/[A-Za-z0-9_]{1,15}\/?$/.test(parsed.pathname)
         || /^\/pic\//.test(parsed.pathname)
+        || /^\/(?:messages|hashtag|search|settings)(?:[/?#]|$)/.test(parsed.pathname)
       )) {
         return `https://x.com${parsed.pathname}${parsed.search}${parsed.hash}`;
       }
