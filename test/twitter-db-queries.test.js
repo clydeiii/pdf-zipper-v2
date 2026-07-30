@@ -200,6 +200,16 @@ test('viewer query helpers return deduplicated list and relation shapes', async 
     offset: 0,
     query: 'Alice Example',
   }).total, 2);
+  assert.equal(listLatestTwitterCaptures(db, {
+    limit: 50,
+    offset: 0,
+    query: '%',
+  }).total, 0);
+  assert.equal(listLatestTwitterCaptures(db, {
+    limit: 50,
+    offset: 0,
+    query: '_',
+  }).total, 0);
 
   assert.equal(getTweetMedia(db, '100').length, 1);
   assert.equal(getTweetCard(db, '100').title, 'Example card');

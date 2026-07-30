@@ -1,15 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { openTwitterDb } from '../dist/twitter/db.js';
 import {
   extensionForImage,
   imageRelativePath,
   sha256Hex,
   storeNitterImage,
 } from '../dist/twitter/imagestore.js';
+import { openTwitterDb } from '../dist/twitter/db.js';
 
 test('hashes and paths content-addressed images deterministically', () => {
   const bytes = new TextEncoder().encode('image bytes');
@@ -55,4 +55,38 @@ test('stores a mocked Nitter download once and reuses its image index', async (t
     [...await readFile(path.join(dataDir, ...first.file.split('/')))],
     [1, 2, 3, 4],
   );
+});
+
+test('imagestore dedup refreshes mtime without rewriting content', async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'twitter-imagestore-'));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const db = openTwitterDb({ dataDir });
+  t.after(() => db.close());
+
+  const bytes = new TextEncoder().encode('same image bytes');
+  const sha = sha256Hex(bytes);
+  const extension = extensionForImage('image/png', '/pic/example.png');
+  const relative = imageRelativePath(sha, extension);
+  const absolute = path.join(dataDir, ...relative.split('/'));
+  await mkdir(path.dirname(absolute), { recursive: true });
+  await writeFile(absolute, bytes);
+  const old = new Date('2020-01-01T00:00:00.000Z');
+  await utimes(absolute, old, old);
+  const touched = new Date('2026-07-29T12:00:00.000Z');
+
+  const result = await storeNitterImage('/pic/example.png', {
+    db,
+    dataDir,
+    nitterHost: 'https://nitter.invalid',
+    sourceUrl: 'https://pbs.twimg.com/example.png',
+    now: () => touched,
+    fetchImpl: async () => new Response(bytes, {
+      status: 200,
+      headers: { 'content-type': 'image/png' },
+    }),
+  });
+
+  assert.equal(result.file, relative);
+  assert.deepEqual(new Uint8Array(await readFile(absolute)), bytes);
+  assert.equal((await stat(absolute)).mtimeMs, touched.getTime());
 });

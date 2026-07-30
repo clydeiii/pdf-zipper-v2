@@ -43,8 +43,10 @@ export function slugifyTitle(title: string): string {
 export function isTwitterUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
-    const host = parsed.hostname.toLowerCase();
-    return host === 'x.com' || host === 'twitter.com' || host === 'www.x.com' || host === 'www.twitter.com';
+    const host = parsed.hostname.toLowerCase()
+      .replace(/^www\./, '')
+      .replace(/^(?:mobile|m)\./, '');
+    return host === 'x.com' || host === 'twitter.com';
   } catch {
     return false;
   }

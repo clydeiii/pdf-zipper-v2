@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, rename, unlink, utimes, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { env } from '../config/env.js';
 import {
@@ -12,6 +12,7 @@ import {
 import type { ImageStoreResult } from './types.js';
 
 const RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
+let temporaryFileCounter = 0;
 
 const CONTENT_TYPE_EXTENSIONS: Record<string, string> = {
   'image/avif': '.avif',
@@ -57,6 +58,7 @@ export interface StoreImageOptions {
   nitterHost?: string;
   sourceUrl?: string;
   fetchImpl?: typeof fetch;
+  now?: () => Date;
 }
 
 export async function storeNitterImage(
@@ -68,6 +70,7 @@ export async function storeNitterImage(
   const nitterHost = options.nitterHost ?? env.NITTER_HOST;
   const sourceUrl = options.sourceUrl ?? fetchUrl;
   const fetchImpl = options.fetchImpl ?? fetch;
+  const now = options.now ?? (() => new Date());
   const existing = getImageIndex(db, sourceUrl);
 
   if (existing?.file) {
@@ -82,7 +85,7 @@ export async function storeNitterImage(
     };
   }
   if (existing?.error) {
-    const age = Date.now() - new Date(existing.fetched_at).getTime();
+    const age = now().getTime() - new Date(existing.fetched_at).getTime();
     if (Number.isFinite(age) && age < RETRY_AFTER_MS) {
       return {
         url: sourceUrl,
@@ -96,7 +99,7 @@ export async function storeNitterImage(
     }
   }
 
-  const fetchedAt = new Date().toISOString();
+  const fetchedAt = now().toISOString();
   try {
     const response = await fetchImpl(fetchUrlForNitter(nitterHost, fetchUrl), {
       headers: {
@@ -116,9 +119,18 @@ export async function storeNitterImage(
     const absoluteFile = path.join(dataDir, ...file.split('/'));
     // Content-addressed: identical bytes from a different URL already live at
     // this exact path — refer to the existing copy instead of rewriting it.
-    if (!existsSync(absoluteFile)) {
+    if (existsSync(absoluteFile)) {
+      const touchedAt = now();
+      await utimes(absoluteFile, touchedAt, touchedAt).catch(() => {});
+    } else {
       await mkdir(path.dirname(absoluteFile), { recursive: true });
-      await writeFile(absoluteFile, bytes);
+      const temporaryFile = `${absoluteFile}.tmp-${process.pid}-${temporaryFileCounter++}`;
+      try {
+        await writeFile(temporaryFile, bytes);
+        await rename(temporaryFile, absoluteFile);
+      } finally {
+        await unlink(temporaryFile).catch(() => {});
+      }
     }
     upsertImageIndex(db, {
       url: sourceUrl,

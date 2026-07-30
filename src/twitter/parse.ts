@@ -1,5 +1,6 @@
 import { load, type Cheerio, type CheerioAPI } from 'cheerio';
 import type { AnyNode } from 'domhandler';
+import { env } from '../config/env.js';
 import type {
   ParsedArticle,
   ParsedArticleMedia,
@@ -15,6 +16,12 @@ const STATUS_PATH_RE = /^\/([A-Za-z0-9_]+)\/status\/(\d+)/;
 const ARTICLE_PATH_RE = /\/(?:i\/article|[A-Za-z0-9_]+\/article)\/(\d+)/;
 const NITTER_ERROR_RE = /tweet not found|user not found|instance has been rate limited|page not found/i;
 const TWITTER_HOSTS = new Set(['x.com', 'www.x.com', 'twitter.com', 'www.twitter.com']);
+const NITTER_ROUTE_HOSTS = new Set<string>();
+try {
+  NITTER_ROUTE_HOSTS.add(new URL(env.NITTER_HOST).hostname.toLowerCase());
+} catch {
+  // Invalid configuration is reported by the actual fetch path.
+}
 
 function nonEmpty(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
@@ -41,13 +48,37 @@ function statusParts(href: string | undefined): { username: string; id: string }
   return match ? { username: match[1], id: match[2] } : null;
 }
 
-function canonicalTwitterHref(href: string): string {
+export function canonicalTwitterHref(href: string): string {
   if (/^https?:\/\//i.test(href)) {
-    // Community-note links arrive wrapped in Nitter's configured hostname
-    // (e.g. https://nitter.net/t.co/abc) — unwrap back to the real t.co URL.
-    const wrappedShort = href.match(/^https?:\/\/[^/]+\/(t\.co\/.+)$/i);
-    if (wrappedShort) return `https://${wrappedShort[1]}`;
-    return href;
+    try {
+      const parsed = new URL(href);
+      // Community-note links arrive wrapped in Nitter's configured hostname.
+      const wrappedShort = parsed.pathname.match(/^\/(t\.co\/.+)$/i);
+      if (wrappedShort) return `https://${wrappedShort[1]}${parsed.search}${parsed.hash}`;
+
+      // Status and article paths uniquely identify Twitter routes. Re-home
+      // them regardless of which Nitter mirror hostname rendered the page.
+      if (
+        /^\/[A-Za-z0-9_]{1,15}\/status\/\d+(?:[/?#]|$)/.test(parsed.pathname)
+        || /^\/i\/article\/\d+(?:[/?#]|$)/.test(parsed.pathname)
+      ) {
+        NITTER_ROUTE_HOSTS.add(parsed.hostname.toLowerCase());
+        return `https://x.com${parsed.pathname}${parsed.search}${parsed.hash}`;
+      }
+
+      if (
+        NITTER_ROUTE_HOSTS.has(parsed.hostname.toLowerCase())
+        && (
+          /^\/[A-Za-z0-9_]{1,15}\/?$/.test(parsed.pathname)
+          || /^\/pic\//.test(parsed.pathname)
+        )
+      ) {
+        return `https://x.com${parsed.pathname}${parsed.search}${parsed.hash}`;
+      }
+      return href;
+    } catch {
+      return href;
+    }
   }
   if (href.startsWith('/') && !href.startsWith('//')) {
     return `https://x.com${href}`;
@@ -363,7 +394,9 @@ function parseTweetElement(
   const card = parseCard(item);
   const note = item.find('.community-note .community-note-text').first();
   const communityNoteHtml = canonicalizeHtml(note);
-  const links = extractExternalLinksFromHtml(content.html(), { cardUrl: card?.url });
+  const links = extractExternalLinksFromHtml(contentHtml, {
+    cardUrl: card?.url ? canonicalTwitterHref(card.url) : null,
+  });
   // Community-note source links (canonicalized so t.co survives the Nitter wrap)
   // are prime capture-linkage candidates — the note usually cites the correction.
   for (const noteLink of extractExternalLinksFromHtml(communityNoteHtml)) {
@@ -405,6 +438,8 @@ function parseQuote($: CheerioAPI, quoteElement: AnyNode): ParsedTweet | null {
   user.username = parts.username;
   const text = quote.find('.quote-text').first();
   const media = parseMedia($, quote, false);
+  const contentHtml = canonicalizeHtml(text);
+  const contentText = nonEmpty(text.text());
 
   // Nitter uses a dedicated quote-media-container in some renderer variants.
   quote.find('.quote-media-container a.still-image[href]').each((_index, element) => {
@@ -427,8 +462,8 @@ function parseQuote($: CheerioAPI, quoteElement: AnyNode): ParsedTweet | null {
     articleId: null,
     username: parts.username,
     user,
-    contentHtml: canonicalizeHtml(text),
-    contentText: nonEmpty(text.text()),
+    contentHtml,
+    contentText,
     publishedAt: parseDate(quote.find('.tweet-date a[title]').first().attr('title')),
     replyToId: null,
     replyToUsers: quote.find('.replying-to a').toArray()
@@ -441,8 +476,8 @@ function parseQuote($: CheerioAPI, quoteElement: AnyNode): ParsedTweet | null {
     likesCount: null,
     viewsCount: null,
     sourceUrl: `https://x.com/${parts.username}/status/${parts.id}`,
-    isStub: true,
-    links: extractExternalLinksFromHtml(text.html()),
+    isStub: !contentText && media.length === 0,
+    links: extractExternalLinksFromHtml(contentHtml),
     media,
     card: null,
     poll: [],
@@ -602,7 +637,7 @@ export function parseArticle(html: string, sourceUrl: string): ParsedArticle | n
     bodyText,
     publishedAt: date && !Number.isNaN(date.getTime()) ? date.toISOString() : null,
     harvestedFrom: 'nitter',
-    links: extractExternalLinksFromHtml(bodyContent.html()),
+    links: extractExternalLinksFromHtml(canonicalizeHtml(bodyContent)),
     media,
   };
 }

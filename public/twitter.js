@@ -500,7 +500,10 @@ function formatMegabytes(bytes) {
 }
 
 function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.textContent = text == null ? '' : String(text);
-  return div.innerHTML;
+  return (text == null ? '' : String(text))
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
 }

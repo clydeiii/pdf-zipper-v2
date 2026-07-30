@@ -4,10 +4,10 @@ This file ships inside every `captures-*.zip` bundle. It describes exactly what
 metadata the capture system (pdf-zipper-v2) embeds in each file, so a consumer
 with **no other context** — you, the Claude building a knowledge base from
 these files — can reconstruct sources, timelines, and relationships without
-guessing. Everything below is embedded *inside* the files themselves; there are
-no sidecar databases and no external state to fetch.
+guessing. Everything needed is shipped inside the bundle; there is no external
+state to fetch.
 
-Last updated: 2026-07-03.
+Last updated: 2026-07-29.
 
 ## Bundle layout
 
@@ -92,11 +92,25 @@ New as of 2026-07-29. Every bundle carries:
   bundles and one missed nightly pickup self-heals). The store is
   content-addressed (path = sha256 of bytes) — accumulate the union across
   bundles, overwrite-or-skip on collision (duplicates are byte-identical),
-  and every `*_file` column in the DB resolves. Identical images are stored
+  and every image-path column (`avatar_file`, `cover_image_file`,
+  `image_file`, `file`, and `poster_file`) in the DB resolves. Identical images are stored
   once regardless of how many posts/users reference them. Gap check: the
   `images` table lists every file the DB references — any listed `file`
   missing from your accumulated store means a skipped bundle older than the
   overlap; dated bundles are retained 7 days for recovery.
+
+To bootstrap a consumer with no accumulated imagestore, the producer must make
+one bundle with `CAPTURES_TWITTER_IMAGE_WINDOW_HOURS=0` (or `all`). That bundle
+contains the full imagestore with no mtime cutoff, and `MANIFEST.txt` labels it
+`FULL bootstrap store`. Normal 48-hour windowed bundles can resume afterward.
+
+Database media paths and zip paths deliberately use different roots:
+`tweets.pdf_path`, `articles.pdf_path`, `tweet_links.pdf_path`, and
+`captures.pdf_path` are **DATA_DIR-relative**, so they start with
+`media/{ISO-week}/{type}/{file}`. Media zip entries omit the leading `media/`.
+Join them by stripping exactly one leading `media/` segment:
+`media/2026-W27/pdfs/foo.pdf` → `2026-W27/pdfs/foo.pdf`.
+Values under `twitter/imagestore/...`, by contrast, match zip entries verbatim.
 
 Tables (schema version in `PRAGMA user_version`; columns may grow over time —
 read by name, not position):
@@ -110,36 +124,52 @@ read by name, not position):
   (JSON array), stats (`replies_count`, `retweets_count`, `likes_count`,
   `views_count` + `stats_updated_at` — a snapshot, not live),
   `community_note_html`/`community_note_text` (Community Note when X showed
-  one), `pdf_path` (the bundle-relative weekly-bin PDF representing this post
-  and its captured replies), `is_stub` (1 = known only via an edge; body not
-  harvested from its own page), `source_url`.
+  one), `pdf_path` (DATA_DIR-relative weekly-bin PDF representing this post
+  and its captured replies), `is_stub` (1 = row not harvested from its own
+  thread page; content/media may still be present when learned from a quote
+  card), `source_url`.
 - **users** — `username` (PK, case-insensitive), `fullname`, `verified`,
   `avatar_file` → imagestore.
-- **tweet_media** — per-post media: `kind` photo|video|gif|card-image,
+- **tweet_media** — per-post media. `position` is the authoritative ordering
+  key for multi-image/mixed-media posts. Other columns: `kind`
+  photo|video|gif|card-image,
   `orig_url` (original pbs.twimg.com/video.twimg.com URL), `file`
   (imagestore, full resolution), `poster_file`, `video_url` (original mp4),
-  `local_video` (basename of the captured MP4 in the bundle's videos/ bins —
-  join key to the media files).
-- **tweet_cards / tweet_polls** — link-preview cards and poll options.
+  `local_video` (convenience basename; often NULL because the MP4 lands after
+  harvest). For video/gif rows, fall back to the conventional zip entry
+  `{ISO-week}/videos/x.com-<username>-post-<status_id>.mp4` (historic files
+  may use `twitter.com-...`). Its speech transcript sidecar is
+  `x.com-<username>-post-<status_id>.transcript.pdf`.
+- **tweet_cards** — one link-preview row per tweet: `tweet_id`, `url`,
+  `title`, `description`, and `image_file` (imagestore path).
+- **tweet_polls** — ordered poll options: `tweet_id`, `option_index`, `label`,
+  and `value_percent`; order by `option_index`.
 - **tweet_links** — outbound links per post (and from chained article
-  bodies): `url` (shorteners resolved when possible), `pdf_path` set when the
+  bodies): `position` is the authoritative source order, `url` (shorteners
+  resolved when possible), `pdf_path` set when the
   link's target is itself a captured PDF in these bundles — a direct
   cross-document edge for the KB.
 - **articles** — X Articles (long-form). `id` equals the announcing tweet's
   status id; `tweet_id` links the announcing post. Full `body_html`/
   `body_text`, `cover_image_file`, `pdf_path`, `harvested_from`
   ('nitter'|'x.com').
-- **article_media** — inline article images → imagestore.
+- **article_media** — inline article images → imagestore; `position` is the
+  authoritative body ordering key.
 - **captures** — provenance: one row per harvest (kind, subject_id,
   source_url, bookmarked_at, captured_at, pdf_path, replies_captured, origin
   worker|backfill|manual).
-- **images / pdf_index** — internal bookkeeping (URL→file index, PDF source
-  URL index); safe to ignore for reconstruction.
+- **images** — the authoritative URL→imagestore-file gap-check index. Every
+  non-NULL `file` should exist in the consumer's accumulated imagestore. It is
+  not the preferred reconstruction source, but it must be checked for
+  completeness.
+- **pdf_index** — producer-side PDF source URL matching index; safe to ignore
+  for reconstruction.
 
 Precedence: for anything present in both, this DB supersedes text-parsing the
 PDFs (it is extracted from structured DOM, not OCR/text heuristics). The PDFs
-remain the visual/archival record; `tweets.pdf_path` and
-`tweet_media.local_video` are the join keys into them.
+remain the visual/archival record. Resolve DB `pdf_path` columns by stripping
+one leading `media/`; resolve videos using `local_video` when populated or the
+deterministic filename convention above.
 
 ## Reconstruction guidance
 

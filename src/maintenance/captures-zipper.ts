@@ -49,9 +49,9 @@ const ENABLED = process.env.CAPTURES_ZIP_ENABLED !== 'false';
 /**
  * Include the structured Twitter/X database + its imagestore. The DB ships as
  * a full consistent snapshot every night (small relative to media); imagestore
- * files ride the same mtime window as captures — the consuming side
- * accumulates bundles, so every image referenced by a DB row arrived in the
- * bundle for the night it was first downloaded. Set
+ * files ride an mtime window — the consuming side accumulates bundles, and
+ * dedup hits refresh mtime so newly referenced content re-ships. A new
+ * consumer must request one full bootstrap bundle (window 0/all). Set
  * CAPTURES_INCLUDE_TWITTER=false to disable.
  */
 const INCLUDE_TWITTER = process.env.CAPTURES_INCLUDE_TWITTER !== 'false';
@@ -62,9 +62,17 @@ const INCLUDE_TWITTER = process.env.CAPTURES_INCLUDE_TWITTER !== 'false';
  * double-ship idempotent for the consumer. The DB snapshot is full nightly,
  * so images are the only diff-shaped twitter data.
  */
-const TWITTER_IMAGE_WINDOW_HOURS = parseInt(
-  process.env.CAPTURES_TWITTER_IMAGE_WINDOW_HOURS || String(WINDOW_HOURS * 2),
-  10,
+export function parseTwitterImageWindowHours(
+  value: string | undefined,
+  fallbackHours: number,
+): number | null {
+  if (value?.trim().toLowerCase() === 'all' || value?.trim() === '0') return null;
+  const parsed = Number.parseInt(value || String(fallbackHours), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallbackHours;
+}
+const TWITTER_IMAGE_WINDOW_HOURS = parseTwitterImageWindowHours(
+  process.env.CAPTURES_TWITTER_IMAGE_WINDOW_HOURS,
+  WINDOW_HOURS * 2,
 );
 /**
  * Captures are mostly incompressible media (MP3/MP4); PDFs are the only real
@@ -74,6 +82,8 @@ const ZLIB_LEVEL = 1;
 
 let runTimer: NodeJS.Timeout | null = null;
 let startupTimer: NodeJS.Timeout | null = null;
+let bundleBuildInFlight = false;
+let temporaryFileCounter = 0;
 
 function parseWeekDirName(name: string): boolean {
   return /^\d{4}-W\d{2}$/.test(name);
@@ -152,7 +162,10 @@ async function collectRecentFiles(mediaDir: string, cutoffMs: number): Promise<R
  * so the consuming side can resolve the DB's `file` columns directly.
  * Exported for tests.
  */
-export async function collectTwitterImageFiles(dataDir: string, cutoffMs: number): Promise<RecentFile[]> {
+export async function collectTwitterImageFiles(
+  dataDir: string,
+  cutoffMs: number | 'all' | null,
+): Promise<RecentFile[]> {
   const files: RecentFile[] = [];
   const storeDir = path.join(dataDir, 'twitter', 'imagestore');
 
@@ -178,7 +191,9 @@ export async function collectTwitterImageFiles(dataDir: string, cutoffMs: number
       try {
         const s = await stat(fullPath);
         if (!s.isFile()) continue;
-        if (s.mtimeMs < cutoffMs) continue;
+        if (cutoffMs !== null && cutoffMs !== 'all' && cutoffMs !== 0 && s.mtimeMs < cutoffMs) {
+          continue;
+        }
         files.push({
           fullPath,
           zipPath: path.posix.join('twitter', 'imagestore', shard, entry),
@@ -193,25 +208,29 @@ export async function collectTwitterImageFiles(dataDir: string, cutoffMs: number
 
 /**
  * Snapshot the live twitter.db (WAL, concurrent writers) into `destPath`
- * using SQLite's online backup API. Returns the snapshot size, or null when
- * there is no database yet or the backup failed (best-effort — the nightly
- * bundle must not fail on this).
+ * using SQLite's online backup API. Returns size plus a loud error signal;
+ * a missing database is represented by two nulls.
  */
-async function snapshotTwitterDb(dataDir: string, destPath: string): Promise<number | null> {
+async function snapshotTwitterDb(
+  dataDir: string,
+  destPath: string,
+): Promise<{ bytes: number | null; error: string | null }> {
   const dbPath = path.join(dataDir, 'twitter', 'twitter.db');
-  if (!fs.existsSync(dbPath)) return null;
+  if (!fs.existsSync(dbPath)) return { bytes: null, error: null };
   try {
+    await unlink(destPath).catch(() => {});
     const { getTwitterDb } = await import('../twitter/db.js');
     await getTwitterDb().backup(destPath);
-    return (await stat(destPath)).size;
+    return { bytes: (await stat(destPath)).size, error: null };
   } catch (err) {
-    console.warn(JSON.stringify({
-      event: 'captures_bundle_warning',
-      error: `twitter.db snapshot failed: ${err instanceof Error ? err.message : String(err)}`,
+    const error = `twitter.db snapshot failed: ${err instanceof Error ? err.message : String(err)}`;
+    console.error(JSON.stringify({
+      event: 'captures_bundle_twitter_error',
+      error,
       timestamp: new Date().toISOString(),
     }));
     await unlink(destPath).catch(() => {});
-    return null;
+    return { bytes: null, error };
   }
 }
 
@@ -237,6 +256,8 @@ export interface BundleResult {
   twitterImageCount: number;
   /** Size of the full twitter.db snapshot, or null when disabled/absent. */
   twitterDbBytes: number | null;
+  /** Loud failure signal when Twitter was requested but its DB snapshot failed. */
+  twitterDbError: string | null;
 }
 
 /**
@@ -244,39 +265,63 @@ export interface BundleResult {
  * then copies to `captures-latest.zip`. Returns metadata for logging/notify.
  */
 export async function buildCapturesBundle(): Promise<BundleResult> {
+  if (bundleBuildInFlight) {
+    throw new Error('A captures bundle build is already in progress');
+  }
+  bundleBuildInFlight = true;
+  try {
+    return await buildCapturesBundleInner();
+  } finally {
+    bundleBuildInFlight = false;
+  }
+}
+
+async function buildCapturesBundleInner(): Promise<BundleResult> {
   const dataDir = path.resolve(env.DATA_DIR);
   const mediaDir = path.join(dataDir, 'media');
   const capturesDir = path.join(dataDir, CAPTURES_SUBDIR);
   await mkdir(capturesDir, { recursive: true });
+  const uniqueSuffix = `${process.pid}-${Date.now()}-${temporaryFileCounter++}`;
+  const dbSnapshotPath = path.join(capturesDir, `.twitter-db-snapshot-${uniqueSuffix}.tmp`);
+  let tmpPath: string | null = null;
 
-  const now = new Date();
-  const cutoffMs = now.getTime() - WINDOW_HOURS * ONE_HOUR_MS;
-  const files = await collectRecentFiles(mediaDir, cutoffMs);
+  try {
+    const now = new Date();
+    const cutoffMs = now.getTime() - WINDOW_HOURS * ONE_HOUR_MS;
+    const files = await collectRecentFiles(mediaDir, cutoffMs);
 
-  // Structured Twitter/X data: full DB snapshot + window's imagestore files.
-  let twitterImages: RecentFile[] = [];
-  let twitterDbBytes: number | null = null;
-  const dbSnapshotPath = path.join(capturesDir, '.twitter-db-snapshot.tmp');
-  if (INCLUDE_TWITTER) {
-    const imageCutoffMs = now.getTime() - TWITTER_IMAGE_WINDOW_HOURS * ONE_HOUR_MS;
-    twitterImages = await collectTwitterImageFiles(dataDir, imageCutoffMs);
-    twitterDbBytes = await snapshotTwitterDb(dataDir, dbSnapshotPath);
-  }
+    // Structured Twitter/X data: full DB snapshot + window's imagestore files.
+    let twitterImages: RecentFile[] = [];
+    let twitterDbBytes: number | null = null;
+    let twitterDbError: string | null = null;
+    const includeTwitterForRun = INCLUDE_TWITTER && (
+      env.TWITTER_DB_ENABLED
+      || fs.existsSync(path.join(dataDir, 'twitter', 'twitter.db'))
+    );
+    if (includeTwitterForRun) {
+      const imageCutoffMs = TWITTER_IMAGE_WINDOW_HOURS === null
+        ? null
+        : now.getTime() - TWITTER_IMAGE_WINDOW_HOURS * ONE_HOUR_MS;
+      twitterImages = await collectTwitterImageFiles(dataDir, imageCutoffMs);
+      const snapshot = await snapshotTwitterDb(dataDir, dbSnapshotPath);
+      twitterDbBytes = snapshot.bytes;
+      twitterDbError = snapshot.error;
+    }
 
-  const bytesUncompressed = files.reduce((sum, f) => sum + f.size, 0)
-    + twitterImages.reduce((sum, f) => sum + f.size, 0)
-    + (twitterDbBytes ?? 0);
+    const bytesUncompressed = files.reduce((sum, f) => sum + f.size, 0)
+      + twitterImages.reduce((sum, f) => sum + f.size, 0)
+      + (twitterDbBytes ?? 0);
 
   // Local calendar date (process TZ) so the dated bundle matches the day the
   // user perceives at midnight, consistent with the benchmarks harvester.
-  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-  const zipName = `captures-${today}.zip`;
-  const finalPath = path.join(capturesDir, zipName);
-  const tmpPath = `${finalPath}.tmp`;
-  const latestPath = path.join(capturesDir, 'captures-latest.zip');
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const zipName = `captures-${today}.zip`;
+    const finalPath = path.join(capturesDir, zipName);
+    tmpPath = `${finalPath}.tmp-${uniqueSuffix}`;
+    const latestPath = path.join(capturesDir, 'captures-latest.zip');
 
-  await new Promise<void>((resolve, reject) => {
-    const out = fs.createWriteStream(tmpPath);
+    await new Promise<void>((resolve, reject) => {
+    const out = fs.createWriteStream(tmpPath!);
     const archive = archiver('zip', { zlib: { level: ZLIB_LEVEL } });
 
     out.on('close', () => resolve());
@@ -301,10 +346,14 @@ export async function buildCapturesBundle(): Promise<BundleResult> {
       `window: last ${WINDOW_HOURS}h (files modified >= ${new Date(cutoffMs).toISOString()})`,
       `files: ${files.length}`,
       `uncompressed: ${formatBytes(bytesUncompressed)}`,
-      ...(twitterDbBytes !== null || twitterImages.length
+      ...(includeTwitterForRun
         ? [
             `twitter/twitter.db: ${twitterDbBytes !== null ? `full snapshot, ${formatBytes(twitterDbBytes)}` : 'absent'}`,
-            `twitter/imagestore: ${twitterImages.length} image(s) from the last ${TWITTER_IMAGE_WINDOW_HOURS}h (overlapping window — content-addressed; accumulate across bundles, duplicates are identical)`,
+            TWITTER_IMAGE_WINDOW_HOURS === null
+              ? `twitter/imagestore: ${twitterImages.length} image(s), FULL bootstrap store (no mtime cutoff)`
+              : `twitter/imagestore: ${twitterImages.length} image(s) from the last ${TWITTER_IMAGE_WINDOW_HOURS}h (windowed; content-addressed; accumulate across bundles)`,
+            'tweets.pdf_path, articles.pdf_path, tweet_links.pdf_path, and captures.pdf_path are DATA_DIR-relative (media/{week}/{type}/{file}); zip media entries omit media/, so strip exactly one leading media/ to join.',
+            'twitter/imagestore/... DB values already match zip entries verbatim.',
           ]
         : []),
       '',
@@ -340,32 +389,44 @@ export async function buildCapturesBundle(): Promise<BundleResult> {
     }
 
     void archive.finalize();
-  });
+    });
 
-  await unlink(dbSnapshotPath).catch(() => {});
-
-  await rename(tmpPath, finalPath);
+    if (fs.existsSync(finalPath)) {
+      console.warn(JSON.stringify({
+        event: 'captures_bundle_collision',
+        file: zipName,
+        action: 'overwrite_with_newest',
+        timestamp: now.toISOString(),
+      }));
+    }
+    await rename(tmpPath, finalPath);
+    tmpPath = null;
   // Hardlink -latest to the dated bundle (same dir, same fs) so the multi-GB
   // snapshot isn't stored twice; fall back to a copy if the fs refuses links.
-  await unlink(latestPath).catch(() => {});
-  try {
-    await link(finalPath, latestPath);
-  } catch {
-    await copyFile(finalPath, latestPath);
+    await unlink(latestPath).catch(() => {});
+    try {
+      await link(finalPath, latestPath);
+    } catch {
+      await copyFile(finalPath, latestPath);
+    }
+
+    const bytesZip = (await stat(finalPath)).size;
+    await pruneOldBundles(capturesDir);
+
+    return {
+      windowHours: WINDOW_HOURS,
+      fileCount: files.length,
+      bytesUncompressed,
+      bytesZip,
+      zipFile: `${CAPTURES_SUBDIR}/${zipName}`,
+      twitterImageCount: twitterImages.length,
+      twitterDbBytes,
+      twitterDbError,
+    };
+  } finally {
+    await unlink(dbSnapshotPath).catch(() => {});
+    if (tmpPath) await unlink(tmpPath).catch(() => {});
   }
-
-  const bytesZip = (await stat(finalPath)).size;
-  await pruneOldBundles(capturesDir);
-
-  return {
-    windowHours: WINDOW_HOURS,
-    fileCount: files.length,
-    bytesUncompressed,
-    bytesZip,
-    zipFile: `${CAPTURES_SUBDIR}/${zipName}`,
-    twitterImageCount: twitterImages.length,
-    twitterDbBytes,
-  };
 }
 
 /** Run a bundle and post a Discord summary. Never throws — a failure must not crash the process. */
@@ -378,14 +439,19 @@ async function runWithNotify(): Promise<void> {
     console.log(JSON.stringify({ event: 'captures_bundle_done', ...result, timestamp: new Date().toISOString() }));
 
     await sendDiscordNotification({
-      type: 'info',
+      type: result.twitterDbError ? 'warning' : 'info',
       title: '📦 Captures Bundle',
-      description: `Bundled ${result.fileCount} capture(s) from the last ${result.windowHours}h`,
+      description: result.twitterDbError
+        ? `Bundled ${result.fileCount} capture(s), but the Twitter DB snapshot FAILED`
+        : `Bundled ${result.fileCount} capture(s) from the last ${result.windowHours}h`,
       fields: [
         { name: 'Zip', value: formatBytes(result.bytesZip), inline: true },
         { name: 'Files', value: `${result.fileCount}`, inline: true },
         ...(result.twitterDbBytes !== null
           ? [{ name: 'Twitter DB', value: `${formatBytes(result.twitterDbBytes)} + ${result.twitterImageCount} image(s)`, inline: true }]
+          : []),
+        ...(result.twitterDbError
+          ? [{ name: 'Twitter DB Error', value: result.twitterDbError.slice(0, 1024), inline: false }]
           : []),
         { name: 'Download', value: '/api/file/captures/captures-latest.zip', inline: false },
       ],

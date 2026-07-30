@@ -25,6 +25,15 @@ import {
 export const twitterRouter = Router();
 
 type DbRow = Record<string, unknown>;
+const SAFE_HTML_ELEMENTS = new Set([
+  'p', 'br', 'div', 'span', 'a', 'b', 'strong', 'i', 'em', 'u', 's',
+  'code', 'pre', 'blockquote', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4',
+  'h5', 'h6', 'hr', 'figure', 'figcaption', 'table', 'thead', 'tbody',
+  'tr', 'th', 'td', 'sub', 'sup', 'small',
+]);
+const SAFE_HTML_ATTRIBUTES = new Set(['title', 'dir', 'lang', 'colspan', 'rowspan']);
+const VIDEO_INDEX_TTL_MS = 60_000;
+let cachedVideoIndex: { expiresAt: number; index: Map<string, string> } | null = null;
 
 const EMPTY_STATS: TwitterStats = {
   tweets: 0,
@@ -43,13 +52,32 @@ const EMPTY_STATS: TwitterStats = {
 export function sanitizeTwitterHtml(html: unknown): string | null {
   if (typeof html !== 'string' || !html.trim()) return null;
   const $ = load(html, null, false);
-  $('script, style, iframe, object, embed').remove();
+
   $('*').each((_index, element) => {
-    if (!('attribs' in element) || !element.attribs) return;
-    for (const [name, value] of Object.entries(element.attribs)) {
-      if (/^on/i.test(name) || /^\s*javascript:/i.test(value)) {
-        $(element).removeAttr(name);
+    if (!('name' in element) || !element.name || !('attribs' in element)) return;
+    const name = element.name.toLowerCase();
+    if (!SAFE_HTML_ELEMENTS.has(name)) {
+      $(element).replaceWith($(element).contents());
+      return;
+    }
+
+    for (const [attribute, rawValue] of Object.entries(element.attribs ?? {})) {
+      const normalizedAttribute = attribute.toLowerCase();
+      if (normalizedAttribute === 'href' && name === 'a') {
+        const cleaned = rawValue.replace(/[\u0000-\u0020\u007f]/g, '');
+        try {
+          const resolved = new URL(cleaned, 'https://sanitizer.invalid/');
+          if (resolved.protocol === 'http:' || resolved.protocol === 'https:') {
+            $(element).attr(attribute, cleaned);
+            continue;
+          }
+        } catch {
+          // Invalid hrefs are removed below.
+        }
+      } else if (SAFE_HTML_ATTRIBUTES.has(normalizedAttribute)) {
+        continue;
       }
+      $(element).removeAttr(attribute);
     }
   });
   return $.root().html() || null;
@@ -72,13 +100,20 @@ function isMissingDatabaseError(error: unknown): boolean {
 }
 
 async function localVideoIndex(): Promise<Map<string, string>> {
+  const now = Date.now();
+  if (cachedVideoIndex && cachedVideoIndex.expiresAt > now) {
+    return cachedVideoIndex.index;
+  }
   const index = new Map<string, string>();
   const mediaRoot = path.join(env.DATA_DIR, 'media');
   let entries;
   try {
     entries = await readdir(mediaRoot, { withFileTypes: true });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return index;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      cachedVideoIndex = { expiresAt: now + VIDEO_INDEX_TTL_MS, index };
+      return index;
+    }
     throw error;
   }
 
@@ -102,6 +137,7 @@ async function localVideoIndex(): Promise<Map<string, string>> {
       }
     }
   }
+  cachedVideoIndex = { expiresAt: now + VIDEO_INDEX_TTL_MS, index };
   return index;
 }
 

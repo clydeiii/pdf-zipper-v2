@@ -52,7 +52,9 @@ export class TwitterHarvestError extends Error {
 function twitterPath(url: string): { sourceUrl: string; nitterUrl: string } {
   try {
     const parsed = new URL(url);
-    const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+    const host = parsed.hostname.toLowerCase()
+      .replace(/^www\./, '')
+      .replace(/^(?:mobile|m)\./, '');
     if (host !== 'x.com' && host !== 'twitter.com') {
       throw new Error('not a Twitter/X host');
     }
@@ -75,7 +77,12 @@ function articleId(url: string): string | null {
 
 export function twitterHarvestKind(url: string): 'tweet' | 'article' | null {
   try {
-    const pathname = new URL(url).pathname;
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase()
+      .replace(/^www\./, '')
+      .replace(/^(?:mobile|m)\./, '');
+    if (host !== 'x.com' && host !== 'twitter.com') return null;
+    const pathname = parsed.pathname;
     if (/\/status\/\d+(?:\/|$)/.test(pathname)) return 'tweet';
     if (/\/(?:i\/article|[A-Za-z0-9_]+\/article)\/\d+(?:\/|$)/.test(pathname)) return 'article';
     return null;

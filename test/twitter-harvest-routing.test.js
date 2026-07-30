@@ -16,4 +16,8 @@ test('structured Twitter harvest routing follows URL shape', () => {
     'article',
   );
   assert.equal(twitterHarvestKind('https://x.com/loubohan'), null);
+  assert.equal(twitterHarvestKind('https://mobile.twitter.com/alice/status/123'), 'tweet');
+  assert.equal(twitterHarvestKind('https://m.twitter.com/alice/status/123'), 'tweet');
+  assert.equal(twitterHarvestKind('https://mobile.x.com/alice/status/123'), 'tweet');
+  assert.equal(twitterHarvestKind('https://example.com/alice/status/123'), null);
 });

@@ -89,7 +89,6 @@ async function harvestStructuredTwitterCapture(options: {
   sourceUrl: string;
   bookmarkedAt?: string;
   pdfPath: string;
-  isXArticle: boolean;
   articleContent?: ArticleFallbackContent;
 }): Promise<void> {
   if (!env.TWITTER_DB_ENABLED || !isTwitterUrl(options.sourceUrl)) return;
@@ -494,7 +493,6 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
     sourceUrl: originalUrl || url,
     bookmarkedAt,
     pdfPath,
-    isXArticle: isXArticle === true,
     articleContent: result.articleContent,
   });
 

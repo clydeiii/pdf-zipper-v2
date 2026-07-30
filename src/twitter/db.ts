@@ -333,7 +333,7 @@ export function upsertTweet(db: TwitterDatabase, tweet: ParsedTweet, timestamp =
     ) VALUES (
       @id, @username, @contentHtml, @contentText, @publishedAt, @replyToId,
       @replyToUsers, @quotedId, @retweetedBy, @repliesCount, @retweetsCount,
-      @likesCount, @viewsCount, @timestamp, @sourceUrl, @isStub,
+      @likesCount, @viewsCount, @statsUpdatedAt, @sourceUrl, @isStub,
       @communityNoteHtml, @communityNoteText,
       @timestamp, @timestamp
     )
@@ -352,7 +352,14 @@ export function upsertTweet(db: TwitterDatabase, tweet: ParsedTweet, timestamp =
       retweets_count = COALESCE(excluded.retweets_count, tweets.retweets_count),
       likes_count = COALESCE(excluded.likes_count, tweets.likes_count),
       views_count = COALESCE(excluded.views_count, tweets.views_count),
-      stats_updated_at = excluded.stats_updated_at,
+      stats_updated_at = CASE
+        WHEN excluded.replies_count IS NOT NULL
+          OR excluded.retweets_count IS NOT NULL
+          OR excluded.likes_count IS NOT NULL
+          OR excluded.views_count IS NOT NULL
+        THEN excluded.stats_updated_at
+        ELSE tweets.stats_updated_at
+      END,
       source_url = COALESCE(excluded.source_url, tweets.source_url),
       is_stub = MIN(tweets.is_stub, excluded.is_stub),
       updated_at = excluded.updated_at
@@ -375,6 +382,12 @@ export function upsertTweet(db: TwitterDatabase, tweet: ParsedTweet, timestamp =
     communityNoteHtml: nullable(tweet.communityNoteHtml),
     communityNoteText: nullable(tweet.communityNoteText),
     timestamp,
+    statsUpdatedAt: [
+      tweet.repliesCount,
+      tweet.retweetsCount,
+      tweet.likesCount,
+      tweet.viewsCount,
+    ].some((value) => value !== null) ? timestamp : null,
   });
 
   const mediaStatement = db.prepare(`
@@ -648,11 +661,11 @@ const LATEST_CAPTURES_CTE = `
 const CAPTURE_SEARCH_WHERE = `
   WHERE (
     @query = ''
-    OR COALESCE(t.username, a.author_username, '') LIKE @pattern COLLATE NOCASE
-    OR COALESCE(u.fullname, '') LIKE @pattern COLLATE NOCASE
-    OR COALESCE(t.content_text, '') LIKE @pattern COLLATE NOCASE
-    OR COALESCE(a.title, '') LIKE @pattern COLLATE NOCASE
-    OR COALESCE(ta.title, '') LIKE @pattern COLLATE NOCASE
+    OR COALESCE(t.username, a.author_username, '') LIKE @pattern ESCAPE char(92) COLLATE NOCASE
+    OR COALESCE(u.fullname, '') LIKE @pattern ESCAPE char(92) COLLATE NOCASE
+    OR COALESCE(t.content_text, '') LIKE @pattern ESCAPE char(92) COLLATE NOCASE
+    OR COALESCE(a.title, '') LIKE @pattern ESCAPE char(92) COLLATE NOCASE
+    OR COALESCE(ta.title, '') LIKE @pattern ESCAPE char(92) COLLATE NOCASE
   )
 `;
 
@@ -675,7 +688,7 @@ export function listLatestTwitterCaptures(
   const query = options.query?.trim() ?? '';
   const parameters = {
     query,
-    pattern: `%${query}%`,
+    pattern: `%${query.replace(/[\\%_]/g, '\\$&')}%`,
     limit: options.limit,
     offset: options.offset,
   };

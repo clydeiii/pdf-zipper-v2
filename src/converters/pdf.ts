@@ -275,8 +275,10 @@ function cleanSubstackUrl(url: string): string {
 function isTwitterUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
-    const host = parsed.hostname.toLowerCase();
-    return host === 'x.com' || host === 'twitter.com' || host === 'www.x.com' || host === 'www.twitter.com';
+    const host = parsed.hostname.toLowerCase()
+      .replace(/^www\./, '')
+      .replace(/^(?:mobile|m)\./, '');
+    return host === 'x.com' || host === 'twitter.com';
   } catch {
     return false;
   }
@@ -661,8 +663,14 @@ export async function convertUrlToPDF(
     let isNitterArticleCapture = false;
     if (isTwitterUrl(url) && targetUrl !== url) {
       try {
-        const articleMatch = (await page.content())
-          .match(/(?:href="|x\.com|twitter\.com)\/i\/article\/(\d+)/);
+        const articleHref = await page.evaluate(() => {
+          const links = Array.from(document.querySelectorAll(
+            '.main-tweet .article-card a.card-container[href*="/i/article/"]',
+          ));
+          const link = links.find((candidate) => !candidate.closest('.quote'));
+          return link?.getAttribute('href') ?? null;
+        });
+        const articleMatch = articleHref?.match(/\/i\/article\/(\d+)(?:[/?#]|$)/);
         if (articleMatch) {
           const articleUrl = `${env.NITTER_HOST.replace(/\/+$/, '')}/i/article/${articleMatch[1]}`;
           try {
@@ -783,7 +791,17 @@ export async function convertUrlToPDF(
               }
               let newSrc: string;
               if (path.startsWith('https://')) {
-                newSrc = path;
+                try {
+                  const parsed = new URL(path);
+                  if (parsed.hostname !== 'pbs.twimg.com' && parsed.hostname !== 'video.twimg.com') {
+                    img.removeAttribute('loading');
+                    return;
+                  }
+                  newSrc = parsed.toString();
+                } catch {
+                  img.removeAttribute('loading');
+                  return;
+                }
               } else if (path.startsWith('video.twimg.com/') || path.startsWith('pbs.twimg.com/')) {
                 newSrc = `https://${path}`;
               } else {
@@ -1176,8 +1194,14 @@ export async function convertUrlToPDF(
     // successful hop to Nitter's article renderer must skip this — the article
     // body itself may mention /i/article/ links and would re-trigger it.
     if (isTwitterUrl(url) && targetUrl !== url && !isNitterArticleCapture) {
-      const pageContent = await page.content();
-      const isArticleStub = /(?:x\.com|twitter\.com)\/i\/article\/|href=["']\/i\/article\//.test(pageContent);
+      const isArticleStub = await page.evaluate(() => {
+        const links = Array.from(document.querySelectorAll(
+          '.main-tweet .article-card a.card-container[href*="/i/article/"]',
+        ));
+        return links.some((candidate) =>
+          !candidate.closest('.quote')
+          && /\/i\/article\/\d+(?:[/?#]|$)/.test(candidate.getAttribute('href') ?? ''));
+      });
       // Nitter error panel ("Tweet not found", rate-limited instance): the page
       // renders only the error box, so body text is tiny. These are usually
       // transient guest-token failures, not proof the tweet is gone — retry

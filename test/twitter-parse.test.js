@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { parseArticle, parseStatCount, parseThreadPage } from '../dist/twitter/parse.js';
+import {
+  canonicalTwitterHref,
+  parseArticle,
+  parseStatCount,
+  parseThreadPage,
+} from '../dist/twitter/parse.js';
 
 async function fixture(name) {
   return readFile(new URL(`./fixtures/nitter/${name}`, import.meta.url), 'utf8');
@@ -65,8 +70,42 @@ test('parses full-resolution main attachments and self-thread/quote edges', asyn
   assert.equal(gary.mainTweet.quotedId, '2082158585635914104');
   assert.equal(gary.quotedTweets.length, 1);
   assert.equal(gary.quotedTweets[0].id, '2082158585635914104');
-  assert.equal(gary.quotedTweets[0].isStub, true);
+  assert.equal(gary.quotedTweets[0].isStub, false);
   assert.deepEqual(gary.quotedTweets[0].links, ['https://chessbench.ai/timeline']);
+});
+
+test('canonicalizes Nitter-hosted Twitter routes before storing HTML or links', () => {
+  assert.equal(
+    canonicalTwitterHref('https://mirror.invalid/alice/status/123?ref=x'),
+    'https://x.com/alice/status/123?ref=x',
+  );
+  assert.equal(
+    canonicalTwitterHref('https://mirror.invalid/i/article/456'),
+    'https://x.com/i/article/456',
+  );
+  assert.equal(
+    canonicalTwitterHref('https://mirror.invalid/alice'),
+    'https://x.com/alice',
+  );
+  assert.equal(
+    canonicalTwitterHref('https://mirror.invalid/pic/media/example.jpg'),
+    'https://x.com/pic/media/example.jpg',
+  );
+  assert.equal(
+    canonicalTwitterHref('https://example.com/alice/status/not-a-number'),
+    'https://example.com/alice/status/not-a-number',
+  );
+});
+
+test('reply-borne article cards do not mark the main tweet as an article', async () => {
+  // Deliberately modify the real Gary Marcus fixture with an article card in
+  // the replies, reproducing the unscoped worker false positive.
+  const html = (await fixture('garymarcus-thread.html')).replace(
+    '<div id="r" class="replies">',
+    '<div id="r" class="replies"><div class="reply"><div class="timeline-item" data-username="mallory"><a class="tweet-link" href="/mallory/status/999"></a><div class="article-card"><a class="card-container" href="https://x.com/i/article/777"></a></div></div></div>',
+  );
+  const parsed = parseThreadPage(html, 'https://x.com/GaryMarcus/status/2082159967214489963');
+  assert.equal(parsed.mainTweet.articleId, null);
 });
 
 test('extracts real external links in appearance order and de-duplicates them per tweet', async () => {
@@ -111,7 +150,7 @@ test('canonicalizes internal content links and parses stat edge cases', () => {
           <a href="https://example.com/story">story</a>
           <a href="https://example.com/story">story again</a>
           <a href="https://twitter.com/alice/status/99?s=20">this thread</a>
-          <a href="https://x.com/charlie/status/123?s=20">another tweet</a>
+          <a href="https://nitter-mirror.invalid/charlie/status/123?s=20">another tweet</a>
           <img src="/pic/foo.jpg"> hello
         </div>
         <div class="tweet-stats">
@@ -122,6 +161,7 @@ test('canonicalizes internal content links and parses stat edge cases', () => {
     </div>`;
   const parsed = parseThreadPage(html, 'https://x.com/alice/status/99');
   assert.match(parsed.mainTweet.contentHtml, /href="https:\/\/x\.com\/bob"/);
+  assert.doesNotMatch(parsed.mainTweet.contentHtml, /nitter-mirror\.invalid/);
   assert.doesNotMatch(parsed.mainTweet.contentHtml, /<img/);
   assert.equal(parsed.mainTweet.likesCount, 1234);
   assert.equal(parsed.mainTweet.viewsCount, null);

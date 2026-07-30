@@ -13,6 +13,7 @@ export interface PdfIndexRefreshResult {
   added: number;
   updated: number;
   removed: number;
+  skippedTooLarge: number;
 }
 
 interface ExistingPdfIndexRow {
@@ -64,6 +65,7 @@ async function weeklyPdfPaths(dataDir: string): Promise<Array<{
   absolutePath: string;
   relativePath: string;
   mtimeMs: number;
+  size: number;
 }>> {
   const mediaRoot = path.join(dataDir, 'media');
   let weeks;
@@ -74,7 +76,12 @@ async function weeklyPdfPaths(dataDir: string): Promise<Array<{
     throw error;
   }
 
-  const files: Array<{ absolutePath: string; relativePath: string; mtimeMs: number }> = [];
+  const files: Array<{
+    absolutePath: string;
+    relativePath: string;
+    mtimeMs: number;
+    size: number;
+  }> = [];
   for (const week of weeks) {
     if (!week.isDirectory() || !WEEK_RE.test(week.name)) continue;
     for (const directory of PDF_DIRECTORIES) {
@@ -95,6 +102,7 @@ async function weeklyPdfPaths(dataDir: string): Promise<Array<{
             absolutePath,
             relativePath: path.posix.join('media', week.name, directory, entry.name),
             mtimeMs: metadata.mtimeMs,
+            size: metadata.size,
           });
         } catch {
           // A file may disappear between readdir and stat; the next refresh will see it.
@@ -107,9 +115,18 @@ async function weeklyPdfPaths(dataDir: string): Promise<Array<{
 
 export async function refreshPdfIndex(
   db: TwitterDatabase,
-  options: { dataDir?: string } = {},
+  options: { dataDir?: string; maxBytes?: number } = {},
 ): Promise<PdfIndexRefreshResult> {
   const dataDir = options.dataDir ?? env.DATA_DIR;
+  const configuredMaxBytes = Number.parseInt(
+    process.env.TWITTER_PDF_INDEX_MAX_BYTES ?? String(64 * 1024 * 1024),
+    10,
+  );
+  const maxBytes = options.maxBytes ?? (
+    Number.isSafeInteger(configuredMaxBytes) && configuredMaxBytes >= 0
+      ? configuredMaxBytes
+      : 64 * 1024 * 1024
+  );
   const existingRows = db.prepare(
     'SELECT pdf_path, mtime_ms FROM pdf_index',
   ).all() as ExistingPdfIndexRow[];
@@ -121,6 +138,7 @@ export async function refreshPdfIndex(
     added: 0,
     updated: 0,
     removed: 0,
+    skippedTooLarge: 0,
   };
 
   const upsert = db.prepare(`
@@ -141,7 +159,9 @@ export async function refreshPdfIndex(
     const previous = existing.get(file.relativePath);
     if (previous?.mtime_ms === file.mtimeMs) continue;
     result.scanned++;
-    const url = await subjectFromPdf(file.absolutePath);
+    const tooLarge = file.size > maxBytes;
+    const url = tooLarge ? null : await subjectFromPdf(file.absolutePath);
+    if (tooLarge) result.skippedTooLarge++;
     const urlNormalized = url ? normalizeIndexedUrl(url) : null;
     const urlNoQuery = urlNormalized ? stripUrlQuery(urlNormalized) : null;
     upsert.run({
@@ -156,10 +176,27 @@ export async function refreshPdfIndex(
     else result.added++;
   }
 
-  const remove = db.prepare('DELETE FROM pdf_index WHERE pdf_path = ?');
-  for (const row of existingRows) {
-    if (present.has(row.pdf_path)) continue;
-    result.removed += remove.run(row.pdf_path).changes;
+  if (files.length === 0 && existingRows.length > 0) {
+    console.warn(JSON.stringify({
+      event: 'twitter_pdf_index_prune_skipped',
+      reason: 'scan returned zero files while index is non-empty',
+      indexedRows: existingRows.length,
+      timestamp: new Date().toISOString(),
+    }));
+  } else {
+    const remove = db.prepare('DELETE FROM pdf_index WHERE pdf_path = ?');
+    for (const row of existingRows) {
+      if (present.has(row.pdf_path)) continue;
+      result.removed += remove.run(row.pdf_path).changes;
+    }
+  }
+  if (result.skippedTooLarge > 0) {
+    console.warn(JSON.stringify({
+      event: 'twitter_pdf_index_large_files_skipped',
+      count: result.skippedTooLarge,
+      maxBytes,
+      timestamp: new Date().toISOString(),
+    }));
   }
   return result;
 }

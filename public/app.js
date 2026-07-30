@@ -209,12 +209,15 @@ async function loadWeeks() {
 
     // Render week items
     weeksList.innerHTML = weeks.map(week => `
-      <div class="week-item" onclick="loadWeek('${week.path}')">
-        <h3>${week.path}</h3>
-        <p class="week-range">${formatWeekRange(week.path)}</p>
-        <p>${week.fileCount} file${week.fileCount !== 1 ? 's' : ''}</p>
+      <div class="week-item" data-week-path="${escapeHtml(week.path)}">
+        <h3>${escapeHtml(week.path)}</h3>
+        <p class="week-range">${escapeHtml(formatWeekRange(week.path))}</p>
+        <p>${escapeHtml(week.fileCount)} file${week.fileCount !== 1 ? 's' : ''}</p>
       </div>
     `).join('');
+    weeksList.querySelectorAll('.week-item').forEach((item) => {
+      item.addEventListener('click', () => loadWeek(item.dataset.weekPath));
+    });
 
   } catch (error) {
     console.error('Failed to load weeks:', error);
@@ -340,8 +343,8 @@ function renderFileRow(file, index) {
       <td class="col-checkbox">
         <input
           type="checkbox"
-          id="${checkboxId}"
-          data-path="${file.path}"
+          id="${escapeHtml(checkboxId)}"
+          data-path="${escapeHtml(file.path)}"
           onchange="handleFileCheckboxChange(this)"
         >
       </td>
@@ -393,7 +396,7 @@ function renderFailedRow(failure, index) {
       <td class="col-checkbox">
         <input
           type="checkbox"
-          id="${checkboxId}"
+          id="${escapeHtml(checkboxId)}"
           data-url="${escapeHtml(urlForRerun)}"
           data-failed="true"
           data-job-id="${escapeHtml(failure.jobId)}"
@@ -408,7 +411,7 @@ function renderFailedRow(failure, index) {
       </td>
       <td class="col-type">
         <a href="${escapeHtml(debugUrl)}" target="_blank" class="badge-failed-link" title="View debug PDF">
-          <span class="badge-failed" data-tooltip="${tooltipText}">${failureType}</span>
+          <span class="badge-failed" data-tooltip="${tooltipText}">${escapeHtml(failureType)}</span>
         </a>
       </td>
       <td class="col-size">-</td>
@@ -717,9 +720,9 @@ function renderFilteredItems() {
         const successCount = dayItems.length - failedCount;
         rows.push(`<tr class="day-sep">
           <td class="col-checkbox">
-            <input type="checkbox" class="day-select" data-day="${day}"
+            <input type="checkbox" class="day-select" data-day="${escapeHtml(day)}"
               onchange="handleDaySelectChange(this)" ${successCount === 0 ? 'disabled' : ''}
-              title="Select all saved files from ${label}">
+              title="Select all saved files from ${escapeHtml(label)}">
           </td>
           <td colspan="4">${label} — ${successCount} file(s), ${formatFileSize(dayBytes)}${failedNote}${outOfWeekNote}</td>
         </tr>`);
@@ -1302,9 +1305,12 @@ function formatDate(isoString) {
  * Escape HTML to prevent XSS
  */
 function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
+  return String(text ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
 }
 
 /**
@@ -1614,7 +1620,7 @@ async function uploadCookies() {
     const data = await response.json();
 
     if (response.ok) {
-      resultEl.innerHTML = `✓ ${data.message}`;
+      resultEl.innerHTML = `✓ ${escapeHtml(data.message)}`;
       resultEl.className = 'upload-result success';
 
       // Refresh status
@@ -1624,12 +1630,12 @@ async function uploadCookies() {
       selectedCookiesFile = null;
       document.getElementById('cookies-file').value = '';
     } else {
-      resultEl.innerHTML = `✗ ${data.error}`;
+      resultEl.innerHTML = `✗ ${escapeHtml(data.error)}`;
       resultEl.className = 'upload-result error';
       uploadBtn.disabled = false;
     }
   } catch (error) {
-    resultEl.innerHTML = `✗ Upload failed: ${error.message}`;
+    resultEl.innerHTML = `✗ Upload failed: ${escapeHtml(error.message)}`;
     resultEl.className = 'upload-result error';
     uploadBtn.disabled = false;
   }
@@ -1651,7 +1657,7 @@ async function toggleBundleList(btn) {
       return;
     }
     panel.innerHTML = dated.map((b) => `
-      <a href="/api/file/${b.path}" style="display:flex;justify-content:space-between;gap:12px;padding:6px 8px;border-radius:6px;text-decoration:none;color:inherit;font-size:.85rem;"
+      <a href="/api/file/${escapeHtml(b.path)}" style="display:flex;justify-content:space-between;gap:12px;padding:6px 8px;border-radius:6px;text-decoration:none;color:inherit;font-size:.85rem;"
          onmouseover="this.style.background='rgba(125,125,125,.12)'" onmouseout="this.style.background=''">
         <span>📦 ${escapeHtml(b.name)}</span>
         <span style="opacity:.65;">${formatFileSize(b.size)}</span>

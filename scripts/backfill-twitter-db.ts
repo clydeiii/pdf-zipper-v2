@@ -6,25 +6,15 @@
  * existed, preserving any matching weekly-bin PDF as capture provenance.
  *
  * Run:
- *   npx tsx --env-file=.env scripts/backfill-twitter-db.ts
- *   npx tsx --env-file=.env scripts/backfill-twitter-db.ts --days 7 --limit 5 --dry-run
- *   npx tsx --env-file=.env scripts/backfill-twitter-db.ts --include-existing --delay-ms 1500
- *
- * In Docker:
- *   docker exec -w /home/clyde/pdf-zipper-v2 pdfzipper-v2 npx tsx scripts/backfill-twitter-db.ts
+ *   KARAKEEP_API_BASE=http://localhost:3001 NITTER_HOST=http://localhost:8080 \
+ *     npx tsx --env-file=.env scripts/backfill-twitter-db.ts
+ *   KARAKEEP_API_BASE=http://localhost:3001 NITTER_HOST=http://localhost:8080 \
+ *     npx tsx --env-file=.env scripts/backfill-twitter-db.ts --days 7 --limit 5 --dry-run
  */
+import { existsSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
 import * as path from 'node:path';
 import { env } from '../src/config/env.js';
-import {
-  getTwitterDb,
-  hasCaptureForSubject,
-} from '../src/twitter/db.js';
-import {
-  harvestArticleToDb,
-  harvestTweetToDb,
-  TwitterHarvestError,
-} from '../src/twitter/harvest.js';
 import { buildUrlBaseName } from '../src/utils/save-pdf.js';
 
 const PAGE_LIMIT = 100;
@@ -261,6 +251,18 @@ function logSummary(summary: Summary, dryRun: boolean, interrupted: boolean): vo
 }
 
 async function main(): Promise<void> {
+  if (existsSync('/.dockerenv')) {
+    throw new Error(
+      'Refusing to run in Docker: this script must use the host-built better-sqlite3 binary. Run it on the host with KARAKEEP_API_BASE=http://localhost:3001 and NITTER_HOST=http://localhost:8080.',
+    );
+  }
+  const [
+    { getTwitterDb, hasCaptureForSubject },
+    { harvestArticleToDb, harvestTweetToDb, TwitterHarvestError },
+  ] = await Promise.all([
+    import('../src/twitter/db.js'),
+    import('../src/twitter/harvest.js'),
+  ]);
   const options = parseArgs(process.argv.slice(2));
   const cutoff = new Date(Date.now() - options.days * 24 * 60 * 60 * 1000);
   const summary: Summary = {

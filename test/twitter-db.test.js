@@ -70,6 +70,20 @@ test('migrates from scratch and preserves upsert invariants', async (t) => {
   assert.equal(row.replies_count, 9);
   assert.equal(row.likes_count, 12);
   assert.equal(row.views_count, 4);
+  assert.equal(row.stats_updated_at, '2025-01-02T01:00:00.000Z');
+
+  upsertTweet(db, tweet({
+    contentHtml: null,
+    contentText: null,
+    repliesCount: null,
+    retweetsCount: null,
+    likesCount: null,
+    viewsCount: null,
+  }), '2025-01-03T01:00:00.000Z');
+  assert.equal(
+    db.prepare('SELECT stats_updated_at FROM tweets WHERE id = ?').get('100').stats_updated_at,
+    '2025-01-02T01:00:00.000Z',
+  );
 
   upsertTweet(db, tweet({
     id: '200',

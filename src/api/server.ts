@@ -37,6 +37,16 @@ const __dirname = path.dirname(__filename);
  */
 export const app = express();
 
+app.use((_req: Request, res: Response, next) => {
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
+  );
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
+
 // Route-specific parsers keep the default API surface small while allowing
 // intentionally large Chrome-plugin uploads and cookies.txt imports.
 const defaultJsonParser = express.json({ limit: env.JSON_BODY_LIMIT });

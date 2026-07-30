@@ -34,6 +34,7 @@ test('PDF index normalizes subjects, skips unchanged files, and prunes deletions
     added: 2,
     updated: 0,
     removed: 0,
+    skippedTooLarge: 0,
   });
   assert.deepEqual(
     db.prepare(`
@@ -61,6 +62,7 @@ test('PDF index normalizes subjects, skips unchanged files, and prunes deletions
     added: 0,
     updated: 0,
     removed: 0,
+    skippedTooLarge: 0,
   });
 
   await unlink(urlPdf);
@@ -69,9 +71,38 @@ test('PDF index normalizes subjects, skips unchanged files, and prunes deletions
     added: 0,
     updated: 0,
     removed: 1,
+    skippedTooLarge: 0,
   });
   assert.deepEqual(
     db.prepare('SELECT pdf_path FROM pdf_index').all(),
     [{ pdf_path: 'media/2026-W30/pdfs/note.pdf' }],
   );
+});
+
+test('PDF index records oversized files once and protects a non-empty index from a zero scan', async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'twitter-pdf-index-large-'));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const pdfDir = path.join(dataDir, 'media', '2026-W30', 'pdfs');
+  await mkdir(pdfDir, { recursive: true });
+  const largePdf = path.join(pdfDir, 'large.pdf');
+  await writeFile(largePdf, await makePdf('https://example.com/too-large'));
+
+  const db = openTwitterDb({ dataDir });
+  t.after(() => db.close());
+  const first = await refreshPdfIndex(db, { dataDir, maxBytes: 1 });
+  assert.equal(first.scanned, 1);
+  assert.equal(first.skippedTooLarge, 1);
+  assert.deepEqual(
+    db.prepare('SELECT url, mtime_ms FROM pdf_index').all().map((row) => ({
+      url: row.url,
+      hasMtime: row.mtime_ms > 0,
+    })),
+    [{ url: null, hasMtime: true }],
+  );
+  assert.equal((await refreshPdfIndex(db, { dataDir, maxBytes: 1 })).scanned, 0);
+
+  await rm(path.join(dataDir, 'media'), { recursive: true, force: true });
+  const zeroScan = await refreshPdfIndex(db, { dataDir, maxBytes: 1 });
+  assert.equal(zeroScan.removed, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM pdf_index').get().count, 1);
 });

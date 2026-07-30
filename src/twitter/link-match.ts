@@ -1,3 +1,5 @@
+import { lookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
 import { normalizeIndexedUrl, refreshPdfIndex, stripUrlQuery } from './pdf-index.js';
 import type { TwitterDatabase } from './db.js';
 
@@ -43,15 +45,81 @@ export function isKnownShortUrl(value: string): boolean {
   }
 }
 
+export function isPrivateIpAddress(address: string): boolean {
+  const normalized = address.toLowerCase().split('%')[0];
+  const mappedV4 = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)?.[1];
+  if (mappedV4) return isPrivateIpAddress(mappedV4);
+  const mappedHex = normalized.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (mappedHex) {
+    const high = Number.parseInt(mappedHex[1], 16);
+    const low = Number.parseInt(mappedHex[2], 16);
+    return isPrivateIpAddress(
+      `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`,
+    );
+  }
+
+  if (isIP(normalized) === 4) {
+    const octets = normalized.split('.').map(Number);
+    return octets[0] === 10
+      || octets[0] === 127
+      || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31)
+      || (octets[0] === 192 && octets[1] === 168)
+      || (octets[0] === 169 && octets[1] === 254)
+      || octets[0] === 0;
+  }
+  if (isIP(normalized) === 6) {
+    return normalized === '::'
+      || normalized === '::1'
+      || /^f[cd]/.test(normalized)
+      || /^fe[89ab]/.test(normalized);
+  }
+  return true;
+}
+
+async function isPublicHttpTarget(value: string): Promise<boolean> {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  if (
+    (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
+    || parsed.username
+    || parsed.password
+  ) {
+    return false;
+  }
+  try {
+    const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
+    const addresses = await lookup(hostname, { all: true, verbatim: true });
+    return addresses.length > 0
+      && addresses.every((address) => !isPrivateIpAddress(address.address));
+  } catch {
+    return false;
+  }
+}
+
 export async function resolveShortUrl(url: string): Promise<string> {
   if (!isKnownShortUrl(url)) return url;
+  let current = url;
   try {
-    const response = await fetch(url, {
-      method: 'GET',
-      redirect: 'follow',
-      signal: AbortSignal.timeout(8_000),
-    });
-    return isHttpUrl(response.url) ? response.url : url;
+    for (let hop = 0; hop <= 5; hop++) {
+      if (!await isPublicHttpTarget(current)) return url;
+      const response = await fetch(current, {
+        method: 'HEAD',
+        redirect: 'manual',
+        signal: AbortSignal.timeout(8_000),
+      });
+      const location = response.headers.get('location');
+      await response.body?.cancel().catch(() => {});
+      if (response.status < 300 || response.status >= 400 || !location) {
+        return isHttpUrl(current) ? current : url;
+      }
+      if (hop === 5) return url;
+      current = new URL(location, current).toString();
+    }
+    return url;
   } catch {
     return url;
   }
