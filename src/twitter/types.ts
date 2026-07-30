@@ -59,6 +59,9 @@ export interface ParsedTweet {
   media: ParsedMedia[];
   card: ParsedCard | null;
   poll: ParsedPollOption[];
+  /** Community Note ("readers added context") shown under the tweet, when present. */
+  communityNoteHtml: string | null;
+  communityNoteText: string | null;
 }
 
 export interface ParsedThreadPage {

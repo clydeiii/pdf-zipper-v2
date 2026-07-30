@@ -50,7 +50,7 @@ test('migrates from scratch and preserves upsert invariants', async (t) => {
   const db = openTwitterDb({ dataDir });
   t.after(() => db.close());
 
-  assert.equal(db.pragma('user_version', { simple: true }), 4);
+  assert.equal(db.pragma('user_version', { simple: true }), 5);
   assert.equal(db.pragma('journal_mode', { simple: true }), 'wal');
   assert.equal(db.pragma('foreign_keys', { simple: true }), 1);
 
@@ -146,7 +146,7 @@ test('migration v2 adds article tweet_id without losing v1 data', async (t) => {
 
   const db = openTwitterDb({ dbPath });
   t.after(() => db.close());
-  assert.equal(db.pragma('user_version', { simple: true }), 4);
+  assert.equal(db.pragma('user_version', { simple: true }), 5);
   assert.ok(db.pragma('table_info(articles)').some((column) => column.name === 'tweet_id'));
   assert.deepEqual(
     db.prepare('SELECT id, title, body_text, tweet_id FROM articles WHERE id = ?').get('900'),

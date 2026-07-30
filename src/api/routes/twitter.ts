@@ -139,6 +139,7 @@ function tweetView(
   return {
     ...tweet,
     content_html: sanitizeTwitterHtml(tweet.content_html),
+    community_note_html: sanitizeTwitterHtml(tweet.community_note_html),
     user: username ? getUserByUsername(db, username) ?? null : null,
     media: mediaWithLocalPaths(db, id, username, videos),
     links: getTweetLinks(db, id),

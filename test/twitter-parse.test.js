@@ -194,3 +194,25 @@ test('keeps tolerant article date, link, and full-resolution media edge cases', 
   assert.equal(article.media[0].origUrl, 'https://video.twimg.com/tweet_video/BODY.mp4');
   assert.equal(article.coverImageUrl, 'https://pbs.twimg.com/media/COVER.jpg');
 });
+
+test('parses Community Note under the main tweet (real fixture)', async () => {
+  const parsed = parseThreadPage(
+    await fixture('community-note-thread.html'),
+    'https://x.com/ChrisRMcGuire/status/2082486881904668905',
+  );
+  const main = parsed.mainTweet;
+  assert.ok(main);
+  assert.match(main.communityNoteText || '', /Google Cloud provides deployment guides/);
+  // Nitter wraps note links in its own hostname; they must come back as t.co.
+  assert.match(main.communityNoteHtml || '', /https:\/\/t\.co\//);
+  assert.doesNotMatch(main.communityNoteHtml || '', /nitter\.net/);
+  // Note source links join the tweet's outbound links for PDF matching.
+  assert.ok(main.links.some((link) => link.startsWith('https://t.co/')));
+  // Tweets without a note stay null.
+  const noNote = parseThreadPage(
+    await fixture('jack-status-20.html'),
+    'https://x.com/jack/status/20',
+  );
+  assert.equal(noNote.mainTweet.communityNoteHtml, null);
+  assert.equal(noNote.mainTweet.communityNoteText, null);
+});

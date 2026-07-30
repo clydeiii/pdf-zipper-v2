@@ -207,6 +207,7 @@ function renderTweet(tweet, options = {}) {
             ${tweet.username ? `<span class="tweet-username">@${escapeHtml(tweet.username)}</span>` : ''}
           </div>
           <div class="tweet-content">${content}</div>
+          ${renderCommunityNote(tweet)}
           ${renderLinks(tweet.links || [])}
           ${renderMedia(tweet.media || [])}
           ${renderLinkCard(tweet.card)}
@@ -219,6 +220,18 @@ function renderTweet(tweet, options = {}) {
         </div>
       </div>
     </article>
+  `;
+}
+
+function renderCommunityNote(tweet) {
+  const noteHtml = tweet.community_note_html;
+  const noteText = tweet.community_note_text;
+  if (!noteHtml && !noteText) return '';
+  return `
+    <div class="community-note">
+      <div class="community-note-header">👥 Readers added context</div>
+      <div class="community-note-text">${noteHtml || escapeHtml(noteText)}</div>
+    </div>
   `;
 }
 

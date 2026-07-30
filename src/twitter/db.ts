@@ -11,7 +11,7 @@ import type {
 
 export type TwitterDatabase = Database.Database;
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 const MIGRATION_V1 = `
 CREATE TABLE users (
@@ -177,6 +177,12 @@ CREATE INDEX idx_pdf_index_url_normalized ON pdf_index(url_normalized);
 CREATE INDEX idx_pdf_index_url_no_query ON pdf_index(url_no_query);
 `;
 
+// Community Notes ("readers added context") rendered by Nitter under a tweet.
+const MIGRATION_V5 = `
+ALTER TABLE tweets ADD COLUMN community_note_html TEXT;
+ALTER TABLE tweets ADD COLUMN community_note_text TEXT;
+`;
+
 let singleton: TwitterDatabase | null = null;
 
 function nowIso(): string {
@@ -244,6 +250,19 @@ export function openTwitterDb(options: { dataDir?: string; dbPath?: string } = {
       db.exec(MIGRATION_V4);
       db.pragma('user_version = 4');
       db.exec('COMMIT');
+      version = 4;
+    } catch (error) {
+      db.exec('ROLLBACK');
+      db.close();
+      throw error;
+    }
+  }
+  if (version === 4) {
+    db.exec('BEGIN');
+    try {
+      db.exec(MIGRATION_V5);
+      db.pragma('user_version = 5');
+      db.exec('COMMIT');
     } catch (error) {
       db.exec('ROLLBACK');
       db.close();
@@ -309,17 +328,21 @@ export function upsertTweet(db: TwitterDatabase, tweet: ParsedTweet, timestamp =
       id, username, content_html, content_text, published_at, reply_to_id,
       reply_to_users, quoted_id, retweeted_by, replies_count, retweets_count,
       likes_count, views_count, stats_updated_at, source_url, is_stub,
+      community_note_html, community_note_text,
       first_seen_at, updated_at
     ) VALUES (
       @id, @username, @contentHtml, @contentText, @publishedAt, @replyToId,
       @replyToUsers, @quotedId, @retweetedBy, @repliesCount, @retweetsCount,
       @likesCount, @viewsCount, @timestamp, @sourceUrl, @isStub,
+      @communityNoteHtml, @communityNoteText,
       @timestamp, @timestamp
     )
     ON CONFLICT(id) DO UPDATE SET
       username = COALESCE(excluded.username, tweets.username),
       content_html = COALESCE(excluded.content_html, tweets.content_html),
       content_text = COALESCE(excluded.content_text, tweets.content_text),
+      community_note_html = COALESCE(excluded.community_note_html, tweets.community_note_html),
+      community_note_text = COALESCE(excluded.community_note_text, tweets.community_note_text),
       published_at = COALESCE(excluded.published_at, tweets.published_at),
       reply_to_id = COALESCE(excluded.reply_to_id, tweets.reply_to_id),
       reply_to_users = COALESCE(excluded.reply_to_users, tweets.reply_to_users),
@@ -349,6 +372,8 @@ export function upsertTweet(db: TwitterDatabase, tweet: ParsedTweet, timestamp =
     viewsCount: tweet.viewsCount,
     sourceUrl: nullable(tweet.sourceUrl),
     isStub: tweet.isStub ? 1 : 0,
+    communityNoteHtml: nullable(tweet.communityNoteHtml),
+    communityNoteText: nullable(tweet.communityNoteText),
     timestamp,
   });
 

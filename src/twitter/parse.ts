@@ -42,7 +42,13 @@ function statusParts(href: string | undefined): { username: string; id: string }
 }
 
 function canonicalTwitterHref(href: string): string {
-  if (/^https?:\/\//i.test(href)) return href;
+  if (/^https?:\/\//i.test(href)) {
+    // Community-note links arrive wrapped in Nitter's configured hostname
+    // (e.g. https://nitter.net/t.co/abc) — unwrap back to the real t.co URL.
+    const wrappedShort = href.match(/^https?:\/\/[^/]+\/(t\.co\/.+)$/i);
+    if (wrappedShort) return `https://${wrappedShort[1]}`;
+    return href;
+  }
   if (href.startsWith('/') && !href.startsWith('//')) {
     return `https://x.com${href}`;
   }
@@ -355,6 +361,14 @@ function parseTweetElement(
   const dateTitle = item.find('.tweet-date a[title]').first().attr('title');
   const contentHtml = canonicalizeHtml(content);
   const card = parseCard(item);
+  const note = item.find('.community-note .community-note-text').first();
+  const communityNoteHtml = canonicalizeHtml(note);
+  const links = extractExternalLinksFromHtml(content.html(), { cardUrl: card?.url });
+  // Community-note source links (canonicalized so t.co survives the Nitter wrap)
+  // are prime capture-linkage candidates — the note usually cites the correction.
+  for (const noteLink of extractExternalLinksFromHtml(communityNoteHtml)) {
+    if (!links.includes(noteLink)) links.push(noteLink);
+  }
 
   return {
     id,
@@ -374,10 +388,12 @@ function parseTweetElement(
     viewsCount: statFor(item, 'icon-views'),
     sourceUrl: `https://x.com/${username}/status/${id}`,
     isStub: options.isStub ?? false,
-    links: extractExternalLinksFromHtml(content.html(), { cardUrl: card?.url }),
+    links,
     media: parseMedia($, item),
     card,
     poll: parsePoll(item),
+    communityNoteHtml,
+    communityNoteText: nonEmpty(note.text()),
   };
 }
 
@@ -430,6 +446,8 @@ function parseQuote($: CheerioAPI, quoteElement: AnyNode): ParsedTweet | null {
     media,
     card: null,
     poll: [],
+    communityNoteHtml: null,
+    communityNoteText: null,
   };
 }
 
