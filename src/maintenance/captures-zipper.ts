@@ -56,6 +56,17 @@ const ENABLED = process.env.CAPTURES_ZIP_ENABLED !== 'false';
  */
 const INCLUDE_TWITTER = process.env.CAPTURES_INCLUDE_TWITTER !== 'false';
 /**
+ * Imagestore files ship with a wider window than the rest of the bundle
+ * (default 48h vs 24h) so one missed nightly pickup self-heals: every image
+ * appears in two consecutive bundles, and content-addressing makes the
+ * double-ship idempotent for the consumer. The DB snapshot is full nightly,
+ * so images are the only diff-shaped twitter data.
+ */
+const TWITTER_IMAGE_WINDOW_HOURS = parseInt(
+  process.env.CAPTURES_TWITTER_IMAGE_WINDOW_HOURS || String(WINDOW_HOURS * 2),
+  10,
+);
+/**
  * Captures are mostly incompressible media (MP3/MP4); PDFs are the only real
  * win. Level 1 keeps the nightly run fast on multi-GB bundles.
  */
@@ -247,7 +258,8 @@ export async function buildCapturesBundle(): Promise<BundleResult> {
   let twitterDbBytes: number | null = null;
   const dbSnapshotPath = path.join(capturesDir, '.twitter-db-snapshot.tmp');
   if (INCLUDE_TWITTER) {
-    twitterImages = await collectTwitterImageFiles(dataDir, cutoffMs);
+    const imageCutoffMs = now.getTime() - TWITTER_IMAGE_WINDOW_HOURS * ONE_HOUR_MS;
+    twitterImages = await collectTwitterImageFiles(dataDir, imageCutoffMs);
     twitterDbBytes = await snapshotTwitterDb(dataDir, dbSnapshotPath);
   }
 
@@ -292,7 +304,7 @@ export async function buildCapturesBundle(): Promise<BundleResult> {
       ...(twitterDbBytes !== null || twitterImages.length
         ? [
             `twitter/twitter.db: ${twitterDbBytes !== null ? `full snapshot, ${formatBytes(twitterDbBytes)}` : 'absent'}`,
-            `twitter/imagestore: ${twitterImages.length} image(s) new this window (content-addressed; accumulate across bundles)`,
+            `twitter/imagestore: ${twitterImages.length} image(s) from the last ${TWITTER_IMAGE_WINDOW_HOURS}h (overlapping window — content-addressed; accumulate across bundles, duplicates are identical)`,
           ]
         : []),
       '',

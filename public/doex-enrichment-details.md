@@ -87,11 +87,16 @@ New as of 2026-07-29. Every bundle carries:
   incremental): always replace your previous copy with the newest bundle's.
   Harvested from the self-hosted Nitter render of every bookmarked
   x.com/twitter.com post at capture time.
-- **`twitter/imagestore/<xx>/<sha256>.<ext>`** — ONLY images new in this
-  bundle's window. The store is content-addressed (path = sha256 of bytes);
-  accumulate the union across bundles and every `*_file` column in the DB
-  resolves. Identical images are stored once regardless of how many
-  posts/users reference them.
+- **`twitter/imagestore/<xx>/<sha256>.<ext>`** — images from the last 48h
+  (double the bundle window, so each image appears in two consecutive
+  bundles and one missed nightly pickup self-heals). The store is
+  content-addressed (path = sha256 of bytes) — accumulate the union across
+  bundles, overwrite-or-skip on collision (duplicates are byte-identical),
+  and every `*_file` column in the DB resolves. Identical images are stored
+  once regardless of how many posts/users reference them. Gap check: the
+  `images` table lists every file the DB references — any listed `file`
+  missing from your accumulated store means a skipped bundle older than the
+  overlap; dated bundles are retained 7 days for recovery.
 
 Tables (schema version in `PRAGMA user_version`; columns may grow over time —
 read by name, not position):
