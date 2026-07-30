@@ -47,6 +47,15 @@ const RUN_HOUR = parseInt(process.env.CAPTURES_ZIP_HOUR || '0', 10);
 /** Set CAPTURES_ZIP_ENABLED=false to disable. */
 const ENABLED = process.env.CAPTURES_ZIP_ENABLED !== 'false';
 /**
+ * Include the structured Twitter/X database + its imagestore. The DB ships as
+ * a full consistent snapshot every night (small relative to media); imagestore
+ * files ride the same mtime window as captures — the consuming side
+ * accumulates bundles, so every image referenced by a DB row arrived in the
+ * bundle for the night it was first downloaded. Set
+ * CAPTURES_INCLUDE_TWITTER=false to disable.
+ */
+const INCLUDE_TWITTER = process.env.CAPTURES_INCLUDE_TWITTER !== 'false';
+/**
  * Captures are mostly incompressible media (MP3/MP4); PDFs are the only real
  * win. Level 1 keeps the nightly run fast on multi-GB bundles.
  */
@@ -126,6 +135,75 @@ async function collectRecentFiles(mediaDir: string, cutoffMs: number): Promise<R
   return files;
 }
 
+/**
+ * Collect imagestore files (data/twitter/imagestore/<xx>/<sha>.<ext>) modified
+ * at or after `cutoffMs`. Zip paths mirror the on-disk layout under twitter/
+ * so the consuming side can resolve the DB's `file` columns directly.
+ * Exported for tests.
+ */
+export async function collectTwitterImageFiles(dataDir: string, cutoffMs: number): Promise<RecentFile[]> {
+  const files: RecentFile[] = [];
+  const storeDir = path.join(dataDir, 'twitter', 'imagestore');
+
+  let shards: string[];
+  try {
+    shards = await readdir(storeDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return files;
+    throw err;
+  }
+
+  for (const shard of shards) {
+    const dir = path.join(storeDir, shard);
+    let entries: string[];
+    try {
+      const s = await stat(dir);
+      if (!s.isDirectory()) continue;
+      entries = await readdir(dir);
+    } catch { continue; }
+
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry);
+      try {
+        const s = await stat(fullPath);
+        if (!s.isFile()) continue;
+        if (s.mtimeMs < cutoffMs) continue;
+        files.push({
+          fullPath,
+          zipPath: path.posix.join('twitter', 'imagestore', shard, entry),
+          size: s.size,
+        });
+      } catch { /* ignore unreadable entries */ }
+    }
+  }
+
+  return files;
+}
+
+/**
+ * Snapshot the live twitter.db (WAL, concurrent writers) into `destPath`
+ * using SQLite's online backup API. Returns the snapshot size, or null when
+ * there is no database yet or the backup failed (best-effort — the nightly
+ * bundle must not fail on this).
+ */
+async function snapshotTwitterDb(dataDir: string, destPath: string): Promise<number | null> {
+  const dbPath = path.join(dataDir, 'twitter', 'twitter.db');
+  if (!fs.existsSync(dbPath)) return null;
+  try {
+    const { getTwitterDb } = await import('../twitter/db.js');
+    await getTwitterDb().backup(destPath);
+    return (await stat(destPath)).size;
+  } catch (err) {
+    console.warn(JSON.stringify({
+      event: 'captures_bundle_warning',
+      error: `twitter.db snapshot failed: ${err instanceof Error ? err.message : String(err)}`,
+      timestamp: new Date().toISOString(),
+    }));
+    await unlink(destPath).catch(() => {});
+    return null;
+  }
+}
+
 /** Prune dated bundles to the RETENTION_DAYS newest. Never touches -latest.zip. */
 async function pruneOldBundles(capturesDir: string): Promise<void> {
   try {
@@ -144,6 +222,10 @@ export interface BundleResult {
   bytesUncompressed: number;
   bytesZip: number;
   zipFile: string;
+  /** Imagestore files new in this window (0 when the twitter section is disabled/absent). */
+  twitterImageCount: number;
+  /** Size of the full twitter.db snapshot, or null when disabled/absent. */
+  twitterDbBytes: number | null;
 }
 
 /**
@@ -159,7 +241,19 @@ export async function buildCapturesBundle(): Promise<BundleResult> {
   const now = new Date();
   const cutoffMs = now.getTime() - WINDOW_HOURS * ONE_HOUR_MS;
   const files = await collectRecentFiles(mediaDir, cutoffMs);
-  const bytesUncompressed = files.reduce((sum, f) => sum + f.size, 0);
+
+  // Structured Twitter/X data: full DB snapshot + window's imagestore files.
+  let twitterImages: RecentFile[] = [];
+  let twitterDbBytes: number | null = null;
+  const dbSnapshotPath = path.join(capturesDir, '.twitter-db-snapshot.tmp');
+  if (INCLUDE_TWITTER) {
+    twitterImages = await collectTwitterImageFiles(dataDir, cutoffMs);
+    twitterDbBytes = await snapshotTwitterDb(dataDir, dbSnapshotPath);
+  }
+
+  const bytesUncompressed = files.reduce((sum, f) => sum + f.size, 0)
+    + twitterImages.reduce((sum, f) => sum + f.size, 0)
+    + (twitterDbBytes ?? 0);
 
   // Local calendar date (process TZ) so the dated bundle matches the day the
   // user perceives at midnight, consistent with the benchmarks harvester.
@@ -195,6 +289,12 @@ export async function buildCapturesBundle(): Promise<BundleResult> {
       `window: last ${WINDOW_HOURS}h (files modified >= ${new Date(cutoffMs).toISOString()})`,
       `files: ${files.length}`,
       `uncompressed: ${formatBytes(bytesUncompressed)}`,
+      ...(twitterDbBytes !== null || twitterImages.length
+        ? [
+            `twitter/twitter.db: ${twitterDbBytes !== null ? `full snapshot, ${formatBytes(twitterDbBytes)}` : 'absent'}`,
+            `twitter/imagestore: ${twitterImages.length} image(s) new this window (content-addressed; accumulate across bundles)`,
+          ]
+        : []),
       '',
       'See doex-enrichment-details.md for the full metadata contract embedded in these files.',
       '',
@@ -220,8 +320,17 @@ export async function buildCapturesBundle(): Promise<BundleResult> {
       archive.file(f.fullPath, { name: f.zipPath });
     }
 
+    if (twitterDbBytes !== null) {
+      archive.file(dbSnapshotPath, { name: 'twitter/twitter.db' });
+    }
+    for (const f of twitterImages) {
+      archive.file(f.fullPath, { name: f.zipPath });
+    }
+
     void archive.finalize();
   });
+
+  await unlink(dbSnapshotPath).catch(() => {});
 
   await rename(tmpPath, finalPath);
   // Hardlink -latest to the dated bundle (same dir, same fs) so the multi-GB
@@ -242,6 +351,8 @@ export async function buildCapturesBundle(): Promise<BundleResult> {
     bytesUncompressed,
     bytesZip,
     zipFile: `${CAPTURES_SUBDIR}/${zipName}`,
+    twitterImageCount: twitterImages.length,
+    twitterDbBytes,
   };
 }
 
@@ -261,6 +372,9 @@ async function runWithNotify(): Promise<void> {
       fields: [
         { name: 'Zip', value: formatBytes(result.bytesZip), inline: true },
         { name: 'Files', value: `${result.fileCount}`, inline: true },
+        ...(result.twitterDbBytes !== null
+          ? [{ name: 'Twitter DB', value: `${formatBytes(result.twitterDbBytes)} + ${result.twitterImageCount} image(s)`, inline: true }]
+          : []),
         { name: 'Download', value: '/api/file/captures/captures-latest.zip', inline: false },
       ],
     });

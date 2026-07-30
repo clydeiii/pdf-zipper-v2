@@ -96,6 +96,16 @@ Video transcripts (`src/media/video-enrichment.ts`) must also run through `forma
 ### WinAnsi Sanitization
 Podcast/transcript PDFs use pdf-lib StandardFonts (WinAnsi-only). LLM output contains invisible chars (U+2060 Word Joiner, zero-width spaces, smart quotes). `sanitizeForWinAnsi` in `src/podcasts/pdf-generator.ts` must stay — removing it breaks PDF generation on certain transcripts.
 
+### Structured Twitter/X Database (`src/twitter/`)
+Every Nitter tweet capture ALSO harvests structured data (plain HTTP fetch of Nitter's server-rendered HTML — no Playwright) into `data/twitter/twitter.db` (better-sqlite3, WAL, versioned migrations via `PRAGMA user_version`) plus a sha256 content-addressed imagestore at `data/twitter/imagestore/`. Non-obvious rules:
+- **Harvest is non-fatal and additive** — it runs after `savePdfToWeeklyBin` in the worker, gated by `TWITTER_DB_ENABLED`; a harvest failure must never fail the conversion job.
+- **X Articles are `/status/` URLs** — the article id EQUALS the announcing tweet's status id, rendered at Nitter `/i/article/<id>`. The converter hops to the article page for the PDF (≥600-char body gate, direct-x.com fallback preserved); `harvestTweetToDb` chains the article automatically. Route harvests by URL shape, not `isXArticle`.
+- **Nitter rate limits govern harvest pacing**: the single-session instance affords roughly 90-130 thread fetches per ~45 min before `ConversationTimeline` 429s. The backfill script (`scripts/backfill-twitter-db.ts`) has a circuit breaker (failure streak → 15-min pause); keep delays conservative.
+- **Line breaks are literal newlines** in `content_text`/`content_html` (Nitter renders with `white-space: pre-wrap`) — preserve them; the viewer depends on it.
+- **tweet_links + pdf_index**: outbound links are matched against the PDF library via the Info Dict `Subject` URL (normalized). `scripts/rematch-twitter-links.ts` re-matches after new captures land.
+- **Scripts run on the HOST** (`npx tsx --env-file=.env`, with `KARAKEEP_API_BASE=http://localhost:3001 NITTER_HOST=http://localhost:8080`): the bind-mounted repo's `better-sqlite3` is host-glibc and fails inside the bookworm container.
+- Viewer at `/twitter.html`; read-only API under `/api/twitter/*`. Nightly captures zip ships `twitter/twitter.db` (full snapshot via SQLite online backup) + window's imagestore files (`CAPTURES_INCLUDE_TWITTER`); the schema is documented for the consuming side in `public/doex-enrichment-details.md` — **update it in the same commit as any schema/semantics change**.
+
 ### Nightly Static Bundles (`/api/file/...`)
 Two nightly ZIPs are published as stable static URLs (served by the generic `serve.ts` `/file/*` route straight from DATA_DIR — no dedicated route, no cache):
 - **`/api/file/captures/captures-latest.zip`** — every capture (PDF/MP3/MP4/transcript) with mtime in the last 24h, structured `{ISO-week}/{type}/{file}` with a self-describing `MANIFEST.txt`. Built in-process by `src/maintenance/captures-zipper.ts` (`setTimeout` to next midnight, then `setInterval` 24h), registered in `index.ts` alongside the other maintenance timers. Keeps 7 dated bundles (`captures-YYYY-MM-DD.zip`); `-latest` is never pruned. Tunables: `CAPTURES_ZIP_ENABLED`, `CAPTURES_ZIP_HOUR` (default 0), `CAPTURES_WINDOW_HOURS` (24), `CAPTURES_ZIP_RETENTION_DAYS` (7).
