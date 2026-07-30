@@ -363,6 +363,33 @@ export interface AnalyzePdfContentOptions {
    * those should only fail when the PDF is truly blank.
    */
   lenient?: boolean;
+  /**
+   * URL the PDF was captured from, when known. A domain-root URL
+   * ("https://example.com/") is a homepage/landing page, not an article —
+   * hero art + short CTA copy is its complete form (real case:
+   * ai-reports.org, 2.3MB of hero imagery with 855 chars of landing copy,
+   * rejected as "truncated article"). Root captures skip the checks that
+   * assume article semantics (soft paywall, stealth-truncation markers,
+   * reading-time mismatch, large-PDF/low-density truncation) but keep the
+   * hostile-page checks and the minimum-chars floor, so a blank or
+   * bot-blocked homepage shell still fails.
+   */
+  sourceUrl?: string;
+}
+
+/**
+ * True when the capture URL is a bare domain root. A query string
+ * disqualifies it (WordPress default permalinks serve articles at
+ * "/?p=123"), which fails safe toward the strict article checks.
+ */
+function isDomainRootUrl(sourceUrl: string | undefined): boolean {
+  if (!sourceUrl) return false;
+  try {
+    const parsed = new URL(sourceUrl);
+    return (parsed.pathname === '/' || parsed.pathname === '') && parsed.search === '';
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -406,6 +433,10 @@ export async function analyzePdfContent(
       charsPerKb: Math.round(charsPerKb * 10) / 10,
       extractedText: normalizedText,
     };
+
+    // Domain-root capture: a landing page has no article body to truncate,
+    // so the article-shaped heuristics below don't apply (see option docs).
+    const homepage = isDomainRootUrl(options.sourceUrl);
 
     // Check 0: Error page detection (404, page not found, etc.)
     // Only flag if content is short - real error pages don't have much content
@@ -475,7 +506,7 @@ export async function analyzePdfContent(
     // These could legitimately appear in article text (e.g., a blog post mentioning
     // "subscribe to my newsletter for $7/month").
     const MAX_CHARS_FOR_SOFT_PAYWALL = 5000;
-    if (!options.lenient && charCount < MAX_CHARS_FOR_SOFT_PAYWALL) {
+    if (!options.lenient && !homepage && charCount < MAX_CHARS_FOR_SOFT_PAYWALL) {
       for (const pattern of SOFT_PAYWALL_PATTERNS) {
         if (pattern.test(normalizedText)) {
           const match = normalizedText.match(pattern)?.[0];
@@ -496,7 +527,7 @@ export async function analyzePdfContent(
     // when an end-of-article marker appears very early in a short doc, the
     // body got cut off. Skipped above the ceiling so legit medium-length
     // articles aren't flagged.
-    if (!options.lenient && charCount < TRUNCATED_BODY_CEILING) {
+    if (!options.lenient && !homepage && charCount < TRUNCATED_BODY_CEILING) {
       // A page whose own reading-time badge is consistent with the body we
       // extracted is complete — an early related-content header is layout
       // noise (claude.com/blog puts "Related posts" mid-template on full
@@ -547,7 +578,7 @@ export async function analyzePdfContent(
     // lede + nothing else (Economist, Medium, etc.) without any explicit
     // "subscribe" text. Single-page small PDFs slip past the size/ratio
     // checks below, so this is often the only signal.
-    if (!options.lenient) {
+    if (!options.lenient && !homepage) {
       const readTime = extractAdvertisedReadTime(normalizedText);
       if (readTime) {
         const expectedMinChars = readTime.minutes * CHARS_PER_READING_MINUTE;
@@ -596,6 +627,7 @@ export async function analyzePdfContent(
     const legitimatelyShort = isLegitimatelyShortPage(normalizedText);
     if (
       !options.lenient &&
+      !homepage &&
       pdfSize > LARGE_PDF_THRESHOLD &&
       charCount < MIN_CHARS_FOR_LARGE_PDF &&
       !legitimatelyShort
@@ -637,7 +669,7 @@ export async function analyzePdfContent(
     const hasSufficientChars = charCount >= SUFFICIENT_CHARS_BYPASS_RATIO;
     const hasSufficientCharsPerPage = charsPerPage >= MIN_CHARS_PER_PAGE_BYPASS;
 
-    if (!options.lenient && pageCount > 1 && charsPerKb < MIN_CHARS_PER_KB && !hasSufficientChars && !hasSufficientCharsPerPage && !legitimatelyShort) {
+    if (!options.lenient && !homepage && pageCount > 1 && charsPerKb < MIN_CHARS_PER_KB && !hasSufficientChars && !hasSufficientCharsPerPage && !legitimatelyShort) {
       return {
         ...baseResult,
         passed: false,
