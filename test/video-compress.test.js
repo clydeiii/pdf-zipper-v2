@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { shouldCompressVideo } from '../dist/media/video-compress.js';
 
-const OPTS = { enabled: true, kbpsPerMegapixel: 2000, maxHeight: 720 };
+const OPTS = { enabled: true, kbpsPerMegapixel: 2000, maxHeight: 720, maxFps: 30 };
 
 // Real files from data/media/2026-W26 drove these cases.
 
@@ -96,6 +96,58 @@ test('disabled flag skips everything', () => {
   );
   assert.equal(d.compress, false);
   assert.equal(d.reason, 'disabled');
+});
+
+test('prod 480p policy: a plain 720p clip now downscales', () => {
+  // docker-compose pins VIDEO_COMPRESS_MAX_HEIGHT=480.
+  const d = shouldCompressVideo(
+    { sizeBytes: 55 * 1024 * 1024, durationSec: 160, width: 1280, height: 720, fps: 30 },
+    { ...OPTS, maxHeight: 480 }
+  );
+  assert.equal(d.compress, true);
+  assert.equal(d.reason, 'oversize');
+  assert.deepEqual([d.targetWidth, d.targetHeight], [854, 480]);
+});
+
+test('60fps source gets a 30fps resample on top of the downscale', () => {
+  const d = shouldCompressVideo(
+    { sizeBytes: 2702123128, durationSec: 2198.8, width: 3840, height: 2160, fps: 60 },
+    OPTS
+  );
+  assert.equal(d.compress, true);
+  assert.equal(d.targetFps, 30);
+});
+
+test('NTSC 29.97 and exact-30 sources are never resampled', () => {
+  for (const fps of [30000 / 1001, 30]) {
+    const d = shouldCompressVideo(
+      { sizeBytes: 55 * 1024 * 1024, durationSec: 160, width: 1280, height: 720, fps },
+      OPTS
+    );
+    assert.equal(d.targetFps, undefined, `fps ${fps} should not resample`);
+  }
+});
+
+test('high fps alone triggers a re-encode on an otherwise-lean clip', () => {
+  // 480p 60fps at ~1.1 Mbps: below the bitrate floor, within maxHeight,
+  // but double the fps cap.
+  const d = shouldCompressVideo(
+    { sizeBytes: 8.25 * 1024 * 1024, durationSec: 60, width: 854, height: 480, fps: 60 },
+    { ...OPTS, maxHeight: 480 }
+  );
+  assert.equal(d.compress, true);
+  assert.equal(d.reason, 'high_fps');
+  assert.equal(d.targetFps, 30);
+});
+
+test('missing fps disables only the fps cap, not the other triggers', () => {
+  const d = shouldCompressVideo(
+    { sizeBytes: 2702123128, durationSec: 2198.8, width: 3840, height: 2160, fps: null },
+    OPTS
+  );
+  assert.equal(d.compress, true);
+  assert.equal(d.reason, 'oversize');
+  assert.equal(d.targetFps, undefined);
 });
 
 test('encode timeout stays an integer for float ffprobe durations', () => {

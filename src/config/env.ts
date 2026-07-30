@@ -113,8 +113,10 @@ interface EnvConfig {
   VIDEO_COMPRESS_KBPS_PER_MEGAPIXEL: number;
   /** x264 CRF for the re-encode; lower = higher quality/bigger (default: 26) */
   VIDEO_COMPRESS_CRF: number;
-  /** Downscale videos whose SHORTER side exceeds this (default: 720). Karakeep's yt-dlp grabs YouTube at 360p for reference. */
+  /** Downscale videos whose SHORTER side exceeds this (default: 720; compose pins 480). Karakeep's yt-dlp grabs YouTube at 360p for reference. */
   VIDEO_COMPRESS_MAX_HEIGHT: number;
+  /** Resample videos whose frame rate exceeds this (default: 30). 29.97 NTSC never triggers. */
+  VIDEO_COMPRESS_MAX_FPS: number;
   /** Optional llama.cpp OpenAI-compatible server for round-robin/failover on text-only LLM calls */
   LLAMACPP_HOST?: string;
   /** Bearer token for the llama.cpp server */
@@ -236,6 +238,7 @@ export const env: EnvConfig = {
   VIDEO_COMPRESS_KBPS_PER_MEGAPIXEL: parseIntegerEnv('VIDEO_COMPRESS_KBPS_PER_MEGAPIXEL', 2000, { min: 100 }),
   VIDEO_COMPRESS_CRF: parseIntegerEnv('VIDEO_COMPRESS_CRF', 26, { min: 0, max: 51 }),
   VIDEO_COMPRESS_MAX_HEIGHT: parseIntegerEnv('VIDEO_COMPRESS_MAX_HEIGHT', 720, { min: 144 }),
+  VIDEO_COMPRESS_MAX_FPS: parseIntegerEnv('VIDEO_COMPRESS_MAX_FPS', 30, { min: 10 }),
   // Optional llama.cpp failover/round-robin endpoint for text-only LLM calls
   LLAMACPP_HOST: process.env.LLAMACPP_HOST,
   LLAMACPP_API_KEY: process.env.LLAMACPP_API_KEY,

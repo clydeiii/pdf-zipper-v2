@@ -105,6 +105,11 @@ services:
       - MAX_PODCAST_AUDIO_MB=750
       - PODCAST_DOWNLOAD_TIMEOUT_MS=600000
       - MAX_VIDEO_TRANSCRIBE_MINUTES=360
+
+      # Aggressive video compression: X grabs arrive up to 4K/60fps; the KB
+      # only needs watchable quality, so cap at 480p short-side / 30fps.
+      - VIDEO_COMPRESS_MAX_HEIGHT=480
+      - VIDEO_COMPRESS_MAX_FPS=30
       - HOME=/home/clyde
 
     ports:

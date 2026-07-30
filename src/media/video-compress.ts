@@ -35,6 +35,7 @@ export interface VideoProbe {
   durationSec: number | null;
   width: number | null;
   height: number | null;
+  fps: number | null;
 }
 
 export interface CompressDecision {
@@ -45,6 +46,8 @@ export interface CompressDecision {
   /** Exact output dimensions when downscaling (short side capped at maxHeight). */
   targetWidth?: number;
   targetHeight?: number;
+  /** Output frame rate when the source exceeds maxFps. */
+  targetFps?: number;
 }
 
 export interface CompressOptions {
@@ -53,6 +56,8 @@ export interface CompressOptions {
   kbpsPerMegapixel: number;
   /** Cap on the SHORTER frame side (portrait-safe "720p" semantics). */
   maxHeight: number;
+  /** Cap on frame rate; sources above this are resampled down to it. */
+  maxFps: number;
 }
 
 /**
@@ -67,8 +72,11 @@ export interface CompressOptions {
  * 2. Fat bitrate at ≤maxHeight: kbps > max(floor, kbpsPerMegapixel × frame
  *    megapixels). The 1200 kbps floor keeps every observed YouTube grab
  *    (≤500 kbps) and lean small X clips untouched.
+ * 3. High frame rate: fps > maxFps (default 30) → resample. Also applied
+ *    opportunistically whenever a re-encode fires for reasons 1-2.
  *
- * Missing probe data fails open — keep the original untouched.
+ * Missing probe data fails open — keep the original untouched (a null fps
+ * only disables the fps cap, not the other triggers).
  */
 export function shouldCompressVideo(probe: VideoProbe, opts: CompressOptions): CompressDecision {
   if (!opts.enabled) {
@@ -83,6 +91,10 @@ export function shouldCompressVideo(probe: VideoProbe, opts: CompressOptions): C
 
   const kbps = Math.round((probe.sizeBytes * 8) / probe.durationSec / 1000);
   const shortSide = Math.min(probe.width, probe.height);
+  // +0.5 tolerance so NTSC 29.97 (and encoder jitter around exactly 30)
+  // never triggers a resample against a maxFps of 30.
+  const targetFps =
+    probe.fps && probe.fps > opts.maxFps + 0.5 ? opts.maxFps : undefined;
 
   if (shortSide > opts.maxHeight) {
     // Scale so the short side lands on maxHeight; x264 needs even dimensions.
@@ -94,6 +106,7 @@ export function shouldCompressVideo(probe: VideoProbe, opts: CompressOptions): C
       kbps,
       targetWidth: even(probe.width),
       targetHeight: even(probe.height),
+      targetFps,
     };
   }
 
@@ -102,10 +115,13 @@ export function shouldCompressVideo(probe: VideoProbe, opts: CompressOptions): C
     Math.max(MIN_COMPRESS_KBPS_FLOOR, opts.kbpsPerMegapixel * megapixels)
   );
 
-  if (kbps <= thresholdKbps) {
-    return { compress: false, reason: 'bitrate_ok', kbps, thresholdKbps };
+  if (kbps > thresholdKbps) {
+    return { compress: true, reason: 'bitrate_high', kbps, thresholdKbps, targetFps };
   }
-  return { compress: true, reason: 'bitrate_high', kbps, thresholdKbps };
+  if (targetFps) {
+    return { compress: true, reason: 'high_fps', kbps, thresholdKbps, targetFps };
+  }
+  return { compress: false, reason: 'bitrate_ok', kbps, thresholdKbps };
 }
 
 /** Probe duration + dimensions via ffprobe. Nulls on failure (fail open). */
@@ -115,7 +131,7 @@ async function probeVideo(filePath: string): Promise<VideoProbe> {
     const { stdout } = await execFileAsync('ffprobe', [
       '-v', 'error',
       '-select_streams', 'v:0',
-      '-show_entries', 'stream=width,height',
+      '-show_entries', 'stream=width,height,avg_frame_rate',
       '-show_entries', 'format=duration',
       '-of', 'json',
       filePath,
@@ -128,10 +144,21 @@ async function probeVideo(filePath: string): Promise<VideoProbe> {
       durationSec: Number.isFinite(durationSec) ? durationSec : null,
       width: Number.isFinite(stream.width) ? stream.width : null,
       height: Number.isFinite(stream.height) ? stream.height : null,
+      fps: parseFrameRate(stream.avg_frame_rate),
     };
   } catch {
-    return { sizeBytes, durationSec: null, width: null, height: null };
+    return { sizeBytes, durationSec: null, width: null, height: null, fps: null };
   }
+}
+
+/** ffprobe reports frame rate as a rational string ("30000/1001", "25/1"). */
+function parseFrameRate(raw: unknown): number | null {
+  if (typeof raw !== 'string') return null;
+  const [num, den] = raw.split('/').map(Number);
+  if (!Number.isFinite(num) || num <= 0) return null;
+  if (den === undefined) return num;
+  if (!Number.isFinite(den) || den <= 0) return null;
+  return num / den;
 }
 
 export interface CompressResult {
@@ -152,6 +179,7 @@ export async function maybeCompressVideo(filePath: string): Promise<CompressResu
     enabled: env.VIDEO_COMPRESS_ENABLED,
     kbpsPerMegapixel: env.VIDEO_COMPRESS_KBPS_PER_MEGAPIXEL,
     maxHeight: env.VIDEO_COMPRESS_MAX_HEIGHT,
+    maxFps: env.VIDEO_COMPRESS_MAX_FPS,
   });
 
   if (!decision.compress) {
@@ -186,8 +214,15 @@ export async function maybeCompressVideo(filePath: string): Promise<CompressResu
     '-preset', 'veryfast',
     '-pix_fmt', 'yuv420p',
   ];
+  const filters: string[] = [];
   if (decision.targetWidth && decision.targetHeight) {
-    args.push('-vf', `scale=${decision.targetWidth}:${decision.targetHeight}`);
+    filters.push(`scale=${decision.targetWidth}:${decision.targetHeight}`);
+  }
+  if (decision.targetFps) {
+    filters.push(`fps=${decision.targetFps}`);
+  }
+  if (filters.length > 0) {
+    args.push('-vf', filters.join(','));
   }
   args.push('-movflags', '+faststart+use_metadata_tags', '-y', tmpPath);
 
@@ -226,6 +261,7 @@ export async function maybeCompressVideo(filePath: string): Promise<CompressResu
       kbps: decision.kbps,
       thresholdKbps: decision.thresholdKbps,
       downscaledTo: decision.targetWidth ? `${decision.targetWidth}x${decision.targetHeight}` : undefined,
+      resampledFps: decision.targetFps,
       elapsedSec: Math.round((Date.now() - startTime) / 1000),
       timestamp: new Date().toISOString(),
     }));

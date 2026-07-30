@@ -49,8 +49,9 @@ Tunable bypasses in pdf-content.ts — don't re-introduce false positives that w
 
 ### Video Compression (`src/media/video-compress.ts`)
 All videos arrive via Karakeep assets, but sources differ wildly: Karakeep's yt-dlp grabs YouTube at 360p/~160-500 kbps, while X/Twitter variants arrive up to 4K (observed 2.7 GB for one 36-min X clip). `maybeCompressVideo` runs in the collection worker BEFORE `enrichVideo` (so metadata/VTT embed into the final file) and re-encodes only when:
-1. **Oversize**: shorter frame side > `VIDEO_COMPRESS_MAX_HEIGHT` (720) → downscale. Gate is on the SHORT side so portrait phone video isn't crushed.
+1. **Oversize**: shorter frame side > `VIDEO_COMPRESS_MAX_HEIGHT` (default 720; **compose pins 480**) → downscale. Gate is on the SHORT side so portrait phone video isn't crushed.
 2. **Fat bitrate**: kbps > max(1200 floor, `VIDEO_COMPRESS_KBPS_PER_MEGAPIXEL` × frame MP). The floor keeps every YouTube grab untouched.
+3. **High fps**: fps > `VIDEO_COMPRESS_MAX_FPS` (30) → resample (also applied on top of triggers 1-2). +0.5 tolerance so NTSC 29.97 never fires.
 
 Bitrate gating makes it idempotent (compressed output falls below threshold on re-enrich). Audio/subtitle streams are stream-copied; the re-encode is discarded if not ≥10% smaller. Never throws — any failure keeps the original file.
 
@@ -179,7 +180,8 @@ curl -X POST http://localhost:3002/api/jobs \
 | `COOKIES_FILE` | — | Netscape cookies.txt for paywalls. Preserve leading `.` on domains (Playwright needs it for subdomain match). Express JSON body limit is bumped to 10mb for cookie upload. |
 | `PRIVACY_FILTER_TERMS` | — | Comma-separated strings to hide from PDFs |
 | `VIDEO_COMPRESS_ENABLED` | true | Re-encode fat video grabs (X/Twitter) to YouTube-like size post-download |
-| `VIDEO_COMPRESS_MAX_HEIGHT` | 720 | Downscale when the SHORTER frame side exceeds this |
+| `VIDEO_COMPRESS_MAX_HEIGHT` | 720 | Downscale when the SHORTER frame side exceeds this (docker-compose sets 480) |
+| `VIDEO_COMPRESS_MAX_FPS` | 30 | Resample when frame rate exceeds this (29.97 NTSC never triggers) |
 | `VIDEO_COMPRESS_KBPS_PER_MEGAPIXEL` | 2000 | Bitrate allowance before re-encode kicks in (plus 1200 kbps absolute floor) |
 | `VIDEO_COMPRESS_CRF` | 26 | x264 quality for the re-encode (lower = bigger/better) |
 | `FIX_ENABLED` | false | Enable AI self-healing |
