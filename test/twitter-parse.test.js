@@ -76,19 +76,19 @@ test('parses full-resolution main attachments and self-thread/quote edges', asyn
 
 test('canonicalizes Nitter-hosted Twitter routes before storing HTML or links', () => {
   assert.equal(
-    canonicalTwitterHref('https://mirror.invalid/alice/status/123?ref=x'),
+    canonicalTwitterHref('https://nitter.mirror.invalid/alice/status/123?ref=x'),
     'https://x.com/alice/status/123?ref=x',
   );
   assert.equal(
-    canonicalTwitterHref('https://mirror.invalid/i/article/456'),
+    canonicalTwitterHref('https://nitter.mirror.invalid/i/article/456'),
     'https://x.com/i/article/456',
   );
   assert.equal(
-    canonicalTwitterHref('https://mirror.invalid/alice'),
+    canonicalTwitterHref('https://nitter.mirror.invalid/alice'),
     'https://x.com/alice',
   );
   assert.equal(
-    canonicalTwitterHref('https://mirror.invalid/pic/media/example.jpg'),
+    canonicalTwitterHref('https://nitter.mirror.invalid/pic/media/example.jpg'),
     'https://x.com/pic/media/example.jpg',
   );
   assert.equal(
@@ -255,4 +255,41 @@ test('parses Community Note under the main tweet (real fixture)', async () => {
   );
   assert.equal(noNote.mainTweet.communityNoteHtml, null);
   assert.equal(noNote.mainTweet.communityNoteText, null);
+});
+
+test('canonicalizes Nitter-only /i/ routes and rewrites displayed link hosts', async () => {
+  const { canonicalTwitterHref, canonicalTwitterLinkText } = await import('../dist/twitter/parse.js');
+  // Grok share links (and other /i/ routes) only exist on x.com, so a mirror
+  // hostname is always safe to re-home.
+  assert.equal(
+    canonicalTwitterHref('https://nitter.net/i/grok/share/765fb9fbdbc34485ba86b70404b3217f'),
+    'https://x.com/i/grok/share/765fb9fbdbc34485ba86b70404b3217f',
+  );
+  assert.equal(
+    canonicalTwitterHref('https://nitter.net/i/status/2082398786236678327'),
+    'https://x.com/i/status/2082398786236678327',
+  );
+  // Twitter-shaped paths on hosts that are NOT Nitter mirrors are untouched —
+  // rewriting those would corrupt an unrelated site's link.
+  assert.equal(canonicalTwitterHref('https://example.com/i/article/5'), 'https://example.com/i/article/5');
+  assert.equal(
+    canonicalTwitterHref('https://example.com/someone/status/12345'),
+    'https://example.com/someone/status/12345',
+  );
+  // Public mirrors are recognized by hostname.
+  assert.equal(
+    canonicalTwitterHref('https://nitter.poast.org/jack/status/20'),
+    'https://x.com/jack/status/20',
+  );
+
+  // Nitter renders the visible text with its own host too.
+  assert.equal(
+    canonicalTwitterLinkText('nitter.net/i/status/2082398786236…', 'https://nitter.net/i/status/2082398786236678327'),
+    'x.com/i/status/2082398786236…',
+  );
+  // A label that isn't the mirror host stays as written.
+  assert.equal(
+    canonicalTwitterLinkText('read this thread', 'https://nitter.net/i/status/1'),
+    'read this thread',
+  );
 });

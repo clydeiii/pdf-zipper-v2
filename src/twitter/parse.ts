@@ -16,11 +16,21 @@ const STATUS_PATH_RE = /^\/([A-Za-z0-9_]+)\/status\/(\d+)/;
 const ARTICLE_PATH_RE = /\/(?:i\/article|[A-Za-z0-9_]+\/article)\/(\d+)/;
 const NITTER_ERROR_RE = /tweet not found|user not found|instance has been rate limited|page not found/i;
 const TWITTER_HOSTS = new Set(['x.com', 'www.x.com', 'twitter.com', 'www.twitter.com']);
+/**
+ * `/i/...` paths that only ever exist on x.com, so a Nitter mirror serving one
+ * (under whatever hostname it is configured with) can be re-homed safely.
+ */
+const TWITTER_ONLY_I_ROUTE_RE =
+  /^\/i\/(?:article\/\d+|status\/\d+|grok\/share\/[A-Za-z0-9]+|spaces\/[A-Za-z0-9]+|lists\/\d+|communities\/\d+)(?:[/?#]|$)/;
 const NITTER_ROUTE_HOSTS = new Set<string>();
 try {
   NITTER_ROUTE_HOSTS.add(new URL(env.NITTER_HOST).hostname.toLowerCase());
 } catch {
   // Invalid configuration is reported by the actual fetch path.
+}
+for (const host of (env.NITTER_PUBLIC_HOSTS ?? '').split(',')) {
+  const trimmed = host.trim().toLowerCase();
+  if (trimmed) NITTER_ROUTE_HOSTS.add(trimmed);
 }
 
 function nonEmpty(value: string | null | undefined): string | null {
@@ -48,6 +58,18 @@ function statusParts(href: string | undefined): { username: string; id: string }
   return match ? { username: match[1], id: match[2] } : null;
 }
 
+/**
+ * True for hosts that serve Nitter's rendering of Twitter routes: the instance
+ * this deployment fetches through, plus any hostname carrying `nitter` (public
+ * mirrors — a Nitter instance renders absolute URLs using ITS configured
+ * hostname, which is generally not the address we reach it on). Exported for
+ * tests.
+ */
+export function isNitterHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  return NITTER_ROUTE_HOSTS.has(host) || /(?:^|\.)nitter[.-]?/i.test(host);
+}
+
 export function canonicalTwitterHref(href: string): string {
   if (/^https?:\/\//i.test(href)) {
     try {
@@ -56,23 +78,16 @@ export function canonicalTwitterHref(href: string): string {
       const wrappedShort = parsed.pathname.match(/^\/(t\.co\/.+)$/i);
       if (wrappedShort) return `https://${wrappedShort[1]}${parsed.search}${parsed.hash}`;
 
-      // Status and article paths uniquely identify Twitter routes. Re-home
-      // them regardless of which Nitter mirror hostname rendered the page.
-      if (
+      // Re-home Twitter routes served by a Nitter mirror. Gate on the HOST
+      // being a known mirror rather than on the path shape alone: paths like
+      // /<user>/status/<id> or /i/article/<id> can legitimately exist on
+      // unrelated sites, and rewriting those to x.com would corrupt the link.
+      if (isNitterHost(parsed.hostname) && (
         /^\/[A-Za-z0-9_]{1,15}\/status\/\d+(?:[/?#]|$)/.test(parsed.pathname)
-        || /^\/i\/article\/\d+(?:[/?#]|$)/.test(parsed.pathname)
-      ) {
-        NITTER_ROUTE_HOSTS.add(parsed.hostname.toLowerCase());
-        return `https://x.com${parsed.pathname}${parsed.search}${parsed.hash}`;
-      }
-
-      if (
-        NITTER_ROUTE_HOSTS.has(parsed.hostname.toLowerCase())
-        && (
-          /^\/[A-Za-z0-9_]{1,15}\/?$/.test(parsed.pathname)
-          || /^\/pic\//.test(parsed.pathname)
-        )
-      ) {
+        || TWITTER_ONLY_I_ROUTE_RE.test(parsed.pathname)
+        || /^\/[A-Za-z0-9_]{1,15}\/?$/.test(parsed.pathname)
+        || /^\/pic\//.test(parsed.pathname)
+      )) {
         return `https://x.com${parsed.pathname}${parsed.search}${parsed.hash}`;
       }
       return href;
@@ -86,13 +101,39 @@ export function canonicalTwitterHref(href: string): string {
   return href;
 }
 
+/**
+ * Replace a Nitter-rendered display host in an anchor's visible text with
+ * `x.com`. Only touches text whose leading token is the host we just rewrote
+ * away from, so ordinary link labels are left alone. Exported for tests.
+ */
+export function canonicalTwitterLinkText(text: string, originalHref: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return text;
+  let originalHost: string;
+  try {
+    originalHost = new URL(originalHref).hostname.toLowerCase();
+  } catch {
+    return text;
+  }
+  if (!originalHost || TWITTER_HOSTS.has(originalHost)) return text;
+  const leading = trimmed.match(/^([A-Za-z0-9.-]+)(?=[/\s]|$)/)?.[1]?.toLowerCase();
+  if (leading !== originalHost) return text;
+  return trimmed.replace(/^[A-Za-z0-9.-]+/, 'x.com');
+}
+
 function canonicalizeHtml($content: Cheerio<AnyNode>): string | null {
   if (!$content.length) return null;
   const clone = $content.clone();
   clone.find('a[href]').each((index) => {
     const link = clone.find('a[href]').eq(index);
     const href = link.attr('href');
-    if (href) link.attr('href', canonicalTwitterHref(href));
+    if (!href) return;
+    const canonical = canonicalTwitterHref(href);
+    link.attr('href', canonical);
+    // Nitter also rewrites the VISIBLE text of a shortened link to its own
+    // hostname ("nitter.net/user/status/123…"). Re-home the displayed host too,
+    // or the KB stores prose pointing at a mirror the consumer can't reach.
+    if (canonical !== href) link.text(canonicalTwitterLinkText(link.text(), href));
   });
   clone.find('img, video, source, picture').remove();
   return nonEmpty(clone.html());

@@ -63,6 +63,14 @@ interface EnvConfig {
   WHISPER_HOST_FALLBACK?: string;
   /** Nitter server URL for Twitter/X conversion (default: http://localhost:8080) */
   NITTER_HOST: string;
+  /**
+   * Comma-separated hostnames a Nitter instance uses in the absolute URLs it
+   * RENDERS (its own configured hostname, e.g. `nitter.net`) — generally not
+   * the address we fetch it on. Used to re-home mirror links to x.com. Hosts
+   * containing "nitter" are recognized automatically; set this when the
+   * instance is configured with an unrelated hostname.
+   */
+  NITTER_PUBLIC_HOSTS?: string;
   /** Persist structured Twitter/X captures alongside PDFs (default: true) */
   TWITTER_DB_ENABLED: boolean;
   /** Maximum number of Nitter reply cursor pages after the subject page (default: 3) */
@@ -201,6 +209,7 @@ export const env: EnvConfig = {
   WHISPER_HOST_FALLBACK: process.env.WHISPER_HOST_FALLBACK,
   // Nitter server for Twitter/X conversion
   NITTER_HOST: process.env.NITTER_HOST || 'http://localhost:8080',
+  NITTER_PUBLIC_HOSTS: process.env.NITTER_PUBLIC_HOSTS,
   TWITTER_DB_ENABLED: process.env.TWITTER_DB_ENABLED !== 'false',
   TWITTER_DB_REPLY_PAGES: parseIntegerEnv('TWITTER_DB_REPLY_PAGES', 3, { min: 0, max: 100 }),
   TWITTER_DB_FETCH_DELAY_MS: parseIntegerEnv('TWITTER_DB_FETCH_DELAY_MS', 500, { min: 0 }),
