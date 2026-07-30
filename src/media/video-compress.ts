@@ -193,8 +193,12 @@ export async function maybeCompressVideo(filePath: string): Promise<CompressResu
 
   const startTime = Date.now();
   try {
-    // Allow ~3x realtime on slow CPUs, floored at 15 minutes.
-    const timeout = Math.max(15 * 60_000, (probe.durationSec ?? 0) * 3000);
+    // Allow ~3x realtime on slow CPUs, floored at 15 minutes. Math.ceil is
+    // load-bearing: ffprobe durations are floats, and execFile REJECTS a
+    // non-integer timeout — which made every needs-compression video longer
+    // than 5 minutes (duration*3000 > the integer floor) fail instantly and
+    // silently keep its original file.
+    const timeout = Math.max(15 * 60_000, Math.ceil((probe.durationSec ?? 0) * 3000));
     await execFileAsync('ffmpeg', args, { timeout });
 
     const newSize = (await stat(tmpPath)).size;

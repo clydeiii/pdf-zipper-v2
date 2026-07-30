@@ -97,3 +97,14 @@ test('disabled flag skips everything', () => {
   assert.equal(d.compress, false);
   assert.equal(d.reason, 'disabled');
 });
+
+test('encode timeout stays an integer for float ffprobe durations', () => {
+  // Regression: execFile rejects non-integer timeouts; duration 331.374s
+  // produced 994122.0000000001 and every >5min compression failed silently.
+  const durations = [331.374, 1029.42, 13588.007, 0, undefined];
+  for (const d of durations) {
+    const timeout = Math.max(15 * 60_000, Math.ceil((d ?? 0) * 3000));
+    assert.equal(Number.isInteger(timeout), true, `non-integer timeout for duration ${d}`);
+    assert.ok(timeout >= 15 * 60_000);
+  }
+});
