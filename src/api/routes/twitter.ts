@@ -108,14 +108,23 @@ async function localVideoIndex(): Promise<Map<string, string>> {
 function mediaWithLocalPaths(
   db: TwitterDatabase,
   tweetId: string,
+  username: string | null,
   videos: Map<string, string>,
 ): DbRow[] {
   return getTweetMedia(db, tweetId).map((media) => {
     const localVideo = typeof media.local_video === 'string' ? media.local_video : null;
-    return {
-      ...media,
-      localVideoPath: localVideo ? videos.get(path.basename(localVideo).toLowerCase()) ?? null : null,
-    };
+    let localVideoPath = localVideo
+      ? videos.get(path.basename(localVideo).toLowerCase()) ?? null
+      : null;
+    // The MP4 usually lands via media-collection AFTER the tweet harvest ran,
+    // so local_video is often NULL in the row. Resolve at read time from the
+    // shared filename convention instead of requiring a re-harvest.
+    if (!localVideoPath && username && (media.kind === 'video' || media.kind === 'gif')) {
+      localVideoPath = videos.get(`x.com-${username}-post-${tweetId}.mp4`.toLowerCase())
+        ?? videos.get(`twitter.com-${username}-post-${tweetId}.mp4`.toLowerCase())
+        ?? null;
+    }
+    return { ...media, localVideoPath };
   });
 }
 
@@ -131,7 +140,7 @@ function tweetView(
     ...tweet,
     content_html: sanitizeTwitterHtml(tweet.content_html),
     user: username ? getUserByUsername(db, username) ?? null : null,
-    media: mediaWithLocalPaths(db, id, videos),
+    media: mediaWithLocalPaths(db, id, username, videos),
     links: getTweetLinks(db, id),
     ...(includeExtras
       ? {
