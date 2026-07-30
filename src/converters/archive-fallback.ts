@@ -238,7 +238,9 @@ export async function captureViaArchive(originalUrl: string): Promise<ArchiveRes
           // GOOD_TEXT_THRESHOLD on page chrome alone. Run the rendered PDF
           // through the same content checks as a primary capture; an older
           // snapshot may predate the wall, so fall through rather than bail.
-          const content = await analyzePdfContent(rendered.pdfBuffer);
+          // sourceUrl is the ORIGINAL page, not the snapshot URL: a domain-root
+          // capture keeps its homepage exemption when rescued from archive.
+          const content = await analyzePdfContent(rendered.pdfBuffer, { sourceUrl: originalUrl });
           if (!content.passed) {
             console.warn(`[archive-fallback] snapshot ${snap} rendered but failed content check: ${content.reason}`);
             paywalledSnapshotReason = content.reason;

@@ -431,7 +431,9 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
   // when the PDF is truly blank. X Articles (isXArticle === true) are full
   // essays and get the strict checks like other articles.
   const lenient = isXArticle === false;
-  let contentResult = await analyzePdfContent(result.pdfBuffer, { lenient });
+  // originalUrl (the feed URL) over url: the latter may be Nitter-rewritten,
+  // and sourceUrl only cares about the real site's path shape.
+  let contentResult = await analyzePdfContent(result.pdfBuffer, { lenient, sourceUrl: originalUrl || url });
   console.log(`PDF content analysis for ${url}: ${contentResult.charCount} chars, ${contentResult.pageCount} pages, ${contentResult.charsPerKb} chars/KB${lenient ? ' [lenient: tweet]' : ''}`);
 
   // A capture flagged as an X Article but with tweet-length content is almost
