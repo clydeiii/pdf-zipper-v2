@@ -136,6 +136,48 @@ async function countFilesInWeek(weekPath: string): Promise<number> {
  * Returns array sorted newest-first: [{ year, week, path, fileCount }]
  * Returns empty array if media directory doesn't exist
  */
+/**
+ * GET /api/files/captures — list the nightly capture bundles (dated + latest)
+ * so the UI can expose them without the user memorizing the URL scheme.
+ * Dated bundles are retained CAPTURES_ZIP_RETENTION_DAYS (default 7).
+ */
+filesRouter.get('/captures', async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const capturesDir = path.join(env.DATA_DIR, 'captures');
+    let names: string[];
+    try {
+      names = await readdir(capturesDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        res.json([]);
+        return;
+      }
+      throw error;
+    }
+    const bundles = [];
+    for (const name of names) {
+      if (!/^captures-(\d{4}-\d{2}-\d{2}|latest)\.zip$/.test(name)) continue;
+      try {
+        const s = await stat(path.join(capturesDir, name));
+        if (!s.isFile()) continue;
+        bundles.push({
+          name,
+          path: `captures/${name}`,
+          size: s.size,
+          modified: s.mtime.toISOString(),
+          isLatest: name === 'captures-latest.zip',
+        });
+      } catch { /* skip unreadable */ }
+    }
+    // latest first, then dated newest-first (ISO dates sort lexically)
+    bundles.sort((a, b) => Number(b.isLatest) - Number(a.isLatest) || b.name.localeCompare(a.name));
+    res.json(bundles);
+  } catch (error) {
+    console.error('Failed to list capture bundles:', error);
+    res.status(500).json({ error: 'Failed to list capture bundles' });
+  }
+});
+
 filesRouter.get('/weeks', async (_req: Request, res: Response): Promise<void> => {
   try {
     const mediaDir = path.join(env.DATA_DIR, 'media');

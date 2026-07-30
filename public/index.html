@@ -15,7 +15,10 @@
       <nav class="header-nav" style="margin-top:.5rem;display:flex;gap:.5rem;flex-wrap:wrap;">
         <a class="btn btn-primary" href="/api/file/benchmarks/index.html" target="_blank" rel="noopener">📊 Benchmark Bundles</a>
         <a class="btn btn-secondary" href="/api/file/benchmarks/benchmarks-latest.zip">⬇ Latest benchmarks.zip</a>
-        <a class="btn btn-secondary" href="/api/file/captures/captures-latest.zip" title="All captures (PDFs/MP3s/MP4s) from the last 24h, rebuilt nightly at midnight">⬇ Latest captures.zip</a>
+        <span class="bundle-split" style="position:relative;display:inline-flex;">
+          <a class="btn btn-secondary" style="border-top-right-radius:0;border-bottom-right-radius:0;" href="/api/file/captures/captures-latest.zip" title="All captures (PDFs/MP3s/MP4s/twitter DB) from the last 24h, rebuilt nightly at midnight">⬇ Latest captures.zip</a><button class="btn btn-secondary" style="border-top-left-radius:0;border-bottom-left-radius:0;margin-left:1px;padding-left:.5rem;padding-right:.5rem;" onclick="toggleBundleList(this)" title="Dated nightly bundles (last 7 days) — for catching up after a missed night">▾</button>
+          <div id="bundle-list" class="bundle-list" hidden style="position:absolute;top:100%;left:0;z-index:30;min-width:290px;margin-top:4px;padding:6px;background:var(--card-bg,#fff);border:1px solid #ccd3da;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.18);"></div>
+        </span>
         <a class="btn btn-secondary" href="/api/download/latest" title="Re-download the most recent export ZIP (persisted server-side; resumable)">⬇ Last export ZIP</a>
         <a href="/twitter.html" class="btn btn-secondary">Twitter DB</a>
       </nav>

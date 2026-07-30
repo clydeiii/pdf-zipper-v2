@@ -1634,3 +1634,34 @@ async function uploadCookies() {
     uploadBtn.disabled = false;
   }
 }
+
+// --- Nightly bundle dropdown (dated captures-YYYY-MM-DD.zip, 7-day retention) ---
+
+async function toggleBundleList(btn) {
+  const panel = document.getElementById('bundle-list');
+  if (!panel.hidden) { panel.hidden = true; return; }
+  panel.innerHTML = '<div style="padding:6px;font-size:.85rem;">Loading…</div>';
+  panel.hidden = false;
+  try {
+    const res = await fetch('/api/files/captures');
+    const bundles = await res.json();
+    const dated = bundles.filter((b) => !b.isLatest);
+    if (!dated.length) {
+      panel.innerHTML = '<div style="padding:6px;font-size:.85rem;">No dated bundles yet — first one lands at the next midnight run.</div>';
+      return;
+    }
+    panel.innerHTML = dated.map((b) => `
+      <a href="/api/file/${b.path}" style="display:flex;justify-content:space-between;gap:12px;padding:6px 8px;border-radius:6px;text-decoration:none;color:inherit;font-size:.85rem;"
+         onmouseover="this.style.background='rgba(125,125,125,.12)'" onmouseout="this.style.background=''">
+        <span>📦 ${escapeHtml(b.name)}</span>
+        <span style="opacity:.65;">${formatFileSize(b.size)}</span>
+      </a>`).join('');
+  } catch (err) {
+    panel.innerHTML = `<div style="padding:6px;font-size:.85rem;">Failed to load: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+document.addEventListener('click', (event) => {
+  const panel = document.getElementById('bundle-list');
+  if (panel && !panel.hidden && !event.target.closest('.bundle-split')) panel.hidden = true;
+});
