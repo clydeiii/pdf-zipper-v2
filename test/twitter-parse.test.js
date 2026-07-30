@@ -258,7 +258,7 @@ test('parses Community Note under the main tweet (real fixture)', async () => {
 });
 
 test('canonicalizes Nitter-only /i/ routes and rewrites displayed link hosts', async () => {
-  const { canonicalTwitterHref, canonicalTwitterLinkText } = await import('../dist/twitter/parse.js');
+  const { canonicalTwitterHref, canonicalTwitterDisplayText } = await import('../dist/twitter/parse.js');
   // Grok share links (and other /i/ routes) only exist on x.com, so a mirror
   // hostname is always safe to re-home.
   assert.equal(
@@ -284,12 +284,10 @@ test('canonicalizes Nitter-only /i/ routes and rewrites displayed link hosts', a
 
   // Nitter renders the visible text with its own host too.
   assert.equal(
-    canonicalTwitterLinkText('nitter.net/i/status/2082398786236…', 'https://nitter.net/i/status/2082398786236678327'),
+    canonicalTwitterDisplayText('nitter.net/i/status/2082398786236…'),
     'x.com/i/status/2082398786236…',
   );
-  // A label that isn't the mirror host stays as written.
-  assert.equal(
-    canonicalTwitterLinkText('read this thread', 'https://nitter.net/i/status/1'),
-    'read this thread',
-  );
+  // A label that isn't a mirror host stays as written.
+  assert.equal(canonicalTwitterDisplayText('read this thread'), 'read this thread');
+  assert.equal(canonicalTwitterDisplayText('example.com/story'), 'example.com/story');
 });

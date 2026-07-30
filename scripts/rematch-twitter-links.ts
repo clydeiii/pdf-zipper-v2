@@ -12,7 +12,7 @@ import { readdir } from 'node:fs/promises';
 import * as path from 'node:path';
 import { load } from 'cheerio';
 import { env } from '../src/config/env.js';
-import { canonicalTwitterHref, canonicalTwitterLinkText } from '../src/twitter/parse.js';
+import { canonicalTwitterDisplayText, canonicalTwitterHref } from '../src/twitter/parse.js';
 import { normalizeIndexedUrl } from '../src/twitter/pdf-index.js';
 import type { TwitterDatabase } from '../src/twitter/db.js';
 
@@ -40,8 +40,14 @@ function repairHtml(html: string): string {
     const repaired = canonicalTwitterHref(href);
     if (repaired !== href) {
       $(element).attr('href', repaired);
-      // Nitter rewrites the visible link text to its own host as well.
-      $(element).text(canonicalTwitterLinkText($(element).text(), href));
+      changed = true;
+    }
+    // Nitter rewrites the visible link text to its own host as well. Repair it
+    // independently — rows whose href was fixed by an earlier sweep still
+    // carry the mirror hostname in their label.
+    const displayText = canonicalTwitterDisplayText($(element).text());
+    if (displayText !== $(element).text()) {
+      $(element).text(displayText);
       changed = true;
     }
   });

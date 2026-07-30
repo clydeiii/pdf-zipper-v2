@@ -106,19 +106,17 @@ export function canonicalTwitterHref(href: string): string {
  * `x.com`. Only touches text whose leading token is the host we just rewrote
  * away from, so ordinary link labels are left alone. Exported for tests.
  */
-export function canonicalTwitterLinkText(text: string, originalHref: string): string {
+export function canonicalTwitterDisplayText(text: string): string {
   const trimmed = text.trim();
   if (!trimmed) return text;
-  let originalHost: string;
-  try {
-    originalHost = new URL(originalHref).hostname.toLowerCase();
-  } catch {
-    return text;
-  }
-  if (!originalHost || TWITTER_HOSTS.has(originalHost)) return text;
-  const leading = trimmed.match(/^([A-Za-z0-9.-]+)(?=[/\s]|$)/)?.[1]?.toLowerCase();
-  if (leading !== originalHost) return text;
+  const leading = trimmed.match(/^([A-Za-z0-9.-]+\.[A-Za-z]{2,})(?=[/\s]|$)/)?.[1];
+  if (!leading || !isNitterHost(leading)) return text;
   return trimmed.replace(/^[A-Za-z0-9.-]+/, 'x.com');
+}
+
+/** @deprecated use {@link canonicalTwitterDisplayText} — kept for the href-change call sites. */
+export function canonicalTwitterLinkText(text: string, _originalHref: string): string {
+  return canonicalTwitterDisplayText(text);
 }
 
 function canonicalizeHtml($content: Cheerio<AnyNode>): string | null {
@@ -128,12 +126,13 @@ function canonicalizeHtml($content: Cheerio<AnyNode>): string | null {
     const link = clone.find('a[href]').eq(index);
     const href = link.attr('href');
     if (!href) return;
-    const canonical = canonicalTwitterHref(href);
-    link.attr('href', canonical);
+    link.attr('href', canonicalTwitterHref(href));
     // Nitter also rewrites the VISIBLE text of a shortened link to its own
     // hostname ("nitter.net/user/status/123…"). Re-home the displayed host too,
     // or the KB stores prose pointing at a mirror the consumer can't reach.
-    if (canonical !== href) link.text(canonicalTwitterLinkText(link.text(), href));
+    // Independent of whether the href changed: the text carries its own host.
+    const displayText = canonicalTwitterDisplayText(link.text());
+    if (displayText !== link.text()) link.text(displayText);
   });
   clone.find('img, video, source, picture').remove();
   return nonEmpty(clone.html());
