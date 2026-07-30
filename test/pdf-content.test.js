@@ -286,6 +286,28 @@ test('trailing blank overflow pages do not trigger the blur-paywall reason', asy
   assert.match(result.reason || '', /Large PDF/, `expected truncation reason, got: ${result.reason}`);
 });
 
+test('domain-root landing page is exempt from the large-PDF truncation check', async () => {
+  // ai-reports.org shape: 2.3MB PDF (hero art), ~855 chars of landing copy.
+  const pdf = await createLargePdfWithPages([filler(500), filler(355)]);
+  const result = await analyzePdfContent(pdf, { sourceUrl: 'https://www.ai-reports.org/' });
+  assert.equal(result.passed, true, `homepage capture should pass; got: ${result.reason}`);
+});
+
+test('deep article path keeps the large-PDF truncation check (Axios SPA shell)', async () => {
+  const pdf = await createLargePdfWithPages([filler(500), filler(355)]);
+  const result = await analyzePdfContent(pdf, {
+    sourceUrl: 'https://www.axios.com/2026/07/29/anthropic-claude-open-models-ban-china',
+  });
+  assert.equal(result.passed, false);
+  assert.match(result.reason || '', /Large PDF/, `expected truncation reason, got: ${result.reason}`);
+});
+
+test('near-blank homepage shell still fails the minimum-chars floor', async () => {
+  const pdf = await createLargePdfWithPages([filler(200)]);
+  const result = await analyzePdfContent(pdf, { sourceUrl: 'https://example.com/' });
+  assert.equal(result.passed, false, 'homepage exemption must not admit blank shells');
+});
+
 // --- Extracted text ---
 
 test('analyzePdfContent returns extracted text for downstream use', async () => {
