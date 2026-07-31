@@ -173,16 +173,12 @@ async function loadThread(id) {
           article: data.article,
           articlePdfFallback: (data.captures || []).find((capture) => capture.pdf_path)?.pdf_path,
         })}
+        ${(data.continuation || []).map((tweet) => renderTweet(tweet, { className: 'continuation' })).join('')}
       </div>
       <h2 class="replies-heading">Replies</h2>
       <div class="thread-stack">
         ${data.replies.length
-          ? data.replies.map((reply) => `
-              <div class="reply-chain">
-                ${renderTweet(reply)}
-                ${(reply.replies || []).map((nested) => `<div class="reply-chain nested">${renderTweet(nested)}</div>`).join('')}
-              </div>
-            `).join('')
+          ? data.replies.map((reply) => renderReplyChain(reply, 0)).join('')
           : '<p class="empty-state">No replies were captured.</p>'}
       </div>
     `;
@@ -190,6 +186,17 @@ async function loadThread(id) {
   } catch (error) {
     threadContent.innerHTML = `<p class="empty-state">${escapeHtml(error.message)}</p>`;
   }
+}
+
+/** Replies nest arbitrarily deep; indent visually only for the first few levels. */
+function renderReplyChain(reply, depth) {
+  const nested = (reply.replies || []).map((child) => renderReplyChain(child, depth + 1)).join('');
+  return `
+    <div class="reply-chain${depth > 0 ? ' nested' : ''}">
+      ${renderTweet(reply)}
+      ${nested}
+    </div>
+  `;
 }
 
 function renderTweet(tweet, options = {}) {

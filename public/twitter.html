@@ -40,6 +40,8 @@
     .thread-stack { display: grid; gap: 10px; }
     .tweet-card { position: relative; padding: 16px; border: 1px solid #dee2e6; border-radius: 8px; background: #fff; overflow: hidden; }
     .tweet-card.subject { border: 2px solid #1d9bf0; box-shadow: 0 3px 14px rgba(29,155,240,.12); }
+    /* The author's own continuation (2/8, 3/8 …) reads as one post, not replies. */
+    .tweet-card.continuation { border: 1px solid #1d9bf0; border-left: 3px solid #1d9bf0; margin-top: -2px; }
     .tweet-card.ancestor { opacity: .72; background: #f8f9fa; }
     .tweet-card.ancestor::after { content: ""; position: absolute; left: 39px; top: 64px; bottom: -13px; width: 2px; background: #ced4da; }
     .tweet-layout { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 12px; }

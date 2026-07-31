@@ -33,6 +33,9 @@ const SAFE_HTML_ELEMENTS = new Set([
 ]);
 const SAFE_HTML_ATTRIBUTES = new Set(['title', 'dir', 'lang', 'colspan', 'rowspan']);
 const VIDEO_INDEX_TTL_MS = 60_000;
+/** Bounds on the reply tree walk, so a pathological thread can't stall a request. */
+const MAX_THREAD_DEPTH = 12;
+const MAX_THREAD_NODES = 400;
 let cachedVideoIndex: { expiresAt: number; index: Map<string, string> } | null = null;
 
 const EMPTY_STATS: TwitterStats = {
@@ -257,13 +260,42 @@ twitterRouter.get('/thread/:id', async (req: Request, res: Response): Promise<vo
     }
     ancestors.reverse();
 
-    const replies = getTweetReplies(db, String(subject.id)).map((reply) => ({
-      ...tweetView(db, reply, videos),
-      replies: getTweetReplies(db, String(reply.id)).map((nested) => ({
-        ...tweetView(db, nested, videos),
-        replies: [],
-      })),
-    }));
+    // A self-thread is a CHAIN (1/8 → 2/8 → …), so a fixed two-level expansion
+    // truncates it — an 8-panel comic stopped rendering at panel 3. Walk the
+    // author's own continuation out of the reply tree and return it as an
+    // ordered list, then expand what's left recursively (bounded).
+    const subjectAuthor = typeof subject.username === 'string' ? subject.username.toLowerCase() : null;
+    const continuation: DbRow[] = [];
+    if (subjectAuthor) {
+      let cursorId = String(subject.id);
+      while (continuation.length < MAX_THREAD_NODES && !seen.has(`c:${cursorId}`)) {
+        seen.add(`c:${cursorId}`);
+        const next = getTweetReplies(db, cursorId).find((candidate) =>
+          typeof candidate.username === 'string'
+          && candidate.username.toLowerCase() === subjectAuthor);
+        if (!next) break;
+        continuation.push(tweetView(db, next, videos, true));
+        cursorId = String(next.id);
+      }
+    }
+    const continuationIds = new Set(continuation.map((tweet) => String(tweet.id)));
+
+    let remainingNodes = MAX_THREAD_NODES;
+    const expandReplies = (parent: string, depth: number): DbRow[] => {
+      if (depth > MAX_THREAD_DEPTH || remainingNodes <= 0) return [];
+      return getTweetReplies(db, parent)
+        .filter((reply) => !continuationIds.has(String(reply.id)))
+        .flatMap((reply) => {
+          if (remainingNodes-- <= 0) return [];
+          return [{
+            ...tweetView(db, reply, videos),
+            replies: expandReplies(String(reply.id), depth + 1),
+          }];
+        });
+    };
+    // Replies to any part of the self-thread belong to the conversation too.
+    const replies = [String(subject.id), ...continuationIds]
+      .flatMap((rootId) => expandReplies(rootId, 1));
     const quotedId = typeof subject.quoted_id === 'string' ? subject.quoted_id : null;
     const linkedArticle = getArticleByTweetId(db, String(subject.id));
     const article = linkedArticle
@@ -279,6 +311,7 @@ twitterRouter.get('/thread/:id', async (req: Request, res: Response): Promise<vo
     res.json({
       subject: tweetView(db, subject, videos, true),
       ancestors,
+      continuation,
       replies,
       quoted: quotedId ? quotedTweetView(db, quotedId, videos, 1) : null,
       article,
