@@ -312,6 +312,32 @@ function rewriteDatawrapperUrl(url: string): string {
 }
 
 /**
+ * Rewrite legacy Qwen GitHub Pages blog URLs to the current qwen.ai post URL.
+ *
+ * qwenlm.github.io/blog/<slug>/ redirects to qwen.ai but DROPS the slug,
+ * landing on the near-empty Research index — the capture then fails the
+ * truncation check with ~90 chars of nav text. The post itself lives at
+ * qwen.ai/blog?id=<slug> (same slug, verified against a successful capture
+ * of the identical article), which the pipeline already handles end to end
+ * (scroll-pane un-pin, query-string filename, h1 title fallback).
+ */
+export function rewriteQwenBlogUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname.toLowerCase() !== 'qwenlm.github.io') return url;
+
+    const match = parsed.pathname.match(/^\/(?:zh\/)?blog\/([^/]+)\/?$/);
+    if (!match) return url;
+
+    const rewritten = `https://qwen.ai/blog?id=${match[1]}`;
+    console.log(`Rewriting legacy Qwen blog URL: ${url} → ${rewritten}`);
+    return rewritten;
+  } catch {
+    return url;
+  }
+}
+
+/**
  * Known short URL / redirect domains that should be expanded before capture
  * These services redirect to the real URL, which we want for:
  * 1. Better filenames (based on final domain, not t.co)
@@ -554,10 +580,13 @@ export async function convertUrlToPDF(
     // Clean Substack URLs (remove tracking params that cause popups)
     // Rewrite Twitter/X URLs to Nitter for better capture
     // Rewrite Datawrapper URLs to direct CDN embed (avoids iframe + chrome)
+    // Rewrite legacy Qwen GitHub Pages blog links (qwenlm.github.io) — the
+    // site's own redirect drops the post slug and lands on an empty index
     const substackUrl = rewriteSubstackReaderUrl(expandedUrl);
     const cleanedUrl = cleanSubstackUrl(substackUrl);
     const datawrapperUrl = rewriteDatawrapperUrl(cleanedUrl);
-    const targetUrl = rewriteTwitterUrl(datawrapperUrl);
+    const qwenUrl = rewriteQwenBlogUrl(datawrapperUrl);
+    const targetUrl = rewriteTwitterUrl(qwenUrl);
 
     // Navigate with timeout
     // Try networkidle first for complete page load, fallback to domcontentloaded for heavy SPAs
