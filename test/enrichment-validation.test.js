@@ -140,3 +140,82 @@ test('reconcileTitle: preserves em-dash in headline (only strips site suffix)', 
   );
   assert.equal(out, 'Real Headline — with an em-dash clause');
 });
+
+// --- Publication: famous-outlet hallucination guard ---
+
+import { isPublicationSupported, claimsWellKnownPublisher } from '../dist/metadata/enrichment.js';
+
+test('replaces a famous outlet claimed on an unrelated domain', () => {
+  // The observed failure: 265 library files attributing other people's blogs
+  // to the NYT, primed by the prompt's own example.
+  const meta = { ...base, publication: 'The New York Times' };
+  const out = validateFactualFields(meta, 'Today we are releasing a new model.', 'https://www.anthropic.com/news/claude');
+  assert.equal(out.publication, 'Anthropic');
+});
+
+test('falls back to the domain name, never to null', () => {
+  const meta = { ...base, publication: 'The New York Times' };
+  const out = validateFactualFields(meta, 'A post about scaling.', 'https://qwen.ai/blog?id=qwen3.8');
+  assert.equal(out.publication, 'Qwen');
+});
+
+test('a real masthead near the top rescues the claim', () => {
+  // Archive/mirror captures carry the outlet in the page text even though the
+  // URL host is not nytimes.com.
+  const meta = { ...base, publication: 'The New York Times' };
+  const text = 'The New York Times\nOpinion | The case for optimism\nBy A. Writer';
+  const out = validateFactualFields(meta, text, 'https://archive.is/abc123');
+  assert.equal(out.publication, 'The New York Times');
+});
+
+test('a passing mention deep in the body does not rescue the claim', () => {
+  const meta = { ...base, publication: 'The New York Times' };
+  const text = `${'filler about model evaluations. '.repeat(200)} as The New York Times reported last week`;
+  const out = validateFactualFields(meta, text, 'https://simonwillison.net/2026/Aug/1/thing/');
+  assert.equal(out.publication, 'Simonwillison');
+});
+
+test('a known publisher domain stays authoritative', () => {
+  const meta = { ...base, publication: 'The New York Times' };
+  const out = validateFactualFields(meta, 'body text', 'https://www.nytimes.com/2026/08/01/tech.html');
+  assert.equal(out.publication, 'The New York Times');
+});
+
+test('niche publication names are left alone (no churn)', () => {
+  // The domain-derived alternative for open.substack.com is the useless
+  // "Open", so an unrecognised name must be kept rather than "corrected".
+  for (const [pub, url] of [
+    ['Transformer News', 'https://open.substack.com/pub/transformer/p/x'],
+    ['The Leverage', 'https://open.substack.com/pub/leverage/p/y'],
+    ['X (formerly Twitter)', 'https://x.com/someone/status/123'],
+  ]) {
+    const out = validateFactualFields({ ...base, publication: pub }, 'unrelated body text', url);
+    assert.equal(out.publication, pub, `${pub} should be preserved`);
+  }
+});
+
+test('an outlet name on a tweet capture resolves to the platform', () => {
+  // A tweet from an outlet's account is published on X, not in the outlet.
+  const out = validateFactualFields(
+    { ...base, publication: 'The Information' },
+    'a tweet body',
+    'https://x.com/theinformation/status/123',
+  );
+  assert.equal(out.publication, 'X');
+});
+
+test('isPublicationSupported accepts names that match their own domain', () => {
+  assert.equal(isPublicationSupported('X', '', 'https://x.com/a/status/1'), true);
+  assert.equal(isPublicationSupported('Epoch AI', '', 'https://epoch.ai/MirrorCode'), true);
+  assert.equal(isPublicationSupported('Natto Thoughts', '', 'https://www.nattothoughts.com/p/a'), true);
+  assert.equal(isPublicationSupported('The Verge', '', 'https://www.theverge.com/a'), true);
+  assert.equal(isPublicationSupported('The New York Times', '', 'https://simonwillison.net/a'), false);
+});
+
+test('claimsWellKnownPublisher matches on name, ignoring case and leading The', () => {
+  assert.equal(claimsWellKnownPublisher('the new york times'), true);
+  assert.equal(claimsWellKnownPublisher('Financial Times'), true);
+  assert.equal(claimsWellKnownPublisher('BBC'), true);
+  assert.equal(claimsWellKnownPublisher('Transformer News'), false);
+  assert.equal(claimsWellKnownPublisher('Qwen'), false);
+});

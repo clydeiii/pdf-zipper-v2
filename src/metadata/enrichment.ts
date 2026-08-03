@@ -56,7 +56,7 @@ Return ONLY a valid JSON object with these fields (no markdown, no explanation):
 {
   "title": "the article's actual title (not the site name)",
   "author": "author name or null if not identifiable",
-  "publication": "publisher or website name (e.g., 'The New York Times', 'Hacker News') or null",
+  "publication": "the site's own publisher/publication name, or null if unclear",
   "publishDate": "YYYY-MM-DD date or null",
   "language": "ISO 639-1 code (e.g., 'en', 'fr', 'de', 'ja', 'zh')",
   "summary": "2-3 sentence summary capturing the key points",
@@ -66,7 +66,7 @@ Return ONLY a valid JSON object with these fields (no markdown, no explanation):
 Guidelines:
 - For title: prefer the actual article headline, not navigation text or site name
 - For author: look for bylines ("By John Smith", "Written by..."), footer credits, or author names near the title. Also check for patterns like "FirstName LastName" immediately before or after the date
-- For publication: infer from the URL domain or text clues (e.g., "nytimes.com" → "The New York Times")
+- For publication: name the site the text was published ON, reading it off the URL domain or the page's own masthead (e.g. "example-gazette.com" → "Example Gazette"). Never answer with a famous outlet just because the topic is newsworthy — an outlet mentioned or quoted inside the article is NOT the publisher. If the site has no name you can read off the page or the URL, return null
 - For publishDate: look carefully for ANY date near the top of the text — it may appear as "January 15, 2025", "Jan 2025", "2025-01-15", "15/01/2025", or just "January 2025". Convert partial dates to the 1st of that month (e.g., "July 2024" → "2024-07-01"). Return null ONLY if there is truly no date anywhere in the text
 - For tags: use 3-5 lowercase hyphenated topic tags (e.g., "machine-learning", "climate-change")
 - For summary: be concise, factual, and capture the main argument or findings
@@ -129,6 +129,53 @@ export function unsupportedSummaryName(summary: string, haystack: string): strin
   return null;
 }
 
+/** How far into the document to look for a masthead/byline naming the site. */
+const PUBLICATION_EVIDENCE_CHARS = 3000;
+
+/**
+ * True when a publication name is actually supported by the capture, rather
+ * than recalled from the model's priors. Two independent kinds of evidence:
+ *
+ * 1. Domain agreement — the name IS the site (x.com → "X", epoch.ai →
+ *    "Epoch AI", nattothoughts.com → "Natto Thoughts").
+ * 2. Masthead text — the name appears near the top of the document, which is
+ *    where attribution lives. Deliberately NOT the whole body: an article
+ *    quoting "as The New York Times reported" must not thereby become a NYT
+ *    article.
+ *
+ * Exported for testing.
+ */
+export function isPublicationSupported(
+  publication: string,
+  sourceText: string,
+  url: string
+): boolean {
+  const words = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const squash = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  // A leading "The" is a styling choice, not part of the identity.
+  const pubWords = words(publication).replace(/^the /, '');
+  const pubSquashed = squash(pubWords);
+  if (!pubSquashed) return false;
+
+  let host = '';
+  try {
+    host = new URL(url).hostname.replace(/^www\./, '').toLowerCase();
+  } catch {
+    host = '';
+  }
+  const hostSquashed = squash(host);
+  const brand = squash(host.split('.')[0]);
+
+  // Exact brand match covers single-letter sites ("x.com" → "X") that the
+  // length-gated containment checks below can't safely accept.
+  if (pubSquashed === brand || pubSquashed === hostSquashed) return true;
+  if (pubSquashed.length >= 4 && hostSquashed.includes(pubSquashed)) return true;
+  if (brand.length >= 4 && pubSquashed.includes(brand)) return true;
+
+  if (pubWords.length < 3) return false;
+  return words(sourceText.slice(0, PUBLICATION_EVIDENCE_CHARS)).includes(pubWords);
+}
+
 /**
  * Hallucination guard for FACTUAL fields (Fidelity > Aesthetics — the KB
  * consumer trusts these as ground truth). Smaller/faster models fabricate
@@ -136,8 +183,14 @@ export function unsupportedSummaryName(summary: string, haystack: string): strin
  * leave null. We only keep:
  * - author: every name token (3+ chars) appears verbatim in the source text
  * - publishDate: its 4-digit year appears in the source text or the URL
- * Publication is exempt — the prompt explicitly asks to infer it from the
- * URL domain, so it legitimately may not appear in the text.
+ * - publication: a WELL-KNOWN outlet name claimed on an unrelated domain is
+ *   replaced by the domain-derived name (see claimsWellKnownPublisher). This
+ *   is the one publication failure that actually shows up in the library —
+ *   the model reaching for a famous masthead from its priors, e.g. 265 files
+ *   attributing anthropic.com, aisi.gov.uk and simonwillison.net posts to
+ *   "The New York Times". Falling back to the domain rather than null keeps a
+ *   true answer ("Anthropic"), and a known-publisher domain is authoritative
+ *   and skips the check entirely.
  */
 export function validateFactualFields(
   meta: Omit<EnrichedMetadata, 'translation'>,
@@ -182,7 +235,27 @@ export function validateFactualFields(
     }
   }
 
-  return { ...meta, author, publishDate };
+  // Only famous-outlet claims are second-guessed. A niche name the model read
+  // off the page ("Transformer News" on open.substack.com) is kept as-is: the
+  // domain-derived alternative there is the useless "Open", so replacing it
+  // would trade a probably-right answer for a definitely-useless one.
+  let publication = meta.publication;
+  if (publication && !knownPublicationForUrl(url) &&
+      claimsWellKnownPublisher(publication) &&
+      !isPublicationSupported(publication, sourceText, url)) {
+    const derived = extractPublicationFromUrl(url);
+    console.log(JSON.stringify({
+      event: 'enrichment_fact_rejected',
+      field: 'publication',
+      value: publication,
+      replacedWith: derived,
+      reason: 'well_known_publisher_on_unrelated_domain',
+      timestamp: new Date().toISOString(),
+    }));
+    publication = derived;
+  }
+
+  return { ...meta, author, publishDate, publication };
 }
 
 /**
@@ -426,7 +499,47 @@ const PUBLICATION_BY_DOMAIN: Record<string, string> = {
   'arxiv.org': 'arXiv',
   'nejm.org': 'The New England Journal of Medicine',
   'thelancet.com': 'The Lancet',
+  // Below: added primarily so claimsWellKnownPublisher can recognise these
+  // names as famous-outlet claims on unrelated domains. They double as
+  // authoritative naming for their own domains.
+  'theguardian.com': 'The Guardian',
+  'forbes.com': 'Forbes',
+  'bbc.com': 'BBC',
+  'bbc.co.uk': 'BBC',
+  'npr.org': 'NPR',
+  'cnbc.com': 'CNBC',
+  'businessinsider.com': 'Business Insider',
+  'fortune.com': 'Fortune',
+  'time.com': 'TIME',
+  'politico.com': 'Politico',
+  'vox.com': 'Vox',
+  'thehill.com': 'The Hill',
+  'nbcnews.com': 'NBC News',
+  'cbsnews.com': 'CBS News',
+  'abcnews.go.com': 'ABC News',
+  'apnews.com': 'The Associated Press',
+  'engadget.com': 'Engadget',
+  'venturebeat.com': 'VentureBeat',
+  'thetimes.co.uk': 'The Times',
+  'latimes.com': 'Los Angeles Times',
+  'usatoday.com': 'USA Today',
+  'newscientist.com': 'New Scientist',
+  'scientificamerican.com': 'Scientific American',
+  'ieee.org': 'IEEE Spectrum',
 };
+
+/**
+ * True when the name is one of the well-known outlets above — i.e. a name the
+ * model could produce from memory alone rather than from the capture. Matched
+ * on the name, ignoring case/punctuation and a leading "The".
+ */
+export function claimsWellKnownPublisher(publication: string): boolean {
+  const squash = (s: string) =>
+    s.toLowerCase().replace(/[^a-z0-9]/g, '').replace(/^the/, '');
+  const target = squash(publication);
+  if (!target) return false;
+  return Object.values(PUBLICATION_BY_DOMAIN).some((name) => squash(name) === target);
+}
 
 /** Authoritative publication for a known publisher domain, else null. */
 export function knownPublicationForUrl(url: string): string | null {
