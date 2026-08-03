@@ -1162,6 +1162,15 @@ export async function convertUrlToPDF(
       const unpinned = await page.evaluate(() => {
         const vh = window.innerHeight;
         let count = 0;
+        const release = (el: HTMLElement) => {
+          el.style.setProperty('height', 'auto', 'important');
+          el.style.setProperty('min-height', '0', 'important');
+          el.style.setProperty('max-height', 'none', 'important');
+          el.style.setProperty('overflow', 'visible', 'important');
+          el.style.setProperty('overflow-y', 'visible', 'important');
+          count++;
+        };
+
         // html + body + every block wrapper whose box is pinned ~one viewport
         // tall while its content overflows well past it.
         const candidates = [document.documentElement, document.body,
@@ -1173,11 +1182,46 @@ export async function convertUrlToPDF(
           const scrollH = h.scrollHeight;
           // Pinned to ~viewport height but holding much taller content.
           if (clientH > 0 && clientH <= vh + 50 && scrollH > clientH + 400) {
-            h.style.setProperty('height', 'auto', 'important');
-            h.style.setProperty('min-height', '0', 'important');
-            h.style.setProperty('max-height', 'none', 'important');
-            h.style.setProperty('overflow', 'visible', 'important');
-            count++;
+            release(h);
+          }
+        }
+
+        // The same trap one layer deeper: app shells that scroll the article
+        // inside a fixed-height `overflow-y:auto` div rather than the document
+        // (qwen.ai nests its 27000px article in a 900px pane at
+        // `body > div#ice-container > div > div#…LAYOUT_CONTENT`). The pass
+        // above only reaches `body > * > *`, and even reaching the pane isn't
+        // enough — every ancestor is itself height-pinned with overflow:hidden,
+        // so the document height stays at one screen and page.pdf emits a
+        // single clipped page. Find the pane at any depth and release its whole
+        // ancestor chain.
+        const bodyLen = (document.body?.innerText || '').length;
+        for (const el of document.querySelectorAll('div, main, section, article')) {
+          const style = window.getComputedStyle(el);
+          if (!/(auto|scroll)/.test(style.overflowY)) continue;
+          const clientH = el.clientHeight;
+          if (clientH <= 0 || clientH > vh + 50) continue;
+          if (el.scrollHeight <= clientH + 400) continue;
+          // Must hold the bulk of the page's text. A nav rail, comment sidebar
+          // or embedded terminal also scrolls independently, and collapsing
+          // those into the flow just pads the PDF with chrome.
+          const len = ((el as HTMLElement).innerText || '').length;
+          if (len < 1000 || len < bodyLen * 0.3) continue;
+          for (let n: HTMLElement | null = el as HTMLElement; n; n = n.parentElement) {
+            release(n);
+          }
+        }
+
+        // Same clipping at content scale: code samples and tables capped to a
+        // fixed height with their own scrollbar lose everything past the cap in
+        // a flat PDF (qwen.ai caps each listing at 500px, hiding ~two-thirds of
+        // the longer ones). The upper bound keeps a runaway embedded log from
+        // expanding into hundreds of pages.
+        for (const el of document.querySelectorAll('pre, code, table')) {
+          const h = el as HTMLElement;
+          if (h.clientHeight > 0 && h.scrollHeight > h.clientHeight + 20 &&
+              h.scrollHeight < 20000) {
+            release(h);
           }
         }
         return count;
@@ -1711,6 +1755,35 @@ export async function convertUrlToPDF(
           .replace(/\s*on X$/, '')
           .replace(/\s*\/ X$/, '')
           .trim();
+      }
+
+      // Single-title SPAs never update <title> per route: every qwen.ai post
+      // reports "Qwen", so they'd all be filed under one name and overwrite
+      // each other. Fall back to the page's headline, but only when the title
+      // is nothing more than the site's own name (title reduces to a substring
+      // of the hostname) — a deliberately short real title like "FAR.AI
+      // Leaderboard 2026" carries information the h1 shouldn't displace.
+      const siteName = (() => {
+        try {
+          const alnum = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const host = alnum(new URL(page.url()).hostname.replace(/^www\./, ''));
+          const t = alnum(pageTitle || '');
+          return t.length > 0 && host.includes(t);
+        } catch {
+          return false;
+        }
+      })();
+      if (!pageTitle || siteName) {
+        const headline = await page.evaluate(() => {
+          const h1s = Array.from(document.querySelectorAll('h1'))
+            .map((h) => (h as HTMLElement).innerText.trim())
+            .filter((t) => t.length > 0);
+          return h1s.length === 1 ? h1s[0] : null;
+        });
+        if (headline && headline.length <= 200 &&
+            headline.length >= (pageTitle?.length ?? 0) + 10) {
+          pageTitle = headline;
+        }
       }
     } catch {
       // Title extraction failed, continue without it

@@ -110,7 +110,14 @@ export function buildUrlBaseName(
     // (enriched) title. An org publishing "report.pdf" / "paper.pdf" / "main.pdf"
     // is the motivating case; arxiv IDs and slugged filenames stay descriptive.
     const lastSeg = parsed.pathname.split('/').filter(Boolean).pop() || '';
-    const nonDescriptivePaths = ['item', 'comments', 'post', 'p', 'a', 'article', 'story', 's'];
+    // Whole-path matches only: a bare section index that identifies the post
+    // through the query string instead (qwen.ai/blog?id=qwen3.8 — every post
+    // on the site would otherwise be saved as "qwen.ai-blog.pdf", each one
+    // overwriting the last). A real slug under the same section
+    // (replit.com/blog/defense-in-depth) reads as "blog-defense-in-depth" and
+    // is untouched.
+    const nonDescriptivePaths = ['item', 'comments', 'post', 'p', 'a', 'article', 'story', 's',
+      'blog', 'blogs', 'news', 'posts', 'index', 'view', 'read'];
     const isNonDescriptive =
       !pathname ||
       nonDescriptivePaths.includes(pathname.toLowerCase()) ||

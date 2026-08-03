@@ -36,6 +36,14 @@ Rerun endpoints must apply the same routing — both `/weeks/:weekId/rerun` and 
 ### Manual Capture vs Karakeep Collision Protection
 Manual captures (Chrome extension → `/api/manual-capture`) must never be overwritten by a later Karakeep bookmark of the same URL. The manual-capture route therefore: (1) marks the URL seen in `BookmarkDeduplicator` (source `'manual'`) so the feed poll skips it, (2) removes matching failed AND waiting/delayed conversion jobs, (3) injects the URL into Karakeep via `createKarakeepBookmark` so the Karakeep plugin shows "already saved", (4) deletes stale same-filename copies from other ISO-week bins (re-capture freshness — the new file's mtime makes it "new" for Select New). Don't remove any of these when refactoring the route.
 
+### App-Shell Scroll Panes (`src/converters/pdf.ts`, un-pin phase)
+`page.pdf()` paginates off the **document** height, so any layout that scrolls the article inside a fixed-height box prints one clipped page no matter how long the article is. `innerText` still reads the whole thing, which is why these look fine to text-based checks and broken in the PDF. Three variants are handled, all self-gating (they only fire when content actually overflows a pinned box, so normal articles pay nothing):
+1. **html/body/shallow shells** pinned to `100vh` (Politico's Nuxt `div.h-screen`).
+2. **Nested panes at any depth** — an `overflow-y:auto` div ≤ viewport-tall holding ≥30% of the page text and ≥1000 chars. qwen.ai nests a 27000px article in a 900px pane three levels down (`body > #ice-container > div > #…LAYOUT_CONTENT`), and every ancestor is `height:900px; overflow:hidden` — so releasing the pane alone does nothing. **Release the whole ancestor chain up to `<html>`, not just the pane.** The 30% text-share gate is what keeps nav rails and comment sidebars clipped.
+3. **Capped `pre`/`code`/`table`** with their own scrollbar (qwen.ai caps each listing at 500px, hiding ~two-thirds of the long ones). Bounded at 20000px so a runaway embedded log can't expand into hundreds of pages.
+
+Verify changes here against a spread of live URLs, not just the target site — the phase runs on every capture. A before/after harness comparing page count + extracted chars is the cheap way to prove a change is surgical.
+
 ### Quality Pipeline
 Two-layer quality check, both must pass:
 1. **Vision score** (`src/quality/scorer.ts`): Ollama sees viewport-only screenshot (~800px). Don't flag "truncated" from viewport alone. Threshold configurable via `QUALITY_THRESHOLD`.
@@ -82,7 +90,8 @@ Shared save pipeline is in `src/utils/save-pdf.ts` (`savePdfToWeeklyBin` + `embe
 
 ### Filename Conventions
 - Source URL is embedded in PDF `Subject` so Rerun works after BullMQ pruning (14 days / 2000 jobs retention)
-- Non-descriptive URL paths (HN `/item`, Reddit `/comments`, etc.) use the page title for filename instead of the path segment
+- Non-descriptive URL paths (HN `/item`, Reddit `/comments`, bare section indexes like `/blog`, `/news`) use the page title for filename instead of the path segment. Whole-path matches only — `replit.com/blog/some-slug` keeps its slug. This matters where the post id lives in the query string (`qwen.ai/blog?id=qwen3.8`): without it every post on the site saves as `qwen.ai-blog.pdf` and silently overwrites the previous one
+- `pageTitle` falls back to the page's single `h1` when `<title>` is just the site's own name (title reduces to a substring of the hostname). Single-title SPAs never update `<title>` per route — every qwen.ai post reports "Qwen". A deliberately short *real* title ("FAR.AI Leaderboard 2026") is not a hostname substring and is left alone
 - Twitter: `article` for X Articles (direct from X), `post` for tweets (via Nitter) — never "status"
 - On rerun, if new filename differs from old, the worker deletes `oldFilePath` *after* successful save. Both rerun endpoints must thread `oldFilePath` through `ConversionJobData`.
 

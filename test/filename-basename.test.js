@@ -39,6 +39,35 @@ test('status captures classified as X Articles use article filenames', () => {
   );
 });
 
+test('bare section-index path falls back to the title (qwen.ai query-string posts)', () => {
+  // Every post lives at /blog?id=<slug>, so the path alone names them all
+  // "qwen.ai-blog" and each capture overwrites the previous one.
+  assert.equal(
+    buildUrlBaseName('https://qwen.ai/blog?id=qwen3.8', {
+      title: 'Qwen3.8-Max: A New Bar for Coding and Cowork',
+    }),
+    'qwen.ai-qwen38-max-a-new-bar-for-coding-and-cowork',
+  );
+  assert.notEqual(
+    buildUrlBaseName('https://qwen.ai/blog?id=qwen3.8', { title: 'Qwen3.8-Max' }),
+    buildUrlBaseName('https://qwen.ai/blog?id=qwen3.7', { title: 'Qwen3.7 Released' }),
+  );
+});
+
+test('a real slug under the same section keeps its path', () => {
+  assert.equal(
+    buildUrlBaseName(
+      'https://replit.com/blog/defense-in-depth-how-replit-secures-every-layer',
+      { title: 'Some Enriched Title' },
+    ),
+    'replit.com-blog-defense-in-depth-how-replit-secures-every-layer',
+  );
+  assert.equal(
+    buildUrlBaseName('https://gruhn.me/blog/2026-08-03/', { title: "Don't be a meat proxy" }),
+    'gruhn.me-blog-2026-08-03',
+  );
+});
+
 import { isGenericPdfBasename } from '../dist/utils/save-pdf.js';
 
 test('isGenericPdfBasename: catches generic + double-extension names', () => {
