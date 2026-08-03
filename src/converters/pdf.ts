@@ -314,12 +314,17 @@ function rewriteDatawrapperUrl(url: string): string {
 /**
  * Rewrite legacy Qwen GitHub Pages blog URLs to the current qwen.ai post URL.
  *
- * qwenlm.github.io/blog/<slug>/ redirects to qwen.ai but DROPS the slug,
- * landing on the near-empty Research index — the capture then fails the
- * truncation check with ~90 chars of nav text. The post itself lives at
- * qwen.ai/blog?id=<slug> (same slug, verified against a successful capture
- * of the identical article), which the pipeline already handles end to end
- * (scroll-pane un-pin, query-string filename, h1 title fallback).
+ * A legacy post that still exists there serves a 5s meta-refresh to
+ * qwen.ai/blog?id=<slug>, keeping the slug — Playwright finishes before the
+ * refresh fires, so those already captured fine. The failure is a slug that
+ * has since been retired: GitHub Pages 404s, and the site's own 404 page
+ * refreshes to qwen.ai/research instead — a near-empty index that fails the
+ * truncation check with ~90 chars of nav text.
+ *
+ * Rewriting up front takes both cases straight to the canonical post, which
+ * the pipeline handles end to end (scroll-pane un-pin, query-string filename,
+ * h1 title fallback). Only `targetUrl` is rewritten, so the PDF's Subject
+ * keeps the URL the user actually bookmarked.
  */
 export function rewriteQwenBlogUrl(url: string): string {
   try {

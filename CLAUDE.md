@@ -181,7 +181,7 @@ curl -X POST http://localhost:3002/api/jobs \
 |---|---|---|
 | `QUALITY_THRESHOLD` | 50 | Vision score 0-100 |
 | `OLLAMA_MODEL` | `gemma4:e4b` | Vision scoring (and enrichment default) |
-| `ENRICHMENT_MODEL` | = `OLLAMA_MODEL` | Text-only metadata enrichment/translation. Set to `gemma3:4b` in compose (~4x faster than e4b per ablation data). Small models hallucinate authors/dates, so `validateFactualFields` in enrichment.ts nulls author/publishDate unless verbatim-present in source text/URL — don't remove that guard |
+| `ENRICHMENT_MODEL` | = `OLLAMA_MODEL` | Text-only metadata enrichment/translation. Set to `gemma3:4b` in compose (~4x faster than e4b per ablation data). Small models hallucinate authors/dates/publishers, so `validateFactualFields` in enrichment.ts nulls author/publishDate unless verbatim-present in source text/URL, and replaces a well-known outlet name that neither the domain nor a masthead supports — don't remove those guards. **Never put a real outlet name in the prompt as an example**: its lone `nytimes.com → The New York Times` example primed ~265 files into claiming the NYT |
 | `TRANSCRIPT_FORMAT_MODEL` | `gemma4:latest` | Text formatting |
 | `WHISPER_HOST` | `http://mac.mini:9003` | Parakeet/Whisper ASR (primary) |
 | `WHISPER_HOST_FALLBACK` | `http://10.0.0.81:9003` | Used when primary fails `/health` pre-flight |

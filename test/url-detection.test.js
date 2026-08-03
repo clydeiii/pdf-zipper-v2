@@ -71,3 +71,41 @@ test('isChatGptShareUrl matches share links only', async () => {
   assert.equal(isChatGptShareUrl('https://chatgpt.com/'), false);
   assert.equal(isChatGptShareUrl('https://example.com/share/abc'), false);
 });
+
+// rewriteQwenBlogUrl tests — legacy qwenlm.github.io links must hop straight
+// to the qwen.ai post; the site's own redirect drops the slug (job 22810)
+test('rewriteQwenBlogUrl maps legacy blog post to qwen.ai id URL', async () => {
+  const { rewriteQwenBlogUrl } = await import('../dist/converters/pdf.js');
+  assert.equal(
+    rewriteQwenBlogUrl('https://qwenlm.github.io/blog/qwen3.8/'),
+    'https://qwen.ai/blog?id=qwen3.8'
+  );
+  assert.equal(
+    rewriteQwenBlogUrl('https://qwenlm.github.io/blog/qwen2.5-coder-family'),
+    'https://qwen.ai/blog?id=qwen2.5-coder-family'
+  );
+  assert.equal(
+    rewriteQwenBlogUrl('https://qwenlm.github.io/zh/blog/qwen3.8/'),
+    'https://qwen.ai/blog?id=qwen3.8'
+  );
+});
+
+test('rewriteQwenBlogUrl leaves non-post and foreign URLs alone', async () => {
+  const { rewriteQwenBlogUrl } = await import('../dist/converters/pdf.js');
+  // blog index has no slug to carry over
+  assert.equal(
+    rewriteQwenBlogUrl('https://qwenlm.github.io/blog/'),
+    'https://qwenlm.github.io/blog/'
+  );
+  // non-blog pages on the same host
+  assert.equal(
+    rewriteQwenBlogUrl('https://qwenlm.github.io/about/'),
+    'https://qwenlm.github.io/about/'
+  );
+  // other GitHub Pages sites
+  assert.equal(
+    rewriteQwenBlogUrl('https://karpathy.github.io/blog/some-post/'),
+    'https://karpathy.github.io/blog/some-post/'
+  );
+  assert.equal(rewriteQwenBlogUrl('not-a-url'), 'not-a-url');
+});

@@ -35,7 +35,7 @@ Read with any PDF metadata reader (`pdfinfo`, pypdf, pdf-lib). Custom fields:
 | `Summary` | LLM summary of the content |
 | `Tags` | Comma-separated topic tags |
 | `Language` | ISO language of the source; `Translation` present when a translation was embedded |
-| `Publication` | Publisher / site / posting account |
+| `Publication` | Publisher / site / posting account. Backed by the source domain, by a masthead near the top of the document, or by a curated domain→publisher map. A well-known outlet name that none of those support is replaced by the domain-derived name, so a capture is not attributed to an outlet merely quoted inside it. **Files captured before 2026-08-03 predate this guard** — roughly 265 of them name "The New York Times" on domains that are not the NYT, and `Creator` on those reads "The New York Times via pdf-zipper v2". Treat `Subject` (the source URL) as authoritative wherever the two disagree |
 | `PublishDate` | Publication date. For tweets this is the **exact** timestamp lifted from the rendered DOM (ISO 8601) and overrides any LLM guess |
 | `Creator` | Which pipeline made this: `pdf-zipper v2` (Playwright), `pdf-zipper-v2-archive` (archive.today snapshot), `pdf-zipper-v2-chrome-plugin-vX.Y.Z` (manual browser capture) |
 | `ViaArchive` | Present when content came via an archive.today snapshot (value = snapshot URL) or an archive wrapper the user captured manually |
