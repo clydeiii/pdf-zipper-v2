@@ -32,6 +32,7 @@ import { enrichDocumentMetadata, type EnrichedMetadata } from '../metadata/enric
 import { captureViaArchive } from '../converters/archive-fallback.js';
 import { isChatGptShareUrl, captureChatGptShare } from '../converters/chatgpt-share.js';
 import { harvestArticleToDb, harvestTweetToDb, twitterHarvestKind } from '../twitter/harvest.js';
+import { fetchPangramDetection, pangramInfoDictFields } from '../substack/pangram.js';
 import type { ArticleFallbackContent } from '../twitter/types.js';
 
 /** Reference to the worker instance. Created explicitly by startWorker(). */
@@ -474,10 +475,32 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
   // Tweet graph edges from the Nitter DOM → Info Dict. The exact DOM
   // timestamp overrides the LLM's PublishDate guess (extras are applied
   // after enrichment fields in embedPdfMetadata, so last write wins).
-  const tweetExtras: Record<string, string> = {};
-  if (result.tweetRelations?.quotedTweet) tweetExtras.QuotedTweet = result.tweetRelations.quotedTweet;
-  if (result.tweetRelations?.inReplyTo) tweetExtras.InReplyTo = result.tweetRelations.inReplyTo;
-  if (result.tweetRelations?.tweetDate) tweetExtras.PublishDate = result.tweetRelations.tweetDate;
+  const infoDictExtras: Record<string, string> = {};
+  if (result.tweetRelations?.quotedTweet) infoDictExtras.QuotedTweet = result.tweetRelations.quotedTweet;
+  if (result.tweetRelations?.inReplyTo) infoDictExtras.InReplyTo = result.tweetRelations.inReplyTo;
+  if (result.tweetRelations?.tweetDate) infoDictExtras.PublishDate = result.tweetRelations.tweetDate;
+
+  // Substack's Pangram AI-detection verdict + the writer's disclosure. Fetched
+  // at capture time on purpose: it is computed against the post as it stands,
+  // so a later edit would score differently. Non-fatal — a null just means no
+  // AIDetection* fields on this capture.
+  try {
+    const detection = await fetchPangramDetection(originalUrl || url);
+    if (detection) {
+      Object.assign(infoDictExtras, pangramInfoDictFields(detection));
+      console.log(JSON.stringify({
+        event: 'pangram_detection_captured',
+        url: originalUrl || url,
+        type: detection.type,
+        header: detection.header,
+        fractionAi: detection.fractionAi,
+        hasDisclosure: Boolean(detection.disclosure),
+        timestamp: new Date().toISOString(),
+      }));
+    }
+  } catch (error) {
+    console.warn(`Pangram detection failed for ${url}:`, error instanceof Error ? error.message : error);
+  }
 
   // Only save PDF after quality check passes
   const pdfPath = await savePdfToWeeklyBin(result.pdfBuffer, {
@@ -487,7 +510,7 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
     originalUrl,
     isXArticle,
     enrichedMetadata,
-    extraInfoDictFields: Object.keys(tweetExtras).length > 0 ? tweetExtras : undefined,
+    extraInfoDictFields: Object.keys(infoDictExtras).length > 0 ? infoDictExtras : undefined,
   });
   console.log(`PDF saved to: ${pdfPath}`);
 

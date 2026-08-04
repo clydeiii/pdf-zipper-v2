@@ -41,8 +41,23 @@ Read with any PDF metadata reader (`pdfinfo`, pypdf, pdf-lib). Custom fields:
 | `ViaArchive` | Present when content came via an archive.today snapshot (value = snapshot URL) or an archive wrapper the user captured manually |
 | `QuotedTweet` | Tweet captures only: canonical `https://x.com/{user}/status/{id}` URL of the status this tweet quotes. **Authoritative graph edge** — prefer it over parsing the rendered text |
 | `InReplyTo` | Tweet captures only: canonical URL of the parent status this tweet replies to |
+| `AIDetection` | Substack posts only: Pangram's AI-detection verdict as shown to readers, e.g. `Fully Human-Written`, `Mostly Human-Written`, `Partially AI-assisted text`. Also carries the reasons a scan produced no score — `Subscription required` (paywalled), `Not eligible for AI detection` (usually under ~100 words), `AI detection unavailable` (writer disabled it) |
+| `AIDetectionStatus` | Machine-readable companion to `AIDetection`: `success`, `error`, `disabled`, `pending`. Percentages exist only when this is `success` |
+| `AIDetectionAI` / `AIDetectionAIAssisted` / `AIDetectionHuman` | Share of the post's text in each class, as whole percentages (`67%`). They sum to ~100%. `AIDetectionAI: 0%` is a real measurement and means something different from the field being absent |
+| `AIDetectionSource` / `AIDetectionCheckedAt` | Always `Pangram via Substack`, and when the scan ran (ISO 8601). The verdict is computed against the post as it stood at capture time — an edited post would score differently, so treat this as a point-in-time reading, not a durable property |
+| `AIDisclosure` | The writer's own "How I make this" statement, when they published one. This is a self-report and is independent of the Pangram score; the two can disagree. Normalised whitespace, truncated past 1200 chars with `…` |
 | `CaptureScope` | Manual captures: `page`, `reader`, or `selection` |
 | `Markdown` / `MarkdownLength` / `MarkdownExtractedBy` | Manual captures: a clean Readability/Turndown markdown extraction of the article, embedded alongside the rendered PDF |
+
+AI-detection caveats — these fields are evidence, not verdicts:
+- **Absence means "not measured", never "human-written".** Only Substack posts
+  are scanned, because Substack is the only source here that publishes a
+  detection result. Everything else in the library is simply unchecked.
+- Pangram is a statistical classifier with real error rates in both
+  directions, and reporting on the Substack launch flagged concern about
+  false positives on some writers. Do not treat a score as proof of authorship.
+- `AIDisclosure` is the writer speaking; `AIDetection` is a model guessing.
+  Quote them separately and attribute each.
 
 Tweet capture conventions:
 - Filenames: `x.com-{account}-post-{statusId}.pdf` for tweets (rendered via a
