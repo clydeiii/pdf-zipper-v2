@@ -288,6 +288,36 @@ async function loadWeek(weekId) {
 }
 
 /**
+ * Render the Substack/Pangram AI-detection badge for a file's metadata.
+ *
+ * A scored post always shows its percentage, including 0% — "measured, no AI"
+ * and "never measured" are different facts and must not look alike. Posts that
+ * were checked but couldn't be scored (paywalled, too short, writer disabled
+ * it) get a muted marker rather than a number, so a reader can tell the check
+ * ran. Returns '' when there's no detection data at all.
+ */
+function renderAiBadge(m) {
+  if (!m.aiDetection) return '';
+  const verdict = m.aiDetection;
+  const disclosure = m.aiHasDisclosure ? ' · writer disclosure attached' : '';
+
+  if (typeof m.aiPercent !== 'number') {
+    return `<span class="badge-ai badge-ai-none" title="${escapeHtml(verdict + disclosure)}">AI —</span>`;
+  }
+  // The badge shows AI *involvement* (fully-AI + AI-assisted). Showing the
+  // fully-AI figure alone would badge a real 0%/51%-assisted/49%-human post as
+  // "AI 0%". The breakdown goes in the tooltip.
+  const breakdown = [];
+  if (typeof m.aiFullyPercent === 'number') breakdown.push(`${m.aiFullyPercent}% AI`);
+  if (typeof m.aiAssistedPercent === 'number') breakdown.push(`${m.aiAssistedPercent}% AI-assisted`);
+  if (typeof m.aiHumanPercent === 'number') breakdown.push(`${m.aiHumanPercent}% human`);
+
+  const level = m.aiPercent >= 50 ? 'high' : m.aiPercent >= 10 ? 'mid' : 'low';
+  const tip = `${verdict}${breakdown.length ? ' — ' + breakdown.join(', ') : ''}${disclosure}`;
+  return `<span class="badge-ai badge-ai-${level}" title="${escapeHtml(tip)}">AI ${m.aiPercent}%</span>`;
+}
+
+/**
  * Render a regular file row
  */
 function renderFileRow(file, index) {
@@ -321,6 +351,8 @@ function renderFileRow(file, index) {
   if (file.metadata) {
     const m = file.metadata;
     const parts = [];
+    const aiBadge = renderAiBadge(m);
+    if (aiBadge) parts.push(aiBadge);
     if (m.author) parts.push(escapeHtml(m.author));
     if (m.publication) parts.push(escapeHtml(m.publication));
     if (m.language && m.language !== 'en') parts.push(`🌐 ${escapeHtml(m.language)}${m.hasTranslation ? ' (translated)' : ''}`);
@@ -620,10 +652,11 @@ function getFilteredItems() {
   let statusFilter = null; // null = no status filter, true = success only, false = failed only
   let dateFilter = null;   // normalized YYYY-MM-DD prefix
   let typeFilter = null;
+  let aiFilter = null;     // { mode: 'any' } | { mode: 'threshold', min, strict }
   const textTerms = [];
 
   for (const term of currentFilter.split(/\s+/).filter(Boolean)) {
-    const kv = term.match(/^(status|date|type):(.*)$/);
+    const kv = term.match(/^(status|date|type|ai):(.*)$/);
     if (!kv) { textTerms.push(term); continue; }
     const [, key, rawValue] = kv;
     if (key === 'status') {
@@ -640,6 +673,23 @@ function getFilteredItems() {
       }
     } else if (key === 'type') {
       typeFilter = rawValue;
+    } else if (key === 'ai') {
+      // ai:any    → every post carrying a detection result, scored or not
+      // ai:scored → only posts with an actual percentage
+      // ai:>50 / ai:>=50 / ai:50 → percentage over the threshold
+      //   (a bare number reads as "at least", so ai:0 shows every scored post)
+      if (rawValue === 'any') {
+        aiFilter = { mode: 'any' };
+      } else if (rawValue === 'scored') {
+        aiFilter = { mode: 'threshold', min: 0, strict: false };
+      } else {
+        const cmp = rawValue.match(/^(>=|>)?\s*(\d+(?:\.\d+)?)%?$/);
+        if (cmp) {
+          aiFilter = { mode: 'threshold', min: Number(cmp[2]), strict: cmp[1] === '>' };
+        } else {
+          aiFilter = { mode: 'none' }; // malformed value matches nothing
+        }
+      }
     }
   }
 
@@ -652,6 +702,16 @@ function getFilteredItems() {
     if (typeFilter) {
       const itemType = item.isFailed ? 'failed' : (item.type || '');
       if (itemType !== typeFilter) return false;
+    }
+
+    if (aiFilter) {
+      if (aiFilter.mode === 'none') return false;
+      const m = item.metadata;
+      if (!m || !m.aiDetection) return false;
+      if (aiFilter.mode === 'threshold') {
+        if (typeof m.aiPercent !== 'number') return false;
+        if (aiFilter.strict ? !(m.aiPercent > aiFilter.min) : !(m.aiPercent >= aiFilter.min)) return false;
+      }
     }
 
     for (const term of textTerms) {

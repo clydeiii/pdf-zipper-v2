@@ -12,6 +12,7 @@ import { Stats } from 'node:fs';
 import * as path from 'node:path';
 import { PDFDocument } from 'pdf-lib';
 import { readInfoDictField } from '../../utils/pdf-info-dict.js';
+import { parsePercentField, aiInvolvementPercent } from '../../utils/percent.js';
 import { readAudioMetadata, readVideoMetadata } from '../../metadata/media-tags-reader.js';
 import { env } from '../../config/env.js';
 import { conversionQueue } from '../../queues/conversion.queue.js';
@@ -57,6 +58,23 @@ interface FileInfo {
     language?: string;
     tags?: string[];
     hasTranslation?: boolean;
+    /** Substack/Pangram verdict, e.g. "Partially AI-assisted text". */
+    aiDetection?: string;
+    /** success | error | disabled | pending — percentages exist only on success. */
+    aiStatus?: string;
+    /**
+     * Percent of the post NOT judged human-written (fully-AI + AI-assisted).
+     * This is what the badge and the `ai:` filter key off — the fully-AI
+     * figure alone hides posts that are heavily AI-assisted. 0 is a real
+     * reading, not "absent".
+     */
+    aiPercent?: number;
+    /** The breakdown behind aiPercent, for the tooltip. */
+    aiFullyPercent?: number;
+    aiAssistedPercent?: number;
+    aiHumanPercent?: number;
+    /** True when the writer published a "How I make this" statement. */
+    aiHasDisclosure?: boolean;
   };
 }
 
@@ -310,11 +328,20 @@ async function loadPdfFileInfo(
 
     const summary = readInfoDictField(pdfDoc, 'Summary');
     const language = readInfoDictField(pdfDoc, 'Language');
+    const aiDetection = readInfoDictField(pdfDoc, 'AIDetection');
 
+    // A capture can carry a detection result without any enrichment (e.g. the
+    // enrichment model was down), so aiDetection joins the gate rather than
+    // riding along inside it.
     let metadata: FileInfo['metadata'] | undefined;
-    if (summary || language) {
+    if (summary || language || aiDetection) {
       const tagsStr = readInfoDictField(pdfDoc, 'Tags');
       const translation = readInfoDictField(pdfDoc, 'Translation');
+      const aiParts = {
+        ai: parsePercentField(readInfoDictField(pdfDoc, 'AIDetectionAI')),
+        assisted: parsePercentField(readInfoDictField(pdfDoc, 'AIDetectionAIAssisted')),
+        human: parsePercentField(readInfoDictField(pdfDoc, 'AIDetectionHuman')),
+      };
       metadata = {
         title: pdfDoc.getTitle() || undefined,
         author: pdfDoc.getAuthor() || undefined,
@@ -323,6 +350,13 @@ async function loadPdfFileInfo(
         language: language || undefined,
         tags: tagsStr ? tagsStr.split(', ').filter(Boolean) : undefined,
         hasTranslation: !!translation,
+        aiDetection: aiDetection || undefined,
+        aiStatus: readInfoDictField(pdfDoc, 'AIDetectionStatus'),
+        aiPercent: aiInvolvementPercent(aiParts),
+        aiFullyPercent: aiParts.ai,
+        aiAssistedPercent: aiParts.assisted,
+        aiHumanPercent: aiParts.human,
+        aiHasDisclosure: !!readInfoDictField(pdfDoc, 'AIDisclosure') || undefined,
       };
     }
 
@@ -1094,6 +1128,12 @@ filesRouter.get('/metadata/*', async (req: Request, res: Response): Promise<void
       translation: readInfoDictField(pdfDoc, 'Translation') || null,
       sourceUrl: pdfDoc.getSubject() || null,
       enrichedAt: readInfoDictField(pdfDoc, 'EnrichedAt') || null,
+      aiDetection: readInfoDictField(pdfDoc, 'AIDetection') || null,
+      aiDetectionStatus: readInfoDictField(pdfDoc, 'AIDetectionStatus') || null,
+      aiDetectionAI: readInfoDictField(pdfDoc, 'AIDetectionAI') || null,
+      aiDetectionHuman: readInfoDictField(pdfDoc, 'AIDetectionHuman') || null,
+      aiDetectionCheckedAt: readInfoDictField(pdfDoc, 'AIDetectionCheckedAt') || null,
+      aiDisclosure: readInfoDictField(pdfDoc, 'AIDisclosure') || null,
     };
 
     res.json(metadata);

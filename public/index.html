@@ -77,8 +77,12 @@
                 <tr><td><code>status:fail</code></td><td>only failed items (alias: <code>status:failed</code>)</td></tr>
                 <tr><td><code>date:2026-07-02</code></td><td>only items from that day (local time). <code>date:20260702</code> works; a prefix like <code>date:2026-07</code> matches the month</td></tr>
                 <tr><td><code>type:video</code></td><td>only that file type (<code>pdf</code>, <code>video</code>, <code>audio</code>, <code>transcript</code>)</td></tr>
+                <tr><td><code>ai:&gt;50</code></td><td>Substack posts where Pangram judged over 50% of the text AI-written <em>or</em> AI-assisted. <code>ai:&gt;=50</code> and a bare <code>ai:50</code> mean "at least"</td></tr>
+                <tr><td><code>ai:scored</code></td><td>every post with a percentage (same as <code>ai:0</code>)</td></tr>
+                <tr><td><code>ai:any</code></td><td>every post that was checked, including ones with no score (paywalled, too short, detection off)</td></tr>
               </table>
               Example: <code>date:2026-07-02 type:video</code>, then click <em>Size</em> to see what ate the disk that day.
+              <br>Only Substack posts carry an AI score — no badge means <em>not measured</em>, not "human-written".
             </div>
           </div>
           <span id="filter-status" class="filter-status"></span>
