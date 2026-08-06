@@ -199,6 +199,25 @@ const ARTICLE_CONCLUSION_MARKERS = [
 ];
 
 /**
+ * Reader-engagement chrome — comment CTAs, related-content widgets, app
+ * banners. These render only when the page shell loaded fine, so a large PDF
+ * whose text is headline + this chrome with no body paragraphs is a
+ * client-side paywall strip, not a broken render: Business Insider
+ * "EXCLUSIVE" (premium) articles render headline, byline, hero image and
+ * "Start the conversation" / "Read next", with every body paragraph removed
+ * (real case: 611KB PDF, 545 chars). Two distinct markers are required so a
+ * stray phrase in article prose can't reclassify a genuine truncation. Only
+ * consulted inside the already-failing large-PDF check — it never changes
+ * pass/fail, only the failure classification.
+ */
+const ENGAGEMENT_CHROME_PATTERNS = [
+  /\bstart\s+the\s+conversation\b/i,
+  /\bjoin\s+the\s+conversation\b/i,
+  /\bread\s+next\b/i,
+  /\bread\s+in\s+app\b/i,
+];
+
+/**
  * Social-media post markers (Mastodon / fediverse).
  *
  * A social post captured to PDF can be large (embedded screenshot/quote image)
@@ -649,6 +668,21 @@ export async function analyzePdfContent(
           ...baseResult,
           passed: false,
           reason: `Paywall detected: large PDF contains textless body pages between a rendered lede and footer content.`,
+        };
+      }
+      // Headline + engagement chrome but no body: client-side paywall strip
+      // (Business Insider premium shape). "Paywall detected" wording is
+      // load-bearing: classifyFailureMessage keys on it → paywall class →
+      // archive.today fallback candidate, and the self-heal system treats it
+      // as a hard blocker (manual-capture territory) rather than a suspected
+      // quality miss to re-diagnose.
+      const chromeMarkerCount = ENGAGEMENT_CHROME_PATTERNS
+        .filter((pattern) => pattern.test(normalizedText)).length;
+      if (chromeMarkerCount >= 2) {
+        return {
+          ...baseResult,
+          passed: false,
+          reason: `Paywall detected: page chrome rendered (comments/read-next widgets) but article body is missing (${charCount} chars in ${Math.round(pdfSize / 1024)}KB PDF). Client-side paywall strip.`,
         };
       }
       return {
