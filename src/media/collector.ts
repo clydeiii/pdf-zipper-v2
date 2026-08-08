@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import { getWeeklyBinPath, ensureWeeklyBinExists, getMediaFilename } from './organization.js';
 import { env } from '../config/env.js';
 import type { MediaItem, MediaCollectionResult } from './types.js';
+import { downloadPatreonVideo } from './patreon.js';
 
 /**
  * Get authorization header for Karakeep asset downloads
@@ -73,6 +74,31 @@ export async function downloadMedia(item: MediaItem): Promise<MediaCollectionRes
       }
       // File exists but is empty - delete and re-download
       unlinkSync(filePath);
+    }
+
+    // Streamed behind a login (Patreon): the enclosure URL is a page to extract
+    // from, not a file to GET, so hand it to yt-dlp instead of the HTTP path.
+    if (item.enclosure.downloadVia === 'yt-dlp') {
+      const outcome = await downloadPatreonVideo(item.enclosure.url, filePath);
+      if (outcome.ok) {
+        return {
+          success: true,
+          item,
+          filePath: outcome.filePath,
+          fileSize: outcome.sizeBytes,
+          downloadDuration: Date.now() - startTime,
+        };
+      }
+      return {
+        success: false,
+        item,
+        error: outcome.reason === 'no_video'
+          ? 'Post carries no downloadable video'
+          : outcome.error,
+        // no_video is a fact about the post, not a transient fault — surface it
+        // as skipped so the worker doesn't burn five BullMQ retries on it.
+        reason: outcome.reason === 'no_video' ? 'no_media' : 'download_failed',
+      };
     }
 
     // Determine protocol from URL

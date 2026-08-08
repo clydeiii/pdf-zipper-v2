@@ -14,6 +14,7 @@ import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import { env } from '../config/env.js';
 import { isTwitterUrl } from '../utils/save-pdf.js';
+import { isPatreonPostUrl } from './patreon.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -165,6 +166,18 @@ export async function fetchYouTubeMetadata(url: string): Promise<YouTubeMetadata
   // silent X clips (no transcript) on the re-enrich path, where the Karakeep
   // feed title is no longer available. Callers must NOT use channel/title for
   // filenames on X URLs (the x.com-{account}-post-{id} convention wins).
+  // Patreon is allowed on the same terms: the Karakeep feed can't scrape a
+  // member-only post, so its title arrives as the bare hostname ("patreon.com")
+  // and there is no description at all. yt-dlp has the real title, the post
+  // body (which carries the creator's source links) and the publish date.
+  // Naming is likewise off-limits — the patreon.com-{creator}-posts-{slug}
+  // convention pairs the MP4 with the post's PDF.
+  if (isPatreonPostUrl(url)) {
+    // No point trying anonymously: member-only posts 403 without the session.
+    const cookies = env.COOKIES_FILE;
+    return cookies && existsSync(cookies) ? await runYtDlp(url, cookies) : null;
+  }
+
   if (!isYouTubeOrVimeoUrl(url) && !isTwitterUrl(url)) return null;
 
   const meta = await runYtDlp(url);

@@ -27,6 +27,7 @@ import { createMultipartFileBody } from '../utils/multipart.js';
 import { sendDiscordNotification } from '../notifications/discord.js';
 import { fetchYouTubeMetadata } from './youtube-metadata.js';
 import { isTwitterUrl } from '../utils/save-pdf.js';
+import { isPatreonPostUrl } from './patreon.js';
 import { env } from '../config/env.js';
 import type { MediaItem } from './types.js';
 
@@ -41,6 +42,27 @@ const sanitizeFilename = require('sanitize-filename') as (input: string) => stri
  * Slug rules match getPodcastBaseFilename for cross-format consistency: lower
  * case, drop non-alphanumeric, collapse runs of dashes, cap at 30/50 chars.
  */
+/**
+ * True when a feed title is just the site's hostname — what Karakeep stores
+ * when it couldn't scrape the page at all (a member-only Patreon post comes
+ * through titled "patreon.com"). Such a title is worse than none: it would
+ * otherwise beat yt-dlp's real title everywhere it's used as a fallback.
+ *
+ * Exported for testing.
+ */
+export function isHostnamePlaceholderTitle(
+  title: string | undefined,
+  url: string
+): boolean {
+  if (!title) return false;
+  try {
+    const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+    return title.trim().toLowerCase().replace(/^www\./, '') === host;
+  } catch {
+    return false;
+  }
+}
+
 function buildVideoBaseName(channel: string | undefined, title: string | undefined): string | null {
   if (!channel || !title) return null;
   const slug = (s: string, max: number) =>
@@ -282,12 +304,20 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
   // derived name for ~15 min while transcription runs. Pays a ~2-3s yt-dlp
   // latency cost up front. Best-effort: any failure keeps the original path.
   const ytMeta = await fetchYouTubeMetadata(item.url);
+  // Karakeep falls back to the bare hostname when it can't scrape a page
+  // (member-only Patreon posts arrive titled "patreon.com"). That's not a
+  // title — treat it as missing so yt-dlp's real one wins everywhere below.
+  const feedTitle = isHostnamePlaceholderTitle(item.title, item.url)
+    ? undefined
+    : item.title;
   // X videos keep the x.com-{account}-post-{id} filename convention — the
   // channel-title rename is for YouTube/Vimeo only (ytMeta now resolves for
   // X URLs too, but only to source post text/channel metadata, not naming).
-  const earlyBase = isTwitterUrl(item.url)
+  // Patreon joins X here: its filename pairs the MP4 with the post's PDF, so
+  // a {channel}-{title} rename would break that link.
+  const earlyBase = isTwitterUrl(item.url) || isPatreonPostUrl(item.url)
     ? null
-    : buildVideoBaseName(ytMeta?.channel, item.title || ytMeta?.title);
+    : buildVideoBaseName(ytMeta?.channel, feedTitle || ytMeta?.title);
   if (earlyBase) {
     const dir = path.dirname(mp4Path);
     const newMp4Path = path.join(dir, `${earlyBase}.mp4`);
@@ -317,7 +347,7 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
     console.log(`Skipping transcription for ${mp4Path} (${Math.round(durationMin)}min > ${env.MAX_VIDEO_TRANSCRIBE_MINUTES}min limit)`);
     // Still write basic metadata even without transcript
     result.metadataWritten = await enrichVideoFile(mp4Path, {
-      title: item.title || undefined,
+      title: feedTitle || undefined,
       custom: {
         doc_type: 'video',
         source_url: item.url,
@@ -337,7 +367,7 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
   // placeholder title (exactly the bug this guards against). Best-effort.
   try {
     await enrichVideoFile(mp4Path, {
-      title: item.title || ytMeta?.title || undefined,
+      title: feedTitle || ytMeta?.title || undefined,
       custom: {
         doc_type: 'video',
         source_url: item.url,
@@ -363,10 +393,10 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
     let tags: string[] | undefined;
     let enrichedAuthor: string | undefined;
     let enrichedPublication: string | undefined;
-    const postText = [item.title, ytMeta?.description].filter(Boolean).join('\n\n');
+    const postText = [feedTitle, ytMeta?.description].filter(Boolean).join('\n\n');
     if (postText.length >= 40) {
       try {
-        const enriched = await enrichDocumentMetadata(postText.slice(0, 8000), item.url, item.title);
+        const enriched = await enrichDocumentMetadata(postText.slice(0, 8000), item.url, feedTitle);
         summary = enriched.summary;
         tags = canonicalizeTags(enriched.tags, extractHintTokens(postText));
         enrichedAuthor = enriched.author || undefined;
@@ -392,7 +422,7 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
     commentParts.push(`Source: ${item.url}`);
 
     result.metadataWritten = await enrichVideoFile(mp4Path, {
-      title: item.title || undefined,
+      title: feedTitle || undefined,
       artist: creator,
       album: publisher,
       comment: commentParts.join('\n'),
@@ -420,7 +450,7 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
     console.log(`Audio extracted: ${audioPath}`);
 
     // Step 2: Transcribe with Parakeet (text + VTT)
-    const videoTitle = item.title || path.basename(mp4Path, '.mp4');
+    const videoTitle = feedTitle || path.basename(mp4Path, '.mp4');
     await sendDiscordNotification({
       type: 'info',
       title: '🎬 Parakeet: transcribing video',
@@ -453,7 +483,7 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
     // "jeppa" for JEPA) into the Info Dict even though the PDF body gets the
     // corrected text. Same order as the podcast path (podcast-worker.ts).
     let formattedTranscript = text;
-    const hasTitle = !!(item.title);
+    const hasTitle = !!(feedTitle);
     if (hasTitle) {
       await sendDiscordNotification({
         type: 'info',
@@ -469,7 +499,7 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
     const formatStart = Date.now();
     try {
       formattedTranscript = await formatTranscriptWithLLM(text, {
-        episodeTitle: item.title || undefined,
+        episodeTitle: feedTitle || undefined,
         // The yt-dlp description usually spells domain terms correctly
         // (JEPA, VJEPA2) that the title lacks and ASR garbles
         extraHintText: ytMeta?.description?.slice(0, 3000),
@@ -502,12 +532,12 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
       const enriched = await enrichDocumentMetadata(
         formattedTranscript.slice(0, 8000),
         item.url,
-        item.title
+        feedTitle
       );
       summary = enriched.summary;
       tags = canonicalizeTags(
         enriched.tags,
-        extractHintTokens([item.title, ytMeta?.description].filter(Boolean).join(' '))
+        extractHintTokens([feedTitle, ytMeta?.description].filter(Boolean).join(' '))
       );
       enrichedAuthor = enriched.author || undefined;
       enrichedPublication = enriched.publication || undefined;
@@ -545,7 +575,7 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
     commentParts.push(`Source: ${item.url}`);
 
     result.metadataWritten = await enrichVideoFile(mp4Path, {
-      title: item.title || undefined,
+      title: feedTitle || undefined,
       artist: creator,
       album: publisher,
       comment: commentParts.join('\n'),
@@ -567,7 +597,7 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
     // Step 5: Generate transcript PDF alongside the video (Karpathy-compliant metadata)
     const transcriptPdfPath = mp4Path.replace(/\.mp4$/i, '.transcript.pdf');
     const pdfBuffer = await generateTranscriptPdf({
-      title: item.title || ytMeta?.title || deriveTitleFromFilename(mp4Path),
+      title: feedTitle || ytMeta?.title || deriveTitleFromFilename(mp4Path),
       sourceUrl: item.url,
       date: ytMeta?.uploadDate || item.bookmarkedAt,
       summary,

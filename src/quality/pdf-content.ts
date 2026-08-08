@@ -10,6 +10,7 @@
  */
 
 import { createRequire } from 'node:module';
+import { isPatreonPostUrl } from '../media/patreon.js';
 
 const require = createRequire(import.meta.url);
 
@@ -393,6 +394,23 @@ function isDomainRootUrl(sourceUrl: string | undefined): boolean {
 }
 
 /**
+ * True when the capture isn't article-shaped, so the heuristics that assume a
+ * prose body don't apply: a landing page, or a Patreon post, whose page is a
+ * video player plus a short blurb. All four real Patreon captures were
+ * rejected as "Truncated body: site-template marker \"Related posts\"" — the
+ * marker sits right under a legitimately short description, exactly like a
+ * paywalled stub. The video itself is downloaded separately by
+ * src/media/patreon.ts, so the PDF is only ever the surrounding text.
+ *
+ * These skip the article-shaped checks and keep the minimum-chars floor and
+ * hostile-page checks, so a blocked or blank capture still fails.
+ */
+function isNonArticleUrl(sourceUrl: string | undefined): boolean {
+  if (!sourceUrl) return false;
+  return isDomainRootUrl(sourceUrl) || isPatreonPostUrl(sourceUrl);
+}
+
+/**
  * Extract and analyze text content from a PDF buffer
  * Detects truncated articles by checking text-to-size ratio
  *
@@ -434,9 +452,9 @@ export async function analyzePdfContent(
       extractedText: normalizedText,
     };
 
-    // Domain-root capture: a landing page has no article body to truncate,
-    // so the article-shaped heuristics below don't apply (see option docs).
-    const homepage = isDomainRootUrl(options.sourceUrl);
+    // Non-article capture (landing page, Patreon video post): there's no
+    // prose body to truncate, so the article-shaped heuristics don't apply.
+    const homepage = isNonArticleUrl(options.sourceUrl);
 
     // Check 0: Error page detection (404, page not found, etc.)
     // Only flag if content is short - real error pages don't have much content

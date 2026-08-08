@@ -8,6 +8,7 @@ import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { env } from '../config/env.js';
 import { isTwitterUrl, buildUrlBaseName } from '../utils/save-pdf.js';
+import { isPatreonPostUrl } from './patreon.js';
 import type { MediaType, MediaItem } from './types.js';
 
 // Import CommonJS module using require
@@ -99,7 +100,10 @@ export function getMediaFilename(item: MediaItem): string {
   // next to `x.com-handle-post-12345.pdf`). The downstream KB links them by
   // shared base name. Media enclosures only come from tweets (X Articles are
   // text-only) so isXArticle=false is safe.
-  if (isTwitterUrl(item.url)) {
+  if (isTwitterUrl(item.url) || isPatreonPostUrl(item.url)) {
+    // Same rationale for Patreon: the post gets a PDF capture too, and the KB
+    // pairs the two by shared base name
+    // (patreon.com-aiexplained-posts-opus-5-amodei-165170363.{pdf,mp4}).
     baseName = buildUrlBaseName(item.url, { title: item.title, isXArticle: false });
   } else if (item.title) {
     baseName = item.title;

@@ -73,6 +73,18 @@ Result lands in Info Dict as `AIDetection*` + `AIDisclosure` (writer's "How I ma
 
 **The badge and filter key off AI _involvement_ (`100 − human`, i.e. fully-AI + AI-assisted), not `AIDetectionAI`.** A real capture reads `ai=0%, assisted=51%, human=49%` — Pangram calls it "Partially AI-assisted text", but keying off the fully-AI figure badges it "AI 0%" and hides it from every threshold filter. `aiInvolvementPercent` in `src/utils/percent.ts` owns that definition; the breakdown stays in the tooltip. Non-fatal and additive — any failure returns null and the capture proceeds. Fetch at **capture time**: the verdict is computed against the post as it stands, so a later edit scores differently. Unhappy answers (`Subscription required`, `Not eligible`, writer-`disabled`) are recorded too — "we checked and got no score" is a different fact from "we never checked", and absence of the field must never be read as "human-written".
 
+### Patreon Video Capture (`src/media/patreon.ts`)
+The only video source whose bytes don't come from Karakeep. Karakeep has no Patreon session, so member-only posts arrive as plain `link` bookmarks — no `videoAssetId`, no video asset — and would otherwise be PDF-only. There's also no mp4 to scrape: the video is Mux-hosted HLS (`rendition.m3u8`) behind short-lived signed URLs, so it must be muxed from segments at capture time. The Karakeep parser therefore points the enclosure at the **post URL itself** with `downloadVia: 'yt-dlp'`, and `collector.ts` branches on that instead of its HTTP path.
+
+- Auth is `COOKIES_FILE` (the personal cookies.txt), **not** `YT_DLP_COOKIES_FILE` (that's the work Google account for age-gated YouTube).
+- Format selection caps height at `VIDEO_COMPRESS_MAX_HEIGHT`, so we pull the 480p rendition (~250 kbps) directly and land under the compressor's 1200 kbps floor — no re-encode, ~1/8th the bytes of the 1080p.
+- Filenames use `buildUrlBaseName` like Twitter, so the mp4 pairs with the post's PDF.
+- A text-only post returns `reason: 'no_media'`, which the collection worker treats as **terminal** — retrying an extraction five times reaches the same answer.
+- Patreon is in `isNonArticleUrl` (`quality/pdf-content.ts`): the post page is a player plus a short blurb, and all four real captures were rejected as `Truncated body: site-template marker "Related posts"`. It keeps the min-chars floor and hostile-page checks.
+- `fetchYouTubeMetadata` accepts Patreon (metadata only, never naming) — it's the sole source of the real title, the description with the creator's source links, and the publish date. Karakeep supplies the title `"patreon.com"`, which `isHostnamePlaceholderTitle` discards so it can't win a fallback chain.
+
+**Known wart (pre-existing, affects X too):** `getMediaFilename` lowercases, `buildUrlBaseName` for PDFs doesn't — so `patreon.com-aiexplained-…mp4` sits beside `patreon.com-AIExplained-…pdf`, and the KB's pair-by-basename convention needs a case-insensitive match.
+
 ### Debug Artifacts
 Failed jobs save the actual PDF (not screenshot) to `data/debug/{jobId}.pdf`. Viewable via failure badge or `GET /api/debug/:jobId`.
 

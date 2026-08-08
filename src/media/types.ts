@@ -9,6 +9,13 @@ export interface MediaEnclosure {
   url: string;           // Direct download URL from RSS enclosure
   type: string;          // MIME type like 'video/mp4' or 'application/pdf'
   length?: number;       // File size in bytes (optional, from RSS)
+  /**
+   * How to fetch `url`. Default 'http' streams it directly (Karakeep assets,
+   * RSS enclosures). 'yt-dlp' means `url` is a *page* to extract from rather
+   * than a file to download — used where the host streams HLS behind a login
+   * (Patreon), so there is no single URL to GET.
+   */
+  downloadVia?: 'http' | 'yt-dlp';
 }
 
 export interface MediaItem {
@@ -43,5 +50,10 @@ export type MediaCollectionResult =
       success: false;
       item: MediaItem;
       error: string;          // Error message
-      reason: 'download_failed' | 'timeout' | 'file_missing';
+      /**
+       * 'no_media' means the source genuinely has nothing to download (a
+       * text-only Patreon post). It is terminal, not transient — the worker
+       * must not retry it.
+       */
+      reason: 'download_failed' | 'timeout' | 'file_missing' | 'no_media';
     };

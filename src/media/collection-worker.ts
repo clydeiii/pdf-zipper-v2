@@ -222,6 +222,19 @@ export async function startMediaWorker(): Promise<void> {
         throw new Error(`Transcript not yet available: ${item.url}`);
       }
 
+      // A source with nothing to download (text-only Patreon post) is settled,
+      // not transient. Retrying re-runs an expensive extraction five times to
+      // reach the same answer, so record it and finish cleanly.
+      if (result.reason === 'no_media') {
+        console.log(JSON.stringify({
+          event: 'media_no_content',
+          url: item.url,
+          mediaType: item.mediaType,
+          timestamp: new Date().toISOString(),
+        }));
+        return result;
+      }
+
       // For other failures, also throw to trigger retry
       throw new Error(`Media download failed: ${result.error}`);
     },

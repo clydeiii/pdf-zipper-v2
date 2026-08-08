@@ -1,4 +1,5 @@
 import { normalizeBookmarkUrl } from '../../urls/normalizer.js';
+import { isPatreonPostUrl } from '../../media/patreon.js';
 import type { BookmarkItem } from '../types.js';
 
 /**
@@ -176,6 +177,20 @@ export async function parseKarakeepFeed(
             url: `${baseUrl}/api/assets/${bookmark.content.videoAssetId}`,
             type: 'video/mp4',
             length: undefined,
+          };
+          bookmarkItem.mediaType = 'video';
+        } else if (isPatreonPostUrl(bookmarkUrl)) {
+          // Patreon posts never arrive with a video asset — Karakeep has no
+          // Patreon session, so it files them as plain links (confirmed across
+          // four real bookmarks). Point the enclosure at the post itself and
+          // let yt-dlp extract the member-only HLS stream with our cookies.
+          // The post still goes on to its normal PDF capture, so a bookmark
+          // yields both, exactly like an x.com video.
+          bookmarkItem.enclosure = {
+            url: bookmarkUrl,
+            type: 'video/mp4',
+            length: undefined,
+            downloadVia: 'yt-dlp',
           };
           bookmarkItem.mediaType = 'video';
         }
