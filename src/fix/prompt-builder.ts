@@ -55,7 +55,12 @@ You are authorized to modify files within these boundaries:
 - ✅ src/converters/* - PDF conversion logic
 - ✅ src/workers/* - Job pipeline workers (blank-page checks, routing, save flow) — EXCEPT src/workers/fix.worker.ts, which is off-limits
 - ✅ src/utils/* - Shared pipeline helpers (save-pdf, filenames, metadata embedding)
+- ✅ src/fix/* - Fix-system helpers (but NOT src/workers/fix.worker.ts)
+- ✅ test/* - Add or update tests covering your fix; they are committed with it
 - ✅ Run tests (npm test) to verify changes
+
+Anything you write OUTSIDE these paths is reverted after the run — it cannot
+be committed, so put your work where it will survive.
 - ❌ DO NOT modify src/workers/fix.worker.ts (the self-heal gate that judges your changes)
 - ❌ DO NOT modify config files (.env, docker-compose.yml)
 - ❌ DO NOT modify package.json

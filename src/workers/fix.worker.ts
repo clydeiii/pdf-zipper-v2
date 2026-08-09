@@ -19,6 +19,7 @@ import { QUEUE_NAME, conversionQueue } from '../queues/conversion.queue.js';
 import { consumePendingFixes, saveFixHistory } from '../fix/pending.js';
 import { runDiagnosisWithProviders } from '../fix/providers.js';
 import { classifyFailureMessage } from '../fix/failure.js';
+import { isAllowedFixPath } from '../fix/boundary.js';
 import { updateFixOutcome } from '../fix/ledger.js';
 import { sendFixDiagnosisNotification } from '../notifications/discord.js';
 import type {
@@ -118,17 +119,54 @@ function parseGitStatusPaths(stdout: string): string[] {
   return files;
 }
 
-function isAllowedFixPath(filePath: string): boolean {
-  // The gate itself stays out of reach: a batch must not be able to weaken
-  // the boundary/build/commit logic that judges it.
-  if (filePath === 'src/workers/fix.worker.ts') return false;
-  return (
-    filePath.startsWith('src/quality/') ||
-    filePath.startsWith('src/converters/') ||
-    filePath.startsWith('src/workers/') ||
-    filePath.startsWith('src/utils/') ||
-    filePath.startsWith('src/fix/')
-  );
+/**
+ * Snapshot of working-tree paths, used to tell what a batch touched.
+ *
+ * The fix agent runs with unrestricted Edit/Write, so it can modify files
+ * outside the commit boundary. Anything it leaves behind is stranded: never
+ * committed, never reverted, and indistinguishable from the user's own
+ * uncommitted work. Diffing this snapshot before and after the run is what
+ * makes cleanup precise enough to be safe — the user keeps stray files in the
+ * repo root (Karakeep drops .md files there) that must never be touched.
+ */
+async function snapshotWorkingTree(): Promise<Set<string>> {
+  const status = await runCommand('git', ['status', '--porcelain']);
+  if (!status.success) return new Set();
+  return new Set(parseGitStatusPaths(status.stdout));
+}
+
+/**
+ * Revert working-tree files the batch touched but that fall outside the commit
+ * boundary, leaving the repo as the batch found it. Scoped to `touched` so
+ * pre-existing local edits and untracked user files survive untouched.
+ */
+async function revertStrayBatchChanges(
+  before: Set<string>,
+  batchId: string
+): Promise<string[]> {
+  const after = await snapshotWorkingTree();
+  const stray = [...after].filter((p) => !before.has(p) && !isAllowedFixPath(p));
+  if (stray.length === 0) return [];
+
+  // Tracked files go back to HEAD; files git doesn't know about are removed.
+  const tracked: string[] = [];
+  for (const filePath of stray) {
+    const known = await runCommand('git', ['ls-files', '--error-unmatch', '--', filePath]);
+    if (known.success) tracked.push(filePath);
+    else await runCommand('rm', ['-f', '--', filePath]);
+  }
+  if (tracked.length > 0) {
+    await runCommand('git', ['checkout', '--', ...tracked]);
+  }
+
+  console.warn(JSON.stringify({
+    event: 'fix_stray_changes_reverted',
+    batchId,
+    files: stray,
+    reason: 'outside_commit_boundary',
+    timestamp: new Date().toISOString(),
+  }));
+  return stray;
 }
 
 async function buildGate(): Promise<{ passed: boolean; error?: string }> {
@@ -393,6 +431,9 @@ async function processFixJob(
   }
 
   const forcedProvider = items.find((item) => !!item.forceProvider)?.forceProvider;
+  // Snapshot first so anything the batch strands outside the boundary can be
+  // told apart from work that was already dirty when we started.
+  const treeBeforeBatch = await snapshotWorkingTree();
   const providerResult = await runDiagnosisWithProviders(items, forcedProvider);
 
   if (!('parsed' in providerResult)) {
@@ -517,6 +558,11 @@ async function processFixJob(
       }
     }
   }
+
+  // Whatever happened above — patched, rejected, or nothing to patch — the
+  // working tree must not be left dirty with this batch's leftovers. Runs on
+  // every path so a rejected batch can't strand files either.
+  await revertStrayBatchChanges(treeBeforeBatch, batchId);
 
   const historyEntry: FixHistoryEntry = {
     batchId,
