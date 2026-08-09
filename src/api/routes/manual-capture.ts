@@ -150,11 +150,18 @@ async function removeMatchingFailedJobs(capturedUrl: string): Promise<number> {
   // and overwrite this capture with the (likely paywalled) automated version.
   // Active jobs are left alone — removing a mid-flight job is unsafe; that
   // narrow race loses to the conversion worker's overwrite.
+  // filter(Boolean) is load-bearing: BullMQ hydrates these from an id list, so
+  // an id whose hash is already gone comes back as undefined — and then
+  // `job.data` throws, failing the whole capture with a bare
+  // "Manual capture failed". That happens whenever a job is pruned between the
+  // id scan and hydration (retention sweep, a concurrent remove, or a hash
+  // deleted out from under the queue), and it takes down a feature that has
+  // nothing to do with the missing job.
   const failedJobs = [
     ...(await conversionQueue.getFailed(0, 2000)),
     ...(await conversionQueue.getWaiting(0, 500)),
     ...(await conversionQueue.getDelayed(0, 500)),
-  ];
+  ].filter(Boolean);
   for (const job of failedJobs) {
     const jobUrl = job.data?.url;
     const jobOriginalUrl = job.data?.originalUrl;

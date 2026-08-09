@@ -623,7 +623,9 @@ filesRouter.get('/weeks/:weekId/failures', async (req: Request, res: Response): 
       }
     } else {
       // Fallback for historical jobs not yet indexed.
-      const failedJobs = await conversionQueue.getFailed();
+      // filter(Boolean): BullMQ yields undefined for an id whose hash is gone
+      // (pruned mid-scan), and the loop below would throw on job.timestamp.
+      const failedJobs = (await conversionQueue.getFailed()).filter(Boolean);
       for (const job of failedJobs) {
         const jobDate = new Date(job.timestamp);
         const jobWeek = getISOWeekNumber(jobDate);
@@ -741,7 +743,9 @@ filesRouter.post('/weeks/:weekId/rerun', requireApiToken, async (req: Request, r
         }
       }
     } else {
-      const completedJobs = await conversionQueue.getCompleted();
+      // filter(Boolean): BullMQ yields undefined for an id whose hash is gone
+      // (pruned mid-scan), and the loop below would throw on job.timestamp.
+      const completedJobs = (await conversionQueue.getCompleted()).filter(Boolean);
       for (const job of completedJobs) {
         const jobDate = new Date(job.timestamp);
         const jobWeek = getISOWeekNumber(jobDate);
@@ -767,7 +771,9 @@ filesRouter.post('/weeks/:weekId/rerun', requireApiToken, async (req: Request, r
         if (urlToUse) urlsToRerun.add(urlToUse);
       }
     } else {
-      const failedJobs = await conversionQueue.getFailed();
+      // filter(Boolean): BullMQ yields undefined for an id whose hash is gone
+      // (pruned mid-scan), and the loop below would throw on job.timestamp.
+      const failedJobs = (await conversionQueue.getFailed()).filter(Boolean);
       for (const job of failedJobs) {
         const jobDate = new Date(job.timestamp);
         const jobWeek = getISOWeekNumber(jobDate);
