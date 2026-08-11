@@ -676,7 +676,13 @@ export async function convertUrlToPDF(
       const renderedTextLen = await page.evaluate(
         () => document.body?.innerText.trim().length ?? 0
       );
-      if (renderedTextLen < 200) {
+      // Floor tracks the content check's 500-char minimum: a DOM with less text
+      // than that is guaranteed to fail quality later, so one reload is free
+      // insurance (a stub shell whose hydration died is often a one-shot
+      // failure). Twitter keeps the old 200 floor — short tweets legitimately
+      // render under 500 chars, and extra Nitter loads burn the rate budget.
+      const nearBlankFloor = isTwitterUrl(url) ? 200 : 500;
+      if (renderedTextLen < nearBlankFloor) {
         console.log(`Near-blank render (${renderedTextLen} chars) for ${url}, reloading once...`);
         try {
           await page.reload({ timeout, waitUntil: 'networkidle' });
@@ -1009,12 +1015,45 @@ export async function convertUrlToPDF(
         // These are ALWAYS overlays in a PDF context — navbars, floating buttons,
         // cookie banners, newsletter popups, theme toggles, chat widgets, etc.
         // We walk all elements and check computed position.
+        //
+        // EXCEPT content-bearing wrappers: magazine-style scrollytelling layouts
+        // (e.g. Business Insider "Discourse" features) pin the article body —
+        // and sometimes everything below the hero — inside position:sticky
+        // scroll-stage sections. Deleting those removes the article itself from
+        // the DOM: the PDF keeps only the static headline/dek block and prints
+        // ~190 chars, which the content check then (rightly) rejects as
+        // truncated. Chrome overlays hold little text, so gate on text: an
+        // element with several real paragraphs, or holding the bulk of the
+        // page's text, is content — drop it into normal flow (same treatment
+        // html/body get below) instead of removing it.
+        const pageTextLen = (document.body?.innerText || '').trim().length;
+        const isContentBearing = (el: HTMLElement): boolean => {
+          let longParagraphs = 0;
+          for (const p of el.querySelectorAll('p, blockquote')) {
+            if ((p.textContent || '').trim().length >= 120) {
+              longParagraphs++;
+              if (longParagraphs >= 2) return true;
+            }
+          }
+          const textLen = (el.innerText || '').trim().length;
+          return textLen >= 500 && pageTextLen > 0 && textLen >= pageTextLen * 0.3;
+        };
         const allElements = document.querySelectorAll('*');
         for (const el of allElements) {
           const style = window.getComputedStyle(el);
           const position = style.position;
           if (position === 'fixed' || position === 'sticky') {
             const tag = el.tagName.toLowerCase();
+            if (tag !== 'html' && tag !== 'body' && isContentBearing(el as HTMLElement)) {
+              const h = el as HTMLElement;
+              h.style.setProperty('position', 'static', 'important');
+              h.style.setProperty('top', 'auto', 'important');
+              h.style.setProperty('height', 'auto', 'important');
+              h.style.setProperty('max-height', 'none', 'important');
+              h.style.setProperty('overflow', 'visible', 'important');
+              count++;
+              continue;
+            }
             if (tag === 'html' || tag === 'body') {
               // Never remove html/body — but app-shell layouts (e.g. thenextweb
               // sets body{position:fixed;overflow:hidden}) pin the document
