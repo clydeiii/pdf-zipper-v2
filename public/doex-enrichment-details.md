@@ -59,6 +59,24 @@ AI-detection caveats — these fields are evidence, not verdicts:
 - `AIDisclosure` is the writer speaking; `AIDetection` is a model guessing.
   Quote them separately and attribute each.
 
+## Filenames — pairing a PDF with its media
+
+A capture's PDF and its MP4 share one base name, and that shared name is how
+you link them: `x.com-jeffladish-post-123.pdf` ↔ `x.com-jeffladish-post-123.mp4`
+(plus `…​.transcript.pdf` beside the video). Same for Patreon posts,
+`patreon.com-{creator}-posts-{slug}`.
+
+**Filenames are lowercase as of 2026-08-12.** Before that the PDF path kept the
+author's capitalisation from the URL (`x.com-JeffLadish-…`) while the MP4 was
+lowercased, so the two never matched on an exact compare. Everything in the
+library has been renamed, but **exports you received before that date still
+carry the old mixed-case PDF names** — match case-insensitively if you're
+reconciling against an older snapshot, and expect a handful of pairs that only
+resolve that way.
+
+`Subject` (the source URL) remains the authoritative identity for a capture;
+the filename is a convenience, not a key.
+
 Tweet capture conventions:
 - Filenames: `x.com-{account}-post-{statusId}.pdf` for tweets (rendered via a
   local Nitter), `...-article-...` for X Articles (rendered from x.com).

@@ -83,3 +83,38 @@ test('isGenericPdfBasename: leaves descriptive names alone', () => {
   assert.equal(isGenericPdfBasename('june-2026-threat-report.pdf'), false);
   assert.equal(isGenericPdfBasename('2604.01007v2.pdf'), false);
 });
+
+test('filenames are lowercase so PDFs and MP4s pair', () => {
+  // URL path segments carry the author's capitalisation. The PDF path kept it
+  // while getMediaFilename lowercased the MP4, so the two never matched and
+  // the KB's link-by-shared-basename convention missed every such pair.
+  assert.equal(
+    buildUrlBaseName('https://x.com/JeffLadish/status/2084005777413689765', { isXArticle: false }),
+    'x.com-jeffladish-post-2084005777413689765',
+  );
+  assert.equal(
+    buildUrlBaseName('https://github.com/Danau5tin/ai-trains-ai', {}),
+    'github.com-danau5tin-ai-trains-ai',
+  );
+  assert.equal(
+    buildUrlBaseName('https://www.patreon.com/AIExplained/posts/opus-5-amodei-165170363', {}),
+    'patreon.com-aiexplained-posts-opus-5-amodei-165170363',
+  );
+});
+
+test('the MP4 and the PDF derive the same base name', () => {
+  // The invariant the KB depends on, asserted directly rather than implied.
+  const url = 'https://x.com/AndrewCurran_/status/2084355483167793206';
+  const pdfBase = buildUrlBaseName(url, { isXArticle: false });
+  const mp4Base = getMediaFilename({
+    url,
+    canonicalUrl: url,
+    guid: 'g',
+    source: 'karakeep',
+    mediaType: 'video',
+    enclosure: { url: 'https://example.com/a.mp4', type: 'video/mp4' },
+  }).replace(/\.mp4$/, '');
+  assert.equal(mp4Base, pdfBase);
+});
+
+import { getMediaFilename } from '../dist/media/organization.js';

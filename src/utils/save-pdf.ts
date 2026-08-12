@@ -135,6 +135,14 @@ export function buildUrlBaseName(
       baseName = pathname ? `${hostname}-${pathname}` : hostname;
     }
 
+    // Filenames are lowercase everywhere. URL path segments preserve the
+    // author's capitalisation (x.com/JeffLadish, github.com/Danau5tin), which
+    // used to leak into PDF names while getMediaFilename lowercased the
+    // matching MP4 — so `x.com-JeffLadish-post-123.pdf` and
+    // `x.com-jeffladish-post-123.mp4` never paired, and the KB's
+    // link-by-basename convention silently missed them.
+    baseName = baseName.toLowerCase();
+
     if (isTwitterUrl(url) && baseName.includes('-status-')) {
       if (isXArticle === true) {
         baseName = baseName.replace('-status-', '-article-');
