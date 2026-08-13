@@ -453,6 +453,53 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
   }
 
   if (!contentResult.passed) {
+    // Embedded-PDF rescue: the page's primary content is a PDF rendered in a
+    // viewer (native <embed>/<iframe> or PDF.js canvases), which Chromium's
+    // print path emits as blank pages — the printed capture rightly fails the
+    // density checks, but the document the user bookmarked is the embedded PDF
+    // itself. Download it via the existing pass-through path instead of
+    // failing (real case: xbow.com whitepapers, 16-page report → 19-page
+    // near-blank print at 3.1 chars/KB). Only fires when the converter
+    // detected a viewer AND the printed capture failed, so ordinary articles
+    // that merely link a PDF are never swapped out.
+    if (result.embeddedPdfUrl) {
+      console.log(`Content check failed (${contentResult.reason}) but page embeds a PDF viewer — trying pass-through: ${result.embeddedPdfUrl}`);
+      const passthroughResult = await downloadPdfDirect(result.embeddedPdfUrl);
+      if (passthroughResult.success) {
+        let enrichedMetadata: EnrichedMetadata | undefined;
+        try {
+          const passthroughContent = await analyzePdfContent(passthroughResult.pdfBuffer);
+          if (passthroughContent.extractedText && passthroughContent.extractedText.length > 100) {
+            enrichedMetadata = await enrichDocumentMetadata(passthroughContent.extractedText, url, title);
+            console.log(`Embedded PDF enriched: "${enrichedMetadata.title}" [${enrichedMetadata.language}]`);
+          }
+        } catch (error) {
+          console.warn(`Embedded PDF enrichment failed (non-fatal):`, error instanceof Error ? error.message : error);
+        }
+
+        const filePath = await savePdfToWeeklyBin(passthroughResult.pdfBuffer, {
+          url,
+          title,
+          bookmarkedAt,
+          originalUrl,
+          enrichedMetadata,
+        });
+
+        await job.updateProgress(100);
+        console.log(`Embedded-PDF pass-through completed: ${filePath}`);
+        if (oldFilePath) await deleteOldFileIfDifferent(oldFilePath, filePath);
+
+        return {
+          pdfPath: filePath,
+          pdfSize: passthroughResult.size,
+          completedAt: new Date().toISOString(),
+          url,
+          summary: enrichedMetadata?.summary || undefined,
+          language: enrichedMetadata?.language || undefined,
+        };
+      }
+      console.warn(`Embedded-PDF pass-through failed for ${result.embeddedPdfUrl}: ${passthroughResult.error} — failing with original reason`);
+    }
     // Save debug PDF before failing
     await saveDebugPdf(job.id!, result.pdfBuffer);
     throw new Error(`truncated: ${contentResult.reason}`);
