@@ -185,6 +185,18 @@ function extractAdvertisedReadTime(text: string): { minutes: number; badge: stri
 }
 
 /**
+ * True when the page's own reading-time badge is consistent with the body we
+ * extracted (≥ minutes × CHARS_PER_READING_MINUTE). A complete short article
+ * behind a heavy hero image satisfies this (scmp.com "2-MIN READ": 1453 chars
+ * in a 1530KB PDF); a paywall fade or blurred body leaves the extract far
+ * below the badge's promise and fails it, so this never masks a truncation.
+ */
+function bodyMatchesAdvertisedReadTime(text: string, charCount: number): boolean {
+  const advertised = extractAdvertisedReadTime(text);
+  return advertised !== null && charCount >= advertised.minutes * CHARS_PER_READING_MINUTE;
+}
+
+/**
  * Article-conclusion markers — footer furniture (tag list, image credits)
  * that sites render only AFTER the article body. When one of these appears
  * BEFORE an end-of-article marker, the body ended naturally: short-form
@@ -352,6 +364,28 @@ const SOFT_PAYWALL_PATTERNS = [
   /become\s+a\s+(subscriber|member)/i,
   /join\s+(now\s+)?to\s+(continue|unlock|access)/i,
 ];
+
+/**
+ * Substack paid-post preview detection.
+ *
+ * A paid post rendered without a subscriber session shows the lede then cuts
+ * mid-sentence with a bare "…" — the upgrade CTA doesn't extract as any of
+ * the paywall phrases above, so the stub sails past the paywall regexes and
+ * dies on the char-count floor as "truncated:" instead (real case: job 25003,
+ * open.substack.com share link, 497 chars). The classification matters:
+ * "Paywall detected" wording routes the failure to the archive.today
+ * fallback, while a bare truncation reason dead-ends as a suspected quality
+ * false-negative. All three signals are required — a subscriber-rendered paid
+ * post keeps the badge and chrome but extracts a full body, and the char
+ * ceiling plus the mid-word ellipsis keep legitimately short paid posts out.
+ */
+const SUBSTACK_CHROME_PATTERN =
+  /start\s+your\s+substack|substack\s+is\s+the\s+home\s+for\s+great\s+culture/i;
+/** Post-meta paid badge: "AUG 14, 2026 ∙ PAID" (separator dot varies) */
+const SUBSTACK_PAID_BADGE_PATTERN = /[∙·•|]\s*paid\b/i;
+/** Preview truncation: ellipsis glued to a word ("…series mod…"), not "wait …" */
+const PREVIEW_CUT_ELLIPSIS_PATTERN = /[a-z0-9]…/i;
+const MAX_CHARS_FOR_SUBSTACK_PREVIEW = 5000;
 
 /**
  * Options for `analyzePdfContent`.
@@ -537,6 +571,24 @@ export async function analyzePdfContent(
       }
     }
 
+    // Check 0.85: Substack paid-post preview (see pattern docs above).
+    if (
+      !options.lenient &&
+      !homepage &&
+      charCount < MAX_CHARS_FOR_SUBSTACK_PREVIEW &&
+      SUBSTACK_CHROME_PATTERN.test(normalizedText) &&
+      SUBSTACK_PAID_BADGE_PATTERN.test(normalizedText) &&
+      PREVIEW_CUT_ELLIPSIS_PATTERN.test(normalizedText)
+    ) {
+      return {
+        ...baseResult,
+        passed: false,
+        // "Paywall detected" wording is load-bearing: classifyFailureMessage
+        // keys on it → paywall class → archive.today fallback candidate.
+        reason: `Paywall detected: Substack paid-post preview (PAID badge with body cut mid-sentence, ${charCount} chars). Full text requires a subscriber session.`,
+      };
+    }
+
     // Check 0.9: Stealth paywall via early end-of-article markers.
     // Some sites (Fortune, etc.) silently truncate the article body and drop
     // straight into "Recommended Video → About the Author → Latest in X →
@@ -552,10 +604,7 @@ export async function analyzePdfContent(
       // articles), not truncation. A genuinely truncated page fails this
       // consistency test and falls through (and is also caught by the
       // reading-time mismatch check below).
-      const advertisedRead = extractAdvertisedReadTime(normalizedText);
-      const bodyMatchesReadTime =
-        advertisedRead !== null &&
-        charCount >= advertisedRead.minutes * CHARS_PER_READING_MINUTE;
+      const bodyMatchesReadTime = bodyMatchesAdvertisedReadTime(normalizedText, charCount);
 
       // Search past the floor so a header/sidebar occurrence (e.g. an author
       // bio extracted right after the headline) neither triggers the check
@@ -643,12 +692,19 @@ export async function analyzePdfContent(
     // "X min read" announcement posts (charts/hero images, short copy). These
     // are complete captures, not truncations.
     const legitimatelyShort = isLegitimatelyShortPage(normalizedText);
+    // A body consistent with the page's own "X min read" badge is complete —
+    // the bulk is hero imagery, not a missing article (scmp.com: complete
+    // 2-min article, 1453 chars, 1530KB of hero image). A paywall fade with
+    // the same badge extracts far fewer chars than advertised and is caught
+    // by the reading-time mismatch check (0.95) before reaching this one.
+    const readTimeConsistent = bodyMatchesAdvertisedReadTime(normalizedText, charCount);
     if (
       !options.lenient &&
       !homepage &&
       pdfSize > LARGE_PDF_THRESHOLD &&
       charCount < MIN_CHARS_FOR_LARGE_PDF &&
-      !legitimatelyShort
+      !legitimatelyShort &&
+      !readTimeConsistent
     ) {
       // A textful lede followed by one or more blank middle pages and then
       // textful author/footer pages is the print shape of CSS-blurred paywalls:
