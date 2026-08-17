@@ -1,4 +1,4 @@
-import { initBrowser } from '../browsers/manager.js';
+import { ensureLiveBrowser } from '../utils/browser-health.js';
 import { loadCookies } from '../browsers/cookies.js';
 import { env } from '../config/env.js';
 import { extractJsonLdArticleBody } from './jsonld-body.js';
@@ -583,7 +583,7 @@ export async function convertUrlToPDF(
   // Get browser (lazy init) and create context
   // Use 1280px viewport for rendering (sites may not render properly at narrow widths)
   // The PDF will scale content to fit A4
-  const browser = await initBrowser();
+  const browser = await ensureLiveBrowser();
   // UA version must track the running Chromium: Sec-CH-UA client hints are
   // emitted from the real browser version, so a hardcoded stale major (e.g.
   // Chrome/120 on a 145 binary) is a contradiction bot walls key on.

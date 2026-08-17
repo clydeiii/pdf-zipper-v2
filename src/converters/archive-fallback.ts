@@ -23,7 +23,7 @@
  */
 
 import type { Browser } from 'playwright';
-import { initBrowser } from '../browsers/manager.js';
+import { ensureLiveBrowser } from '../utils/browser-health.js';
 import { loadCookies } from '../browsers/cookies.js';
 import { convertUrlToPDF } from './pdf.js';
 import { analyzePdfContent } from '../quality/pdf-content.js';
@@ -134,7 +134,7 @@ export async function captureViaArchive(originalUrl: string): Promise<ArchiveRes
     const minLeft = Math.ceil((archiveCooldownUntil - Date.now()) / 60000);
     return { ok: false, reason: 'error', detail: `archive.today rate-limited this IP — cooling down ${minLeft} more min` };
   }
-  const browser: Browser = await initBrowser();
+  const browser: Browser = await ensureLiveBrowser();
   const ctx = await browser.newContext({
     viewport: { width: 1280, height: 800 },
     userAgent: await resolveArchiveUa(),

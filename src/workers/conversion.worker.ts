@@ -28,6 +28,7 @@ import { classifyFailureMessage } from '../fix/failure.js';
 import { shouldAutoTriggerFix } from '../fix/trigger-policy.js';
 import { updateFixOutcome } from '../fix/ledger.js';
 import { addJobToWeekIndex } from '../jobs/week-index.js';
+import { isRendererCrashMessage, countCrashRequeues } from '../utils/crash-signature.js';
 import { enrichDocumentMetadata, type EnrichedMetadata } from '../metadata/enrichment.js';
 import { captureViaArchive } from '../converters/archive-fallback.js';
 import { isChatGptShareUrl, captureChatGptShare } from '../converters/chatgpt-share.js';
@@ -687,6 +688,33 @@ function createConversionWorker(): Worker<ConversionJobData, ConversionJobResult
             return;
           } catch (requeueErr) {
             console.error('[rate-limited] Re-queue failed, letting failure stand:', requeueErr);
+          }
+        }
+      }
+
+      // Renderer crashes ("Target crashed") are resource pressure, not site
+      // problems: heavy chart pages (epoch.ai benchmarks) OOM the tab, and the
+      // seconds-scale backoff replays all attempts inside the same pressure
+      // window — or against a dead browser process. ensureLiveBrowser handles
+      // the dead-browser case; for pressure, give the job a delayed second
+      // life (5/15 min) so it retries once the queue has drained. Requeue
+      // count rides on the jobId suffix so ConversionJobData stays unchanged.
+      if (isRendererCrashMessage(error.message)) {
+        const crashRequeues = countCrashRequeues(job.id);
+        if (crashRequeues < 2) {
+          const delayMinutes = [5, 15][crashRequeues];
+          try {
+            await conversionQueue.add(
+              job.name,
+              job.data,
+              { jobId: `${job.id}_cr${crashRequeues + 1}`, delay: delayMinutes * 60_000 }
+            );
+            console.log(`[renderer-crash] Re-queued ${job.data.url} with ${delayMinutes}min delay (requeue ${crashRequeues + 1}/2)`);
+            // The delayed copy owns the outcome: skip the failed-week index
+            // and Discord failure noise for this attempt.
+            return;
+          } catch (requeueErr) {
+            console.error('[renderer-crash] Re-queue failed, letting failure stand:', requeueErr);
           }
         }
       }

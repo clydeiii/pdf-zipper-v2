@@ -18,7 +18,7 @@
  */
 
 import type { Browser, Page } from 'playwright';
-import { initBrowser } from '../browsers/manager.js';
+import { ensureLiveBrowser } from '../utils/browser-health.js';
 
 export function isChatGptShareUrl(url: string): boolean {
   try {
@@ -273,7 +273,7 @@ ${body}
  * messages hydrate — callers fall back to the regular conversion path.
  */
 export async function captureChatGptShare(url: string): Promise<ChatGptShareResult> {
-  const browser: Browser = await initBrowser();
+  const browser: Browser = await ensureLiveBrowser();
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   try {
     const page = await ctx.newPage();
