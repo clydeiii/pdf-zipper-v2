@@ -7,6 +7,7 @@ import { env } from '../config/env.js';
 import { queueConnection } from '../config/redis.js';
 import { buildDiagnosisPrompt } from './prompt-builder.js';
 import { loadExclusionSignals } from './signals.js';
+import { listOpenFixBranches } from './open-branches.js';
 import type { FixJobContext, FixProvider, FixRequestType } from '../jobs/fix-types.js';
 
 const ROUND_ROBIN_KEY = 'fix:provider:round-robin-next';
@@ -25,6 +26,8 @@ export interface ProviderDiagnosisItem {
   suggestedFix?: string;
   filesModified: string[];
   fixApplied: boolean;
+  /** Name of an existing unmerged branch that already fixes this root cause. */
+  alreadyAddressedBy?: string;
 }
 
 export interface ProviderDiagnosisOutput {
@@ -145,6 +148,10 @@ function parseProviderOutput(raw: string): ProviderDiagnosisOutput | null {
           ? rec.filesModified.filter((v): v is string => typeof v === 'string')
           : [],
         fixApplied: rec.fixApplied === true,
+        alreadyAddressedBy:
+          typeof rec.alreadyAddressedBy === 'string' && rec.alreadyAddressedBy.trim()
+            ? rec.alreadyAddressedBy.trim()
+            : undefined,
       });
     }
 
@@ -194,7 +201,10 @@ function buildProviderCommand(provider: FixProvider, prompt: string): { cmd: str
 
 async function runProvider(provider: FixProvider, items: FixJobContext[]): Promise<{ parsed?: ProviderDiagnosisOutput; raw: string; error?: string }> {
   const exclusionSignals = await loadExclusionSignals();
-  const prompt = buildDiagnosisPrompt(items, exclusionSignals);
+  // Show the agent what earlier runs already produced, so a recurring failure
+  // gets "already addressed by fix/batch-X" instead of an eighth duplicate.
+  const openBranches = await listOpenFixBranches();
+  const prompt = buildDiagnosisPrompt(items, exclusionSignals, openBranches);
   const timeoutMs = Math.max(1, env.FIX_PROVIDER_TIMEOUT_MINUTES) * 60 * 1000;
   const command = buildProviderCommand(provider, prompt);
   const result = await runCommand(command.cmd, command.args, {

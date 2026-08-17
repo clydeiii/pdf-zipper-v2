@@ -8,6 +8,7 @@
  */
 
 import type { FixJobContext } from '../jobs/fix-types.js';
+import { buildOpenBranchSection, type OpenFixBranch } from './open-branches.js';
 
 /**
  * Signal data from user behavior (zip export exclusions).
@@ -31,7 +32,11 @@ export interface ExclusionSignal {
  * 4. Apply a fix if possible
  * 5. Output structured JSON with diagnosis
  */
-export function buildDiagnosisPrompt(items: FixJobContext[], exclusionSignals: ExclusionSignal[] = []): string {
+export function buildDiagnosisPrompt(
+  items: FixJobContext[],
+  exclusionSignals: ExclusionSignal[] = [],
+  openBranches: OpenFixBranch[] = []
+): string {
   const sections: string[] = [];
 
   // Introduction
@@ -58,14 +63,14 @@ You are authorized to modify files within these boundaries:
 - ✅ src/fix/* - Fix-system helpers (but NOT src/workers/fix.worker.ts)
 - ✅ test/* - Add or update tests covering your fix; they are committed with it
 - ✅ Run tests (npm test) to verify changes
-
-Anything you write OUTSIDE these paths is reverted after the run — it cannot
-be committed, so put your work where it will survive.
 - ❌ DO NOT modify src/workers/fix.worker.ts (the self-heal gate that judges your changes)
 - ❌ DO NOT modify config files (.env, docker-compose.yml)
 - ❌ DO NOT modify package.json
 - ❌ DO NOT make network requests
 - ❌ DO NOT push to git (read-only git commands are OK)
+
+Anything you write OUTSIDE these paths is reverted after the run — it cannot
+be committed, so put your work where it will survive.
 
 ## Items to Diagnose
 `);
@@ -79,6 +84,13 @@ be committed, so put your work where it will survive.
   // User behavior signal: URLs repeatedly excluded from zip exports
   if (exclusionSignals.length > 0) {
     sections.push(buildExclusionSignalSection(exclusionSignals));
+  }
+
+  // What earlier runs already produced. Placed before the output format so the
+  // "is this a duplicate?" question is answered before any code gets written.
+  const openBranchSection = buildOpenBranchSection(openBranches);
+  if (openBranchSection) {
+    sections.push(openBranchSection);
   }
 
   // Output format
@@ -96,7 +108,8 @@ After completing your diagnosis, output a JSON object with this structure:
       "rootCause": "Description of why the system made the wrong decision",
       "suggestedFix": "Description of the fix applied or recommended",
       "filesModified": ["src/quality/scorer.ts"],
-      "fixApplied": true | false
+      "fixApplied": true | false,
+      "alreadyAddressedBy": "fix/batch-xxxxxxxx-claude | omit if none"
     }
   ],
   "summary": "Brief summary of all diagnoses and any patterns observed"
@@ -107,6 +120,8 @@ IMPORTANT:
 - Output valid JSON only.
 - Do not include prose before or after JSON.
 - Keep \`filesModified\` accurate and repository-relative.
+- Set \`alreadyAddressedBy\` (with \`fixApplied: false\` and no code written)
+  when an open branch listed above already fixes the root cause.
 
 ## Important Notes
 

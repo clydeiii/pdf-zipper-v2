@@ -188,6 +188,15 @@ async function buildGate(): Promise<{ passed: boolean; error?: string }> {
 async function preparePatchBranch(params: {
   batchId: string;
   provider: string;
+  /**
+   * What the batch concluded. The subject used to be "batch <id> via claude"
+   * with an empty body for every branch, which made a 68-branch backlog
+   * unreadable — you had to diff each one to learn what it did. Carrying the
+   * diagnosis into the message means the next triage can skim.
+   */
+  summary?: string;
+  rootCauses: string[];
+  urls: string[];
 }): Promise<{
   success: boolean;
   branchName?: string;
@@ -262,7 +271,16 @@ async function preparePatchBranch(params: {
       '-c', 'user.email=self-heal@pdfzipper.local',
       'commit',
       '-m',
-      `fix(self-heal): batch ${params.batchId.slice(0, 8)} via ${params.provider}`,
+      `fix(self-heal): ${params.summary || `batch ${params.batchId.slice(0, 8)}`}`,
+      '-m',
+      [
+        `Batch ${params.batchId.slice(0, 8)} via ${params.provider}.`,
+        '',
+        ...(params.rootCauses.length > 0
+          ? ['Root causes diagnosed:', ...params.rootCauses.map((r) => `- ${r}`), '']
+          : []),
+        ...(params.urls.length > 0 ? ['Flagged items:', ...params.urls.map((u) => `- ${u}`)] : []),
+      ].join('\n'),
     ]);
     if (!commit.success) {
       return {
@@ -482,10 +500,23 @@ async function processFixJob(
       suggestedFix: providerDiagnosis.suggestedFix,
       filesModified: providerDiagnosis.filesModified,
       fixApplied: providerDiagnosis.fixApplied,
+      alreadyAddressedBy: providerDiagnosis.alreadyAddressedBy,
       provider: providerResult.provider,
       diagnosedAt: new Date().toISOString(),
     };
   });
+
+  // A batch that recognised its failure as already-fixed is a success: it names
+  // the branch to merge instead of adding a duplicate to the backlog.
+  const duplicates = diagnoses.filter((d) => d.alreadyAddressedBy);
+  if (duplicates.length > 0) {
+    console.log(JSON.stringify({
+      event: 'fix_already_addressed',
+      batchId,
+      items: duplicates.map((d) => ({ url: d.context.url, branch: d.alreadyAddressedBy })),
+      timestamp: new Date().toISOString(),
+    }));
+  }
 
   const fixAppliedDiagnoses = diagnoses.filter((d) => d.fixApplied);
   const allowedWorkingChanges = await getAllowedWorkingTreeChanges();
@@ -507,6 +538,12 @@ async function processFixJob(
     const branchResult = await preparePatchBranch({
       batchId,
       provider: providerResult.provider,
+      summary: providerResult.parsed.summary?.split('\n')[0]?.slice(0, 72),
+      rootCauses: diagnoses
+        .filter((d) => d.fixApplied)
+        .map((d) => d.rootCause)
+        .filter(Boolean),
+      urls: diagnoses.map((d) => d.context.url),
     });
 
     if (!branchResult.success) {

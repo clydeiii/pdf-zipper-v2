@@ -103,6 +103,12 @@ export interface FixDiagnosis {
   filesModified: string[];
   /** Whether a code fix was applied */
   fixApplied: boolean;
+  /**
+   * Set when an existing unmerged fix/batch-* branch already addresses this
+   * root cause. The diagnosis is complete and no code was written — it points
+   * the human at the branch to merge instead of adding a duplicate.
+   */
+  alreadyAddressedBy?: string;
   /** Provider that produced this diagnosis */
   provider: FixProvider;
   /** Verification result after re-running URL */

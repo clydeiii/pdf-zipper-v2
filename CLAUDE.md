@@ -150,6 +150,8 @@ Batches land on `fix/batch-*` and never auto-merge, which is safe but not free: 
 
 A batch reaching for an exemption usually means the real bug is upstream in the converter. Review within a week or so; the backlog's cost is duplicated work, not risk.
 
+**Branch awareness** (`src/fix/open-branches.ts`): each diagnosis prompt now lists the unmerged `fix/batch-*` branches — files touched plus the module-level symbols each adds, which is the part that actually identifies a branch (the generated commit subjects were all `fix(self-heal): batch <id> via claude` with an empty body). The agent is told to check for an existing fix first and, if it finds one, to set `alreadyAddressedBy` with `fixApplied: false` and write no code; that counts as a successful diagnosis and logs `fix_already_addressed`. Fix commits now also carry the summary and root causes in their message, so the next triage can skim rather than diff. Listing is best-effort — any git failure returns `[]` and the diagnosis proceeds.
+
 ### Self-Healing Fix System
 - Users flag false positives (saved PDF that shouldn't have) / false negatives (failed URL that should've succeeded) via "Fix Selected"
 - Every 5min (offset 2.5min from feed polling) pending items are processed by headless Claude CLI
