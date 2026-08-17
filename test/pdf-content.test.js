@@ -437,6 +437,72 @@ test('flags archived Bloomberg paywall fade (lede duplicated + Terminal chrome)'
   assert.match(r.reason || '', /paywall/i);
 });
 
+test('passes complete short article with hero image when body matches its read-time badge (SCMP shape)', async () => {
+  // Real case (job 25004): scmp.com "2-MIN READ" article, complete body
+  // (1453 chars, ends naturally) but a 1530KB PDF from the hero image —
+  // failed the large-PDF truncation check despite the page's own badge
+  // confirming the body length (2 min × 500 chars/min = 1000 char floor).
+  const text =
+    'Artificial intelligence Tech / Tech Trends. Chinese doctor stuns maths world by ' +
+    'cracking decades-old problem using ChatGPT. 2-MIN READ Listen. Published: 10:00am, 14 Aug 2026. ' +
+    filler(1250);
+  const pdf = await createLargePdfWithPages([text.slice(0, 800), text.slice(800)]);
+  const result = await analyzePdfContent(pdf, {
+    sourceUrl: 'https://www.scmp.com/tech/tech-trends/article/3363966/chinese-doctor-stuns-maths-world',
+  });
+  assert.equal(result.passed, true, `read-time-consistent body should pass; got: ${result.reason}`);
+});
+
+test('large PDF whose body falls short of its read-time badge still fails (mismatch, not exempt)', async () => {
+  // Same shape but the badge promises 8 minutes (4000-char floor) — the
+  // read-time consistency exemption must not admit a paywall fade.
+  const text = 'Some Publication. 8 min read. ' + filler(1300);
+  const pdf = await createLargePdfWithPages([text.slice(0, 700), text.slice(700)]);
+  const result = await analyzePdfContent(pdf, {
+    sourceUrl: 'https://example.com/news/some-long-feature',
+  });
+  assert.equal(result.passed, false);
+  assert.match(result.reason || '', /Reading-time mismatch/, `expected mismatch reason, got: ${result.reason}`);
+});
+
+test('classifies Substack paid-post preview as paywall (swyx AINews shape)', async () => {
+  // Real case (job 25003): open.substack.com share link to a paid post,
+  // rendered without a subscriber session — lede + chart caption, body cut
+  // mid-word ("series mod…"), 497 chars. It failed as "truncated:" (497 <
+  // 500), which classifies as quality_false_negative_suspected; it must
+  // instead fail with "Paywall detected" so classifyFailureMessage routes it
+  // to the archive.today fallback.
+  const text =
+    'AINEWS: WEEKDAY ROUNDUPS [AINews] Gemini 3.7 Flash brings GDM back to the forefront ' +
+    'Down, but not out! AUG 14, 2026 · PAID Share The most compelling chart on today’s ' +
+    'Gemini 3.7 Flash update was this one: Where you can see the degree to which 3.5 and ' +
+    '3.6 Flash had fallen behind the more recent Claude 4.8+ and GPT 5.5+ series mod… ' +
+    '© 2026 Latent.Space · Privacy · Terms · Collection notice Start your Substack ' +
+    'Get the app Substack is the home for great culture 34 Previous';
+  const pdf = await createPdfWithText(text);
+  const result = await analyzePdfContent(pdf);
+  assert.equal(result.passed, false);
+  assert.match(result.reason || '', /Paywall detected: Substack paid-post preview/, `got: ${result.reason}`);
+});
+
+test('does NOT flag a subscriber-rendered paid Substack post (full body)', async () => {
+  // Same badge + chrome, but the full body extracted — above the preview
+  // char ceiling, so it must pass.
+  const text = 'AUG 14, 2026 · PAID Share ' + filler(6000) + ' Start your Substack Get the app';
+  const pdf = await createPdfWithText(text, { pageCount: 3 });
+  const result = await analyzePdfContent(pdf);
+  assert.equal(result.passed, true, `full paid post should pass; got: ${result.reason}`);
+});
+
+test('does NOT flag a short free Substack post (no PAID badge)', async () => {
+  const text =
+    'AUG 14, 2026 Share A short but complete free post. ' + filler(700) +
+    ' Start your Substack Get the app Substack is the home for great culture';
+  const pdf = await createPdfWithText(text);
+  const result = await analyzePdfContent(pdf);
+  assert.equal(result.passed, true, `free short post should pass; got: ${result.reason}`);
+});
+
 test('prose "the latest in a string of" does NOT trip the Latest-in widget marker', async () => {
   // Real CNBC copy that false-positived when the marker was case-insensitive.
   const text =
