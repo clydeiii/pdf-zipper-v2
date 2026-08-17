@@ -143,6 +143,13 @@ Two nightly ZIPs are published as stable static URLs (served by the generic `ser
 
 Both fire at **local midnight** for a clean as-of-midnight snapshot. Alignment depends on `TZ=America/New_York` in docker-compose (host cron is already host-local); without the pinned TZ the in-container captures job would fire at UTC midnight instead.
 
+### Self-Healing Fix System — review branches promptly
+Batches land on `fix/batch-*` and never auto-merge, which is safe but not free: by 2026-08-17 the backlog reached 68 branches, and the system had re-derived the *same* fix up to seven nights running because an unmerged branch doesn't stop the failure recurring. The triage that cleared it found the recurring hazard worth remembering:
+
+**Most repeat batches converge on loosening `pdf-content.ts` Checks 2/3 via a "the render reached the site footer, so it's complete" exemption. Do not accept that shape.** Paywalled and truncated pages render their footers too, and the blur-paywall classifier (`hasSandwichedBlankRun`) lives *inside* Check 2 — so a footer exemption on the outer condition silently disables paywall detection on exactly the captures it was built to catch. Prefer fixes that repair the capture (converter-side) or that only re-*classify* an already-failing result; treat anything that flips a capture from fail to pass as needing evidence, since a wrong pass silently archives a broken file.
+
+A batch reaching for an exemption usually means the real bug is upstream in the converter. Review within a week or so; the backlog's cost is duplicated work, not risk.
+
 ### Self-Healing Fix System
 - Users flag false positives (saved PDF that shouldn't have) / false negatives (failed URL that should've succeeded) via "Fix Selected"
 - Every 5min (offset 2.5min from feed polling) pending items are processed by headless Claude CLI
