@@ -644,6 +644,15 @@ export async function analyzePdfContent(
     const socialPost = isSocialPostCapture(normalizedText);
     const minChars = options.lenient ? 1 : socialPost ? MIN_SOCIAL_POST_CHARS : MIN_ARTICLE_CHARS;
     if (charCount < minChars) {
+      // A byte-heavy PDF with near-zero text is a body-less shell: the page
+      // rendered its imagery (hero, layout) but the article body was withheld
+      // from the automated browser (businessinsider.com serves headline + dek
+      // only — no nav, no footer, no paywall text). Same phenomenon as the
+      // Reuters stripped-page check, minus the site-specific footer signature.
+      // Wording matters: classifyFailureMessage keys on "bot detection" to
+      // class this bot_detected — still an archive.today fallback candidate,
+      // but on the 6h hard-blocker cooldown instead of hourly self-heal churn.
+      const bodylessShell = !options.lenient && !socialPost && pdfSize > LARGE_PDF_THRESHOLD;
       return {
         ...baseResult,
         passed: false,
@@ -651,7 +660,9 @@ export async function analyzePdfContent(
           ? `PDF is blank (0 chars of text).`
           : socialPost
             ? `Social post capture has only ${charCount} characters of text (minimum: ${MIN_SOCIAL_POST_CHARS}). Status likely failed to render.`
-            : `PDF has only ${charCount} characters of text (minimum: ${MIN_ARTICLE_CHARS}). Content appears truncated.`,
+            : bodylessShell
+              ? `Body-less shell: ${Math.round(pdfSize / 1024)}KB PDF rendered but has only ${charCount} characters of text (minimum: ${MIN_ARTICLE_CHARS}). Article body missing — likely silent bot detection.`
+              : `PDF has only ${charCount} characters of text (minimum: ${MIN_ARTICLE_CHARS}). Content appears truncated.`,
       };
     }
 

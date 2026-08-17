@@ -268,6 +268,31 @@ test('classifies blur-obfuscated paywall as paywall (every.to shape)', async () 
   assert.match(result.reason || '', /Paywall detected/, `expected paywall reason, got: ${result.reason}`);
 });
 
+test('classifies byte-heavy near-textless capture as body-less shell (BI shape)', async () => {
+  // Real case (job 23941, businessinsider.com dean-ball article): 1.7MB PDF
+  // with only 190 chars — headline + dek, no nav, no footer, no paywall text.
+  // The site withheld the article body from the automated browser, so the
+  // reason must carry "bot detection" (→ bot_detected class: archive
+  // candidate on the 6h cooldown, not hourly quality-false-negative churn).
+  const pdf = await createLargePdfWithPages([
+    'DISCOURSE TECH The Ball in OpenAI\'s court. Trump alum and voluble Substacker Dean Ball is angling to shape the future of OpenAI, if he can get people to listen.',
+    '',
+  ]);
+  const result = await analyzePdfContent(pdf);
+  assert.equal(result.passed, false);
+  assert.match(result.reason || '', /Body-less shell/, `expected shell reason, got: ${result.reason}`);
+  assert.match(result.reason || '', /bot detection/, `expected bot-detection wording, got: ${result.reason}`);
+});
+
+test('small near-textless PDF keeps the plain truncated reason (not a shell)', async () => {
+  // No imagery bytes → could be a converter bug (clipped pane) on a healthy
+  // page, so it must stay quality_false_negative_suspected for the fix system.
+  const pdf = await createPdfWithText('Short page.');
+  const result = await analyzePdfContent(pdf);
+  assert.equal(result.passed, false);
+  assert.match(result.reason || '', /Content appears truncated/, `expected plain truncated reason, got: ${result.reason}`);
+});
+
 test('plain large-PDF truncation keeps the truncated-article reason', async () => {
   // Text spread across pages (SPA shell / hero-image truncation) — no
   // textless run sandwiched between textful pages, so it must keep the

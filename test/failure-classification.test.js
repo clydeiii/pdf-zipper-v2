@@ -40,6 +40,19 @@ test('classifyFailureMessage classifies blur-paywall truncation reason as paywal
   );
 });
 
+test('classifyFailureMessage classifies body-less shell truncation as bot_detected', () => {
+  // pdf-content.ts Check 1 shell wording — "bot detection" must win over the
+  // "truncated:" prefix so archive fallback treats it as a hard blocker on
+  // the 6h cooldown (real case: businessinsider.com serving headline + dek
+  // only, 1.7MB PDF / 190 chars).
+  assert.equal(
+    classifyFailureMessage(
+      'truncated: Body-less shell: 1711KB PDF rendered but has only 190 characters of text (minimum: 500). Article body missing — likely silent bot detection.'
+    ),
+    'bot_detected'
+  );
+});
+
 test('classifyFailureMessage defaults to unknown', () => {
   assert.equal(classifyFailureMessage('some random error text'), 'unknown');
   assert.equal(classifyFailureMessage(undefined), 'unknown');
