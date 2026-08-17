@@ -189,6 +189,65 @@ export async function downloadPdfDirect(url: string): Promise<PDFPassthroughResu
 }
 
 /**
+ * Raw DOM facts about embedded-PDF viewers, collected in-page. URL resolution
+ * and the final pick happen Node-side in pickEmbeddedPdfUrl so the logic is
+ * unit-testable (page.evaluate callbacks can't share code with the module).
+ */
+export interface EmbeddedPdfScan {
+  /** <embed>/<object>/<iframe> elements that look like PDF viewers */
+  embeds: Array<{
+    /** src/data attribute as written (may be relative) */
+    raw: string;
+    /** element declared type="application/pdf" */
+    isPdfType: boolean;
+    /** viewer-sized box (not an icon/tracking pixel) */
+    large: boolean;
+  }>;
+  /** hrefs of anchors that point at .pdf files (prefiltered in-page) */
+  pdfAnchorHrefs: string[];
+  /** page has a viewer-sized <canvas> (PDF.js-style viewers render into canvas) */
+  hasViewerCanvas: boolean;
+}
+
+/**
+ * Pick the source PDF URL for a page whose primary content is an embedded PDF
+ * viewer, or undefined when the page has no such viewer.
+ *
+ * Native <embed>/<object>/<iframe> viewers count on their own. A bare .pdf
+ * download link only counts when a viewer-sized canvas is present (PDF.js-style
+ * viewers, e.g. xbow.com whitepapers) — an article that merely links a PDF in
+ * its prose must never match, since the worker would otherwise swap a failing
+ * article capture for the wrong document.
+ */
+export function pickEmbeddedPdfUrl(scan: EmbeddedPdfScan, pageUrl: string): string | undefined {
+  const absolutize = (raw: string): URL | null => {
+    try {
+      const abs = new URL(raw, pageUrl);
+      return abs.protocol === 'http:' || abs.protocol === 'https:' ? abs : null;
+    } catch {
+      return null;
+    }
+  };
+  const isPdfPath = (u: URL) => /\.pdf$/i.test(u.pathname);
+
+  for (const embed of scan.embeds) {
+    if (!embed.large) continue;
+    const abs = absolutize(embed.raw);
+    if (!abs) continue;
+    if (embed.isPdfType || isPdfPath(abs)) return abs.toString();
+  }
+
+  if (scan.hasViewerCanvas) {
+    for (const raw of scan.pdfAnchorHrefs) {
+      const abs = absolutize(raw);
+      if (abs && isPdfPath(abs)) return abs.toString();
+    }
+  }
+
+  return undefined;
+}
+
+/**
  * Check if a URL is a Substack URL
  */
 /**
@@ -1037,6 +1096,46 @@ export async function convertUrlToPDF(
           console.warn(`${broken.length} images failed to load:`, broken);
         }
       } catch { /* ignore */ }
+    }
+
+    // Embedded-PDF viewers print as blank sheets: Chromium's print path
+    // rasterizes neither the native <embed>/<iframe> PDF plugin nor PDF.js
+    // canvases that aren't scrolled into view, so a page whose main content is
+    // a document viewer captures as intro text + N dark pages (real case:
+    // xbow.com whitepapers — a 16-page report reduced to 3.1 chars/KB and
+    // rejected as truncated). Lift the source PDF's URL now, while the DOM is
+    // unmutated; the worker only uses it as a pass-through fallback when the
+    // printed capture fails content analysis, so pages with real prose beside
+    // an embedded paper keep their normal capture.
+    let embeddedPdfUrl: string | undefined;
+    try {
+      const embeddedPdfScan: EmbeddedPdfScan = await page.evaluate(() => {
+        const VIEWER_MIN_PX = 300;
+        const isLarge = (el: Element) => {
+          const rect = el.getBoundingClientRect();
+          return rect.width >= VIEWER_MIN_PX && rect.height >= VIEWER_MIN_PX;
+        };
+        const embeds: Array<{ raw: string; isPdfType: boolean; large: boolean }> = [];
+        for (const el of document.querySelectorAll('embed[src], object[data], iframe[src]')) {
+          const raw = el.getAttribute('src') || el.getAttribute('data') || '';
+          if (!raw) continue;
+          const isPdfType = (el.getAttribute('type') || '').toLowerCase() === 'application/pdf';
+          if (!isPdfType && !/\.pdf(?:[?#]|$)/i.test(raw)) continue;
+          embeds.push({ raw, isPdfType, large: isLarge(el) });
+        }
+        const pdfAnchorHrefs = Array.from(document.querySelectorAll('a[href]'))
+          .map((a) => a.getAttribute('href') || '')
+          .filter((href) => /\.pdf(?:[?#]|$)/i.test(href))
+          .slice(0, 20);
+        const hasViewerCanvas = Array.from(document.querySelectorAll('canvas')).some(isLarge);
+        return { embeds, pdfAnchorHrefs, hasViewerCanvas };
+      });
+      embeddedPdfUrl = pickEmbeddedPdfUrl(embeddedPdfScan, page.url());
+      if (embeddedPdfUrl) {
+        console.log(`Embedded PDF viewer detected for ${url}: ${embeddedPdfUrl}`);
+      }
+    } catch {
+      // Detection is best-effort — capture proceeds without a fallback URL
     }
 
     // Apply privacy filtering (hides elements containing configured terms).
@@ -2000,6 +2099,7 @@ export async function convertUrlToPDF(
       isXArticle: isNitterCapture ? isNitterArticleCapture : undefined,
       expandedUrl: expandedUrl !== url ? expandedUrl : undefined,
       tweetRelations,
+      embeddedPdfUrl,
     };
 
   } finally {

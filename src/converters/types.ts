@@ -48,6 +48,14 @@ export interface PDFSuccessResult {
     bodyText?: string;
     authorUsername?: string;
   };
+  /**
+   * Source URL of a PDF embedded as the page's primary content (native
+   * <embed>/<iframe> viewer or a PDF.js-style canvas viewer with a download
+   * link). Chromium's print path renders these viewers as blank pages, so the
+   * worker uses this for a pass-through download fallback when the printed
+   * capture fails content analysis.
+   */
+  embeddedPdfUrl?: string;
 }
 
 /**
