@@ -278,6 +278,35 @@ test('plain large-PDF truncation keeps the truncated-article reason', async () =
   assert.match(result.reason || '', /Large PDF/, `expected truncation reason, got: ${result.reason}`);
 });
 
+test('classifies body-stripped page with engagement chrome as paywall (Business Insider shape)', async () => {
+  // Real case (job 23416, businessinsider.com premium "EXCLUSIVE"): 611KB PDF,
+  // 545 chars — headline, byline, hero caption, comment CTA and "Read next"
+  // widget all render; every body paragraph is stripped client-side.
+  const pdf = await createLargePdfWithPages([
+    'Read in app Start the conversation Read next EXCLUSIVE Google is in talks ' +
+      'for a $1.5 billion-plus deal with AI coding agent startup Mechanize ' +
+      'By Katie Roof, Ben Bergman, Charles Rollet, and Hugh Langley Aug 5, 2026, 8:14 AM ET ' +
+      'Business Insider tells the innovative stories you want to know ' +
+      'Alphabet CEO Sundar Pichai. Bloomberg/Getty Images',
+    'Ben Bergman Business Insider tells the innovative stories you want to know ' + filler(150),
+  ]);
+  const result = await analyzePdfContent(pdf);
+  assert.equal(result.passed, false);
+  assert.match(result.reason || '', /Paywall detected.*chrome/, `expected paywall-strip reason, got: ${result.reason}`);
+});
+
+test('single engagement phrase in prose keeps the truncated-article reason', async () => {
+  // One marker alone ("read next" can appear in article copy) must not
+  // reclassify a genuine truncation as a paywall.
+  const pdf = await createLargePdfWithPages([
+    filler(300) + ' Here is what to read next this weekend. ',
+    filler(300),
+  ]);
+  const result = await analyzePdfContent(pdf);
+  assert.equal(result.passed, false);
+  assert.match(result.reason || '', /Large PDF/, `expected truncation reason, got: ${result.reason}`);
+});
+
 test('trailing blank overflow pages do not trigger the blur-paywall reason', async () => {
   // Blank pages at the END (print overflow) are not a blurred body.
   const pdf = await createLargePdfWithPages([filler(500), filler(300), '', '']);
