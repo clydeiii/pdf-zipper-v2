@@ -422,25 +422,50 @@ export interface AnalyzePdfContentOptions {
    * ("https://example.com/") is a homepage/landing page, not an article —
    * hero art + short CTA copy is its complete form (real case:
    * ai-reports.org, 2.3MB of hero imagery with 855 chars of landing copy,
-   * rejected as "truncated article"). Root captures skip the checks that
-   * assume article semantics (soft paywall, stealth-truncation markers,
-   * reading-time mismatch, large-PDF/low-density truncation) but keep the
-   * hostile-page checks and the minimum-chars floor, so a blank or
-   * bot-blocked homepage shell still fails.
+   * rejected as "truncated article"). The same applies to single-segment
+   * section indexes ("/blog", "/news"): post-card grids with hero images
+   * and short blurbs (real case: mazebench.com/blog). These captures skip
+   * the checks that assume article semantics (soft paywall, stealth-
+   * truncation markers, reading-time mismatch, large-PDF/low-density
+   * truncation) but keep the hostile-page checks and the minimum-chars
+   * floor, so a blank or bot-blocked shell still fails.
    */
   sourceUrl?: string;
 }
 
 /**
- * True when the capture URL is a bare domain root. A query string
- * disqualifies it (WordPress default permalinks serve articles at
- * "/?p=123"), which fails safe toward the strict article checks.
+ * Single-segment paths that are section indexes (post listings), not
+ * articles — card grids of headline + blurb + hero image, so "big PDF,
+ * little text" is their complete form (real case: mazebench.com/blog,
+ * 1.6MB of card art with 533 chars across two post cards, rejected as
+ * "truncated article"). Only exact single-segment matches qualify;
+ * "/blog/some-post" is an article and keeps the strict checks.
  */
-function isDomainRootUrl(sourceUrl: string | undefined): boolean {
+const SECTION_INDEX_SEGMENTS = new Set([
+  'blog',
+  'news',
+  'posts',
+  'articles',
+  'writing',
+  'essays',
+  'changelog',
+  'updates',
+]);
+
+/**
+ * True when the capture URL is a bare domain root or a single-segment
+ * section index ("/blog"). A query string disqualifies it (WordPress
+ * default permalinks serve articles at "/?p=123"), which fails safe
+ * toward the strict article checks.
+ */
+function isLandingOrIndexUrl(sourceUrl: string | undefined): boolean {
   if (!sourceUrl) return false;
   try {
     const parsed = new URL(sourceUrl);
-    return (parsed.pathname === '/' || parsed.pathname === '') && parsed.search === '';
+    if (parsed.search !== '') return false;
+    const segments = parsed.pathname.split('/').filter(Boolean);
+    if (segments.length === 0) return true;
+    return segments.length === 1 && SECTION_INDEX_SEGMENTS.has(segments[0].toLowerCase());
   } catch {
     return false;
   }
@@ -460,7 +485,9 @@ function isDomainRootUrl(sourceUrl: string | undefined): boolean {
  */
 function isNonArticleUrl(sourceUrl: string | undefined): boolean {
   if (!sourceUrl) return false;
-  return isDomainRootUrl(sourceUrl) || isPatreonPostUrl(sourceUrl);
+  // isLandingOrIndexUrl covers the domain root AND single-segment section
+  // indexes (/blog, /news); it supersedes the bare isDomainRootUrl test.
+  return isLandingOrIndexUrl(sourceUrl) || isPatreonPostUrl(sourceUrl);
 }
 
 /**
@@ -505,8 +532,9 @@ export async function analyzePdfContent(
       extractedText: normalizedText,
     };
 
-    // Non-article capture (landing page, Patreon video post): there's no
-    // prose body to truncate, so the article-shaped heuristics don't apply.
+    // Non-article capture: a landing page, a section index, or a Patreon
+    // video post. None has a prose body to truncate, so the article-shaped
+    // heuristics below don't apply.
     const homepage = isNonArticleUrl(options.sourceUrl);
 
     // Check 0: Error page detection (404, page not found, etc.)

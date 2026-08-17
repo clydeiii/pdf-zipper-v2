@@ -347,6 +347,37 @@ test('domain-root landing page is exempt from the large-PDF truncation check', a
   assert.equal(result.passed, true, `homepage capture should pass; got: ${result.reason}`);
 });
 
+test('section-index path (/blog) is exempt from the large-PDF truncation check', async () => {
+  // mazebench.com/blog shape: 1.6MB PDF (post-card hero art), 533 chars of
+  // card headlines + blurbs. A listing page, not a truncated article.
+  const pdf = await createLargePdfWithPages([filler(400), filler(150)]);
+  const result = await analyzePdfContent(pdf, { sourceUrl: 'https://mazebench.com/blog' });
+  assert.equal(result.passed, true, `blog index capture should pass; got: ${result.reason}`);
+});
+
+test('article under a section index (/blog/post) keeps the large-PDF truncation check', async () => {
+  const pdf = await createLargePdfWithPages([filler(400), filler(150)]);
+  const result = await analyzePdfContent(pdf, {
+    sourceUrl: 'https://mazebench.com/blog/introducing-mazebench',
+  });
+  assert.equal(result.passed, false);
+  assert.match(result.reason || '', /Large PDF/, `expected truncation reason, got: ${result.reason}`);
+});
+
+test('non-listing single-segment path keeps the large-PDF truncation check', async () => {
+  // "/about", "/pricing" etc. are not in the section-index allowlist.
+  const pdf = await createLargePdfWithPages([filler(400), filler(150)]);
+  const result = await analyzePdfContent(pdf, { sourceUrl: 'https://example.com/research-paper' });
+  assert.equal(result.passed, false);
+  assert.match(result.reason || '', /Large PDF/, `expected truncation reason, got: ${result.reason}`);
+});
+
+test('near-blank section-index shell still fails the minimum-chars floor', async () => {
+  const pdf = await createLargePdfWithPages([filler(200)]);
+  const result = await analyzePdfContent(pdf, { sourceUrl: 'https://example.com/blog' });
+  assert.equal(result.passed, false, 'section-index exemption must not admit blank shells');
+});
+
 test('deep article path keeps the large-PDF truncation check (Axios SPA shell)', async () => {
   const pdf = await createLargePdfWithPages([filler(500), filler(355)]);
   const result = await analyzePdfContent(pdf, {
