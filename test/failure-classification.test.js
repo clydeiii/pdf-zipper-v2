@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyFailureMessage } from '../dist/fix/failure.js';
+import { classifyFailureMessage, isTransientNetworkMessage } from '../dist/fix/failure.js';
 
 test('classifyFailureMessage detects paywall-like failures', () => {
   assert.equal(classifyFailureMessage('paywall: subscribe to continue reading'), 'paywall');
@@ -51,6 +51,32 @@ test('classifyFailureMessage classifies body-less shell truncation as bot_detect
     ),
     'bot_detected'
   );
+});
+
+test('isTransientNetworkMessage flags connection-level failures for delayed requeue', () => {
+  // Exact shape of the jeffgamet.com false negative: networkidle timed out,
+  // the domcontentloaded retry hit a TCP reset, and the 1s/2s/4s BullMQ
+  // backoff burned all attempts inside the same outage window.
+  assert.equal(
+    isTransientNetworkMessage(
+      'timeout: Navigation failed after retry: page.goto: net::ERR_CONNECTION_RESET at https://jeffgamet.com/anthropics-claude-watermark-is-akin-to-an-ai-poison-pill/'
+    ),
+    true
+  );
+  assert.equal(isTransientNetworkMessage('navigation_error: net::ERR_CONNECTION_REFUSED at https://example.com'), true);
+  assert.equal(isTransientNetworkMessage('navigation_error: net::ERR_EMPTY_RESPONSE'), true);
+  assert.equal(isTransientNetworkMessage('unknown: request failed: socket hang up'), true);
+  assert.equal(isTransientNetworkMessage('unknown: fetch failed: ECONNRESET'), true);
+});
+
+test('isTransientNetworkMessage leaves permanent and slow-page failures alone', () => {
+  // Dead domains stay dead — a delayed requeue cannot revive them.
+  assert.equal(isTransientNetworkMessage('navigation_error: net::ERR_NAME_NOT_RESOLVED at https://gone.example'), false);
+  // Plain navigation timeouts (slow pages) already get the in-converter
+  // domcontentloaded retry; they are not connection-level outages.
+  assert.equal(isTransientNetworkMessage('timeout: Navigation failed after retry: page.goto: Timeout 60000ms exceeded.'), false);
+  assert.equal(isTransientNetworkMessage('bot_detected: net::ERR_BLOCKED_BY_CLIENT'), false);
+  assert.equal(isTransientNetworkMessage(undefined), false);
 });
 
 test('classifyFailureMessage defaults to unknown', () => {

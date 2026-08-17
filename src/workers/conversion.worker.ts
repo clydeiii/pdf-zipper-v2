@@ -24,7 +24,7 @@ import { getISOWeekNumber } from '../media/organization.js';
 import { notifyJobComplete, notifyJobFailed, isDiscordEnabled } from '../notifications/discord.js';
 import { addPendingFixes } from '../fix/pending.js';
 import { BookmarkDeduplicator } from '../urls/deduplicator.js';
-import { classifyFailureMessage } from '../fix/failure.js';
+import { classifyFailureMessage, isTransientNetworkMessage } from '../fix/failure.js';
 import { shouldAutoTriggerFix } from '../fix/trigger-policy.js';
 import { updateFixOutcome } from '../fix/ledger.js';
 import { addJobToWeekIndex } from '../jobs/week-index.js';
@@ -730,9 +730,14 @@ function createConversionWorker(): Worker<ConversionJobData, ConversionJobResult
       // Nitter rate limits clear on their own within minutes, but the queue's
       // seconds-scale exponential backoff burns all attempts inside a single
       // limit window, permanently failing tweets that would convert fine an
-      // hour later. Give rate-limited jobs a second life: re-enqueue a delayed
-      // copy (30/60/120 min) up to 3 times before letting the failure stand.
-      if (classifyFailureMessage(error.message) === 'rate_limited') {
+      // hour later. Transient network failures (ERR_CONNECTION_RESET etc. —
+      // host outage or per-IP throttling) have the same shape. Give both a
+      // second life: re-enqueue a delayed copy (30/60/120 min) up to 3 times
+      // before letting the failure stand.
+      if (
+        classifyFailureMessage(error.message) === 'rate_limited' ||
+        isTransientNetworkMessage(error.message)
+      ) {
         const requeues = job.data.rateLimitRequeues ?? 0;
         if (requeues < 3) {
           const delayMinutes = [30, 60, 120][requeues];
@@ -742,12 +747,12 @@ function createConversionWorker(): Worker<ConversionJobData, ConversionJobResult
               { ...job.data, rateLimitRequeues: requeues + 1 },
               { jobId: `${job.id}_rl${requeues + 1}`, delay: delayMinutes * 60_000 }
             );
-            console.log(`[rate-limited] Re-queued ${job.data.url} with ${delayMinutes}min delay (requeue ${requeues + 1}/3)`);
+            console.log(`[transient-retry] Re-queued ${job.data.url} with ${delayMinutes}min delay (requeue ${requeues + 1}/3)`);
             // The delayed copy owns the outcome: skip the failed-week index
             // and Discord failure noise for this attempt.
             return;
           } catch (requeueErr) {
-            console.error('[rate-limited] Re-queue failed, letting failure stand:', requeueErr);
+            console.error('[transient-retry] Re-queue failed, letting failure stand:', requeueErr);
           }
         }
       }

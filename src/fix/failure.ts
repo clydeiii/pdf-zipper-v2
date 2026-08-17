@@ -21,6 +21,35 @@ export type FailureClass =
   | 'unknown';
 
 /**
+ * Network-level failures where the TCP connection was reset, refused, or
+ * dropped before the server produced a response. These are host outages or
+ * per-IP throttling, not code bugs — the same page typically converts fine
+ * minutes to hours later. The conversion worker gives these the same delayed
+ * "second life" requeue as rate_limited, because the queue's seconds-scale
+ * exponential backoff burns all attempts inside a single outage window.
+ * Deliberately excludes ERR_NAME_NOT_RESOLVED (dead domains stay dead) and
+ * plain navigation timeouts (slow pages, handled by the in-converter retry).
+ */
+const TRANSIENT_NETWORK_PATTERNS = [
+  'err_connection_reset',
+  'err_connection_refused',
+  'err_connection_closed',
+  'err_connection_timed_out',
+  'err_empty_response',
+  'err_network_changed',
+  'err_address_unreachable',
+  'econnreset',
+  'econnrefused',
+  'socket hang up',
+];
+
+export function isTransientNetworkMessage(message?: string): boolean {
+  const text = (message || '').toLowerCase();
+  if (!text) return false;
+  return TRANSIENT_NETWORK_PATTERNS.some((pattern) => text.includes(pattern));
+}
+
+/**
  * Normalize common "reason: details" error formats into classes.
  */
 export function classifyFailureMessage(message?: string): FailureClass {
