@@ -1,6 +1,7 @@
 import { initBrowser } from '../browsers/manager.js';
 import { loadCookies } from '../browsers/cookies.js';
 import { env } from '../config/env.js';
+import { extractJsonLdArticleBody } from './jsonld-body.js';
 import type { PDFOptions, PDFResult, PDFPassthroughResult } from './types.js';
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
@@ -970,6 +971,42 @@ export async function convertUrlToPDF(
             { timeout: 5000 }
           ).catch(() => { /* still thin — next round, or give up after the loop */ });
           await page.waitForTimeout(1000);
+        }
+
+        // JSON-LD body rescue. If the body STILL didn't hydrate after every
+        // re-scroll round, the content XHR is likely bot-gated — no amount of
+        // in-page nudging will fill it (observed on axios.com: skeleton
+        // placeholders persist and the quality check rejects the shell as
+        // truncated). News SPAs server-embed the full text as NewsArticle
+        // JSON-LD in the initial HTML, so recover the body from there and
+        // inject it into the article container before capture. The injected
+        // text is the publisher's own articleBody verbatim — fidelity is
+        // preserved. Guarded on still-shell-thin AND the JSON-LD body being
+        // meaningfully longer than what rendered, so short-but-complete pages
+        // never get doubled text.
+        const lenFinal = await page.evaluate(ARTICLE_LEN_FN);
+        if (lenFinal < SHELL_THRESHOLD) {
+          const ldScripts = await page.evaluate(() =>
+            Array.from(document.querySelectorAll('script[type="application/ld+json"]'))
+              .map((s) => s.textContent || '')
+          );
+          const ldBody = extractJsonLdArticleBody(ldScripts);
+          if (ldBody && ldBody.length > lenFinal + 500) {
+            await page.evaluate((bodyText) => {
+              const main = document.querySelector('article') || document.querySelector('main') || document.body;
+              const container = document.createElement('div');
+              for (const para of bodyText.split(/\n+/)) {
+                const trimmed = para.trim();
+                if (!trimmed) continue;
+                const p = document.createElement('p');
+                p.textContent = trimmed;
+                p.style.margin = '1em 0';
+                container.appendChild(p);
+              }
+              main.appendChild(container);
+            }, ldBody);
+            console.log(`[jsonld-rescue] Article body never hydrated (${lenFinal} chars rendered); injected ${ldBody.length}-char articleBody from JSON-LD`);
+          }
         }
       }
     } catch {
