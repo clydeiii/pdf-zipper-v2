@@ -190,6 +190,30 @@ export async function downloadPdfDirect(url: string): Promise<PDFPassthroughResu
 /**
  * Check if a URL is a Substack URL
  */
+/**
+ * Consent-banner button matching, word-bounded.
+ *
+ * The accept-click selectors all scope to a cookie/consent container, and the
+ * old test was `text.includes('ok')` — which "co-**ok**-ie" satisfies. So on
+ * any CMP offering a settings button we clicked *that*, opening the
+ * preferences modal immediately before printing and leaving a larger overlay
+ * than the banner we set out to dismiss. Sources are passed into the in-page
+ * evaluate; kept at module scope so the semantics are unit-testable.
+ */
+export const CONSENT_ACCEPT_RE =
+  /\b(accept|agree|ok|okay|got it|dismiss|allow all|understand)\b/;
+export const CONSENT_NOT_ACCEPT_RE =
+  // "Accept only necessary" is a reject button wearing an accept word, and CMPs
+  // write it in both orders — match the words independently rather than as a
+  // fixed phrase.
+  /\b(settings|preferences|manage|customi[sz]e|options|reject|decline|deny|more info|learn more|necessary|essential)\b/;
+
+/** True when a consent-banner button label means "accept". Exported for testing. */
+export function isConsentAcceptLabel(label: string): boolean {
+  const text = (label || '').toLowerCase().trim();
+  return CONSENT_ACCEPT_RE.test(text) && !CONSENT_NOT_ACCEPT_RE.test(text);
+}
+
 function isSubstackUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
@@ -985,7 +1009,7 @@ export async function convertUrlToPDF(
     // dark/light toggles, floating share buttons, chat widgets, "back to top", etc.)
     // CSS attribute selectors only catch inline styles — this catches everything via computed style.
     try {
-      const removed = await page.evaluate(() => {
+      const removed = await page.evaluate((consentPatterns: { accept: string; notAccept: string }) => {
         let count = 0;
 
         // Phase 1: Try clicking "accept" on cookie banners to dismiss them cleanly
@@ -995,10 +1019,18 @@ export async function convertUrlToPDF(
           'button[data-testid*="accept"]', 'button[data-testid*="cookie"]',
           '.cc-accept', '.cc-dismiss', '#accept-cookies', '.accept-cookies',
         ];
+        // Word-bounded, and never a settings/manage/reject control. Substring
+        // matching on "ok" was clicking the wrong button: every selector above
+        // scopes to a cookie/consent container, and "Cookie Settings" contains
+        // "ok" — so on any CMP whose banner offers a settings button we opened
+        // the preferences modal immediately before printing, leaving a bigger
+        // overlay than the banner we meant to dismiss.
+        const acceptRe = new RegExp(consentPatterns.accept);
+        const notAcceptRe = new RegExp(consentPatterns.notAccept);
         for (const selector of acceptSelectors) {
           for (const btn of document.querySelectorAll(selector)) {
-            const text = btn.textContent?.toLowerCase() || '';
-            if (text.includes('accept') || text.includes('agree') || text.includes('ok') || text.includes('got it') || text.includes('dismiss')) {
+            const text = (btn.textContent || '').toLowerCase().trim();
+            if (acceptRe.test(text) && !notAcceptRe.test(text)) {
               (btn as HTMLElement).click();
               break;
             }
@@ -1174,7 +1206,7 @@ export async function convertUrlToPDF(
         }
 
         return count;
-      });
+      }, { accept: CONSENT_ACCEPT_RE.source, notAccept: CONSENT_NOT_ACCEPT_RE.source });
       if (removed > 0) {
         console.log(`Removed ${removed} fixed/sticky/overlay elements from ${url}`);
       }
