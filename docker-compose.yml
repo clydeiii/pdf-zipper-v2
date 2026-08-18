@@ -31,6 +31,9 @@ services:
       # Paywall fallback via existing archive.today snapshots. Requires fresh
       # archive.is clearance cookies in cookies.txt (cf_clearance ~1-day TTL).
       - ARCHIVE_FALLBACK_ENABLED=true
+      # smry.ai reader-view rescue (runs before the archive.today tier).
+      # Key lives in .env; empty disables the tier.
+      - SMRY_API_KEY=${SMRY_API_KEY:-}
       # Use larger model for transcript formatting + metadata enrichment
       - TRANSCRIPT_FORMAT_MODEL=gemma4:latest
 

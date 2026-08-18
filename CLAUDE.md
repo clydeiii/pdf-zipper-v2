@@ -44,6 +44,13 @@ Manual captures (Chrome extension → `/api/manual-capture`) must never be overw
 
 Verify changes here against a spread of live URLs, not just the target site — the phase runs on every capture. A before/after harness comparing page count + extracted chars is the cheap way to prove a change is surgical.
 
+### Paywall/Bot-Wall Rescue Tiers (order matters)
+When a primary capture fails on an access wall, two rescue tiers run in order:
+1. **smry.ai reader view** (`src/converters/smry-rescue.ts`, needs `SMRY_API_KEY` — paid Pro, 500 fresh extractions/day, repeat URLs are free cache hits). One authenticated API call; rescues bot-walled free content (Reuters, Fortune), metered paywalls, gift links, and sites that connection-reset our IP (its candidate set adds `timeout`/`navigation_error` on top of the archive tier's). Renders a clean reader PDF (`ViaSmry` Info Dict field, creator `pdf-zipper-v2-smry`).
+2. **archive.today** (`src/converters/archive-fallback.ts`) — only chance for hard paywalls (WSJ/Bloomberg/Economist), but captcha/cookie/429-fragile.
+
+**smry's API quality fields are unreliable — never gate on them.** Validated 2026-08-17: a WSJ lede-only partial (1,933 chars) and The Information's 28KB page-config JSON both returned `truncated: false, qualityStatus: "usable"`. The real gates are ours: `looksLikeMachineBlob`, `SMRY_MIN_CHARS` (2500 — deliberately above observed lede sizes; don't lower it without re-measuring what hard-paywall ledes look like), and `analyzePdfContent` on the rendered PDF. A rejected rescue costs nothing (falls through); a wrong accept silently archives a partial article as a success.
+
 ### Quality Pipeline
 Two-layer quality check, both must pass:
 1. **Vision score** (`src/quality/scorer.ts`): Ollama sees viewport-only screenshot (~800px). Don't flag "truncated" from viewport alone. Threshold configurable via `QUALITY_THRESHOLD`.
@@ -222,6 +229,7 @@ curl -X POST http://localhost:3002/api/jobs \
 | `VIDEO_COMPRESS_MAX_FPS` | 30 | Resample when frame rate exceeds this (29.97 NTSC never triggers) |
 | `VIDEO_COMPRESS_KBPS_PER_MEGAPIXEL` | 2000 | Bitrate allowance before re-encode kicks in (plus 1200 kbps absolute floor) |
 | `VIDEO_COMPRESS_CRF` | 26 | x264 quality for the re-encode (lower = bigger/better) |
+| `SMRY_API_KEY` | — | smry.ai Pro key; enables the reader-view rescue tier (empty = off). Key lives in `.env` only |
 | `FIX_ENABLED` | false | Enable AI self-healing |
 | `CLAUDE_CLI_PATH` | `claude` | Path to Claude CLI |
 | `DISCORD_WEBHOOK_URL` | — | Job event notifications |

@@ -31,6 +31,7 @@ import { addJobToWeekIndex } from '../jobs/week-index.js';
 import { isRendererCrashMessage, countCrashRequeues } from '../utils/crash-signature.js';
 import { enrichDocumentMetadata, type EnrichedMetadata } from '../metadata/enrichment.js';
 import { captureViaArchive } from '../converters/archive-fallback.js';
+import { captureViaSmry } from '../converters/smry-rescue.js';
 import { isChatGptShareUrl, captureChatGptShare } from '../converters/chatgpt-share.js';
 import { harvestArticleToDb, harvestTweetToDb, twitterHarvestKind } from '../twitter/harvest.js';
 import { fetchPangramDetection, pangramInfoDictFields } from '../substack/pangram.js';
@@ -160,16 +161,85 @@ function isArchiveFallbackCandidate(message: string): boolean {
     cls === 'bot_detected' || cls === 'quality_false_negative_suspected';
 }
 
+/**
+ * smry.ai rescues everything archive.today can, PLUS timeouts and hard
+ * connection refusals: a site that resets our datacenter IP's connections
+ * (observed: jeffgamet.com net::ERR_CONNECTION_RESET) may serve smry's
+ * infrastructure fine. The extra classes cost one cached API call per retry.
+ */
+function isSmryRescueCandidate(message: string): boolean {
+  if (isArchiveFallbackCandidate(message)) return true;
+  const cls = classifyFailureMessage(message);
+  return cls === 'timeout' || cls === 'navigation_error';
+}
+
 async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Promise<ConversionJobResult> {
   try {
     return await runPrimaryCapture(job);
   } catch (primaryErr) {
     const message = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
-    if (!env.ARCHIVE_FALLBACK_ENABLED || !isArchiveFallbackCandidate(message)) {
+    const archiveCandidate = env.ARCHIVE_FALLBACK_ENABLED && isArchiveFallbackCandidate(message);
+    const smryCandidate = env.SMRY_API_KEY !== '' && isSmryRescueCandidate(message);
+    if (!archiveCandidate && !smryCandidate) {
       throw primaryErr;
     }
     const { url, originalUrl, title: jobTitle, bookmarkedAt, oldFilePath } = job.data;
     const target = originalUrl || url;
+
+    // Tier 1: smry.ai reader-view rescue — cheap authenticated API call, no
+    // captcha/cookie/rate-limit machinery. Every hit here is one less
+    // archive.today lookup. Falls through silently on any failure.
+    if (smryCandidate) {
+      console.log(`[smry-rescue] Primary failed (${message.slice(0, 60)}); trying smry.ai for ${target}`);
+      try {
+        const smry = await captureViaSmry(target);
+        if (smry.ok) {
+          console.log(`[smry-rescue] Extracted ${smry.extractedText.length} chars via smry.ai`);
+          let enrichedMetadata: EnrichedMetadata | undefined;
+          try {
+            enrichedMetadata = await enrichDocumentMetadata(smry.extractedText, target, jobTitle || smry.title);
+          } catch { /* non-fatal */ }
+          if (enrichedMetadata) {
+            // smry's byline fields are read from the source page itself —
+            // stronger provenance than LLM extraction, which
+            // validateFactualFields often has to null out.
+            if (smry.author) enrichedMetadata.author = smry.author;
+            if (smry.publication) enrichedMetadata.publication = smry.publication;
+            if (smry.publishDate) enrichedMetadata.publishDate = smry.publishDate;
+          }
+          const pdfPath = await savePdfToWeeklyBin(smry.pdfBuffer, {
+            url: target,
+            title: jobTitle || smry.title || enrichedMetadata?.title,
+            bookmarkedAt,
+            originalUrl: target,
+            enrichedMetadata,
+            creatorOverride: 'pdf-zipper-v2-smry',
+            extraInfoDictFields: { ViaSmry: smry.readerUrl },
+          });
+          console.log(`[smry-rescue] PDF saved via smry: ${pdfPath}`);
+          if (oldFilePath) await deleteOldFileIfDifferent(oldFilePath, pdfPath);
+          await job.updateProgress(100);
+          return {
+            pdfPath,
+            pdfSize: smry.pdfBuffer.length,
+            completedAt: new Date().toISOString(),
+            url,
+            qualityScore: -1,
+            qualityReasoning: `Captured via smry.ai reader view (${smry.readerUrl})`,
+            summary: enrichedMetadata?.summary || undefined,
+            language: enrichedMetadata?.language || undefined,
+          };
+        }
+        console.log(`[smry-rescue] not rescuable: ${smry.reason}${'detail' in smry && smry.detail ? ` — ${smry.detail.slice(0, 120)}` : ''}`);
+      } catch (smryErr) {
+        console.warn('[smry-rescue] errored:', smryErr instanceof Error ? smryErr.message : smryErr);
+      }
+    }
+
+    // Tier 2: archive.today snapshot.
+    if (!archiveCandidate) {
+      throw primaryErr;
+    }
     console.log(`[archive-fallback] Primary failed (${message.slice(0, 60)}); trying archive.today for ${target}`);
     let arch;
     try {

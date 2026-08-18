@@ -21,6 +21,9 @@ interface EnvConfig {
    * snapshot (needs fresh archive.is clearance cookies in COOKIES_FILE). Off by
    * default — never touches the primary pipeline until enabled. */
   ARCHIVE_FALLBACK_ENABLED: boolean;
+  /** smry.ai Pro API key. When set, access-wall failures try a smry reader-view
+   * rescue BEFORE the archive.today fallback. Empty = tier disabled. */
+  SMRY_API_KEY: string;
   /** Quality score threshold 0-100 (default: 50) */
   QUALITY_THRESHOLD: number;
   /** Conversion worker concurrency (default: 1) */
@@ -189,6 +192,7 @@ export const env: EnvConfig = {
   OLLAMA_MODEL: process.env.OLLAMA_MODEL || 'gemma4:e4b',
   ENRICHMENT_MODEL: process.env.ENRICHMENT_MODEL || process.env.OLLAMA_MODEL || 'gemma4:e4b',
   ARCHIVE_FALLBACK_ENABLED: process.env.ARCHIVE_FALLBACK_ENABLED === 'true',
+  SMRY_API_KEY: process.env.SMRY_API_KEY || '',
   QUALITY_THRESHOLD: parseIntegerEnv('QUALITY_THRESHOLD', 50, { min: 0, max: 100 }),
   CONCURRENCY: parseIntegerEnv('CONCURRENCY', 1, { min: 1, max: 8 }),
   NAV_TIMEOUT_MS: parseIntegerEnv('NAV_TIMEOUT_MS', 60000, { min: 1000 }),
