@@ -26,6 +26,7 @@ import { getWeekIndexedJobIds } from '../../jobs/week-index.js';
 import type { PodcastJobData } from '../../podcasts/types.js';
 import { mediaCollectionQueue } from '../../feeds/monitor.js';
 import type { MediaItem } from '../../media/types.js';
+import { dedupeFailuresByUrl } from '../../utils/dedupe-failures.js';
 
 export const filesRouter = Router();
 
@@ -88,6 +89,9 @@ interface FailureInfo {
   failedAt: string; // ISO date string
   isBotDetected: boolean;
   jobId: string;  // For debug screenshot link
+  /** How many failed jobs for this URL the row collapsed (retries across
+   * jobs, double bookmarks, fix-verification replays). Newest failure wins. */
+  failureCount?: number;
 }
 
 /**
@@ -647,12 +651,10 @@ filesRouter.get('/weeks/:weekId/failures', async (req: Request, res: Response): 
       }
     }
 
-    // Sort by failedAt descending (newest first)
-    failures.sort((a, b) => {
-      return new Date(b.failedAt).getTime() - new Date(a.failedAt).getTime();
-    });
-
-    res.json(failures);
+    // One row per URL — the newest error replaces the old (retries, double
+    // bookmarks, and fix-verification replays otherwise multiply rows).
+    // dedupeFailuresByUrl also sorts newest-first.
+    res.json(dedupeFailuresByUrl(failures));
   } catch (error) {
     console.error('Failed to list failures for week:', {
       weekId,

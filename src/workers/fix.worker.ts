@@ -360,6 +360,9 @@ async function runReplayGate(urls: string[]): Promise<{
     const job = await conversionQueue.add('convert-url', {
       url,
       originalUrl: url,
+      // Verification verdict, not an organic failure — the failed handler
+      // skips auto-fix-queueing for these (see maybeQueueAutoFix).
+      fixVerification: true,
     });
     jobs.push(job);
   }

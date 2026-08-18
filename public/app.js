@@ -444,7 +444,8 @@ function renderFailedRow(failure, index) {
       <td class="col-type">
         <a href="${escapeHtml(debugUrl)}" target="_blank" class="badge-failed-link" title="View debug PDF">
           <span class="badge-failed" data-tooltip="${tooltipText}">${escapeHtml(failureType)}</span>
-        </a>
+        </a>${failure.failureCount > 1 ? `
+        <span class="failure-count" title="${failure.failureCount} failed jobs for this URL collapsed — newest error shown">&times;${failure.failureCount}</span>` : ''}
       </td>
       <td class="col-size">-</td>
       <td class="col-date">${formatDate(failure.failedAt)}</td>

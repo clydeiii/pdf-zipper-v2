@@ -347,6 +347,15 @@ input[type="checkbox"] {
   position: relative;
 }
 
+/* Collapsed-failure count: how many failed jobs this row absorbed */
+.failure-count {
+  display: inline-block;
+  margin-left: 4px;
+  color: #6c757d;
+  font-size: 0.75rem;
+  cursor: help;
+}
+
 /* Custom tooltip on hover */
 .badge-failed[data-tooltip]:hover::after {
   content: attr(data-tooltip);

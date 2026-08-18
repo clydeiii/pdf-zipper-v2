@@ -161,6 +161,7 @@ A batch reaching for an exemption usually means the real bug is upstream in the 
 
 ### Self-Healing Fix System
 - Users flag false positives (saved PDF that shouldn't have) / false negatives (failed URL that should've succeeded) via "Fix Selected"
+- **Replay-loop guards — do not remove.** A failed conversion auto-queues a fix item; the fix batch's replay gate re-runs the URL; if that replay's failure re-queued another fix item, the loop would self-sustain (observed: 60+ ledger events on one URL). Three guards break it: (1) verification replay jobs carry `fixVerification: true` in ConversionJobData and `maybeQueueAutoFix` skips them entirely — the replay's failure is the batch's verification verdict, not a new organic failure; (2) `MAX_AUTO_ATTEMPTS = 5` lifetime cap per URL in `fix/pending.ts`; (3) per-class cooldowns in `fix/trigger-policy.ts`. The failures API (`/weeks/:weekId/failures`) also collapses to one row per URL (newest error wins, `failureCount` carries the collapsed total) so repeat failures don't bury distinct ones.
 - Every 5min (offset 2.5min from feed polling) pending items are processed by headless Claude CLI
 - Write boundary: `src/quality/*`, `src/converters/*`, `src/workers/*`, `src/utils/*`, `src/fix/*` — but NEVER `src/workers/fix.worker.ts` (the gate must not be editable by the batches it judges). Batches land on `fix/batch-*` branches for human review; they never auto-merge, which is why the broad boundary is safe
 - `FIX_ENABLED=true` + `CLAUDE_CLI_PATH` required

@@ -681,6 +681,21 @@ async function maybeQueueAutoFix(
 
   const failureClass = classifyFailureMessage(error.message);
 
+  // Fix-verification replays must never re-flag: the replay is the fix
+  // system asking "did my fix work?", and its failure is already recorded as
+  // the batch's verification result. Re-flagging it double-counts the same
+  // failure and is the edge that turns flag → batch → replay → flag into a
+  // cycle (bounded only by MAX_AUTO_ATTEMPTS).
+  if (job.data.fixVerification) {
+    await updateFixOutcome({
+      url: job.data.originalUrl || job.data.url,
+      outcome: 'skipped',
+      failureClass,
+      details: { reason: 'fix_verification_replay', source: 'conversion_final_failure' },
+    });
+    return;
+  }
+
   // A manual Chrome-extension capture of this URL already exists — the
   // failure is moot, and a queued diagnosis would loop forever (its replay
   // gate re-runs the URL, the re-run fails, the failure re-queues itself).

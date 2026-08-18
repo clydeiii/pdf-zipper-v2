@@ -30,6 +30,10 @@ export interface ConversionJobData {
   oldFilePath?: string;
   /** How many delayed re-queues a rate_limited failure has already consumed (max 3). */
   rateLimitRequeues?: number;
+  /** Set on fix-system verification replays. Their failures are the batch's
+   * verification verdict, not a new organic failure — the failed handler
+   * must not auto-queue them for diagnosis (that edge creates a replay cycle). */
+  fixVerification?: boolean;
 }
 
 /**
