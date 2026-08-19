@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { looksLikeMachineBlob, buildSmryHtml, SMRY_MIN_CHARS } from '../dist/converters/smry-rescue.js';
+import { looksLikeMachineBlob, buildSmryHtml, SMRY_MIN_CHARS, SMRY_MIN_CHARS_HARD_PAYWALL, minCharsForUrl } from '../dist/converters/smry-rescue.js';
 
 // Real failure mode observed 2026-08-17: The Information hands smry its
 // page-config JSON and smry returns it as qualityStatus:"usable" content.
@@ -30,10 +30,31 @@ test('short fragments are not classified as blobs by density', () => {
   assert.equal(looksLikeMachineBlob('a "quoted" note'), false);
 });
 
-test('min-chars floor sits above observed hard-paywall ledes', () => {
-  // WSJ lede-only partial measured at 1,933 chars with truncated:false —
-  // the floor is the only defense against archiving it as a full capture.
-  assert.ok(SMRY_MIN_CHARS > 1933, `floor ${SMRY_MIN_CHARS} must exceed observed lede size`);
+test('hard-paywall floor sits above observed lede sizes', () => {
+  // WSJ lede 1,933 chars, Economist 1,946 — both with truncated:false; the
+  // host-aware floor is the only defense against archiving them as complete.
+  assert.ok(SMRY_MIN_CHARS_HARD_PAYWALL > 1946, `floor ${SMRY_MIN_CHARS_HARD_PAYWALL} must exceed observed lede size`);
+});
+
+test('floor is host-aware: paywalled publishers high, everyone else low', () => {
+  assert.equal(minCharsForUrl('https://www.wsj.com/arts-culture/books/x'), SMRY_MIN_CHARS_HARD_PAYWALL);
+  assert.equal(minCharsForUrl('https://www.bloomberg.com/news/articles/x'), SMRY_MIN_CHARS_HARD_PAYWALL);
+  assert.equal(minCharsForUrl('https://www.axios.com/2026/08/19/x'), SMRY_MIN_CHARS);
+  assert.equal(minCharsForUrl('not a url'), SMRY_MIN_CHARS);
+});
+
+test('a complete short Axios piece clears the default floor; a WSJ lede does not clear its own', () => {
+  // Both ~1,940 chars — length alone cannot separate them; the host can.
+  const axiosLen = 1949, wsjLedeLen = 1933;
+  assert.ok(axiosLen >= minCharsForUrl('https://www.axios.com/2026/08/19/josh-shapiro-ai-data-centers-pivot'));
+  assert.ok(wsjLedeLen < minCharsForUrl('https://www.wsj.com/finance/investing/x'));
+});
+
+test('default floor still rejects every observed junk page', () => {
+  // Anti-bot block pages: jeffgamet 822, cursor.com 364, openreview 173.
+  for (const junk of [822, 364, 173]) {
+    assert.ok(junk < SMRY_MIN_CHARS, `junk page of ${junk} chars must stay below the default floor`);
+  }
 });
 
 const BASE_ARTICLE = {

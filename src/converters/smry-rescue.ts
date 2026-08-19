@@ -39,14 +39,41 @@ import { analyzePdfContent } from '../quality/pdf-content.js';
 const SMRY_EXTRACT_ENDPOINT = 'https://api.smry.ai/v1/articles/extract';
 
 /**
- * Floor for accepting smry text. Hard-paywall ledes observed at ~700-1,900
- * chars (WSJ 1,933; Economist ~1,400; Bloomberg ~700) with NO API-side
- * partial indicator; real rescued articles start ~5,000 (Reuters). 2,500
- * splits the two populations. Genuinely short announcements below the floor
- * are given up to archive.today rather than risk archiving a lede as a
- * complete capture.
+ * Char floors for accepting smry text, keyed on whether the source is a
+ * known hard-paywall publisher. The floor exists to reject paywall LEDES —
+ * and ledes are a property of the publisher, not of length: WSJ (1,933) and
+ * Economist (1,946) ledes are the same size as a COMPLETE short Axios piece
+ * (1,949, verified ending on a full closing section). So known hard-paywall
+ * hosts keep the high floor that sits above their observed lede sizes, and
+ * everywhere else uses a floor that still clears every junk page observed
+ * (anti-bot block pages 173-822 chars) while letting genuinely short
+ * articles through. analyzePdfContent backstops both paths with paywall and
+ * error-page pattern checks on the rendered PDF.
  */
-export const SMRY_MIN_CHARS = 2500;
+export const SMRY_MIN_CHARS = 1200;
+export const SMRY_MIN_CHARS_HARD_PAYWALL = 2500;
+
+/**
+ * Publishers whose pre-wall ledes are large enough to clear the default
+ * floor. Metered sites (The Atlantic, nymag, Wired, Business Insider) do NOT
+ * belong here — smry retrieves their full text. nytimes.com is listed for
+ * completeness though smry hard-refuses it (UNSUPPORTED_PUBLISHER).
+ */
+const HARD_PAYWALL_HOSTS = [
+  'wsj.com', 'bloomberg.com', 'economist.com', 'ft.com',
+  'theinformation.com', 'nytimes.com', 'washingtonpost.com',
+];
+
+/** Exported for testing. */
+export function minCharsForUrl(url: string): number {
+  try {
+    const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+    if (HARD_PAYWALL_HOSTS.some((h) => host === h || host.endsWith(`.${h}`))) {
+      return SMRY_MIN_CHARS_HARD_PAYWALL;
+    }
+  } catch { /* unparseable URL — use the default floor */ }
+  return SMRY_MIN_CHARS;
+}
 
 const FETCH_TIMEOUT_MS = 120_000;
 
@@ -215,8 +242,10 @@ export async function captureViaSmry(originalUrl: string): Promise<SmryResult> {
   if (looksLikeMachineBlob(text)) {
     return { ok: false, reason: 'garbage', detail: `smry content is a machine blob (${text.length} chars, starts ${JSON.stringify(text.slice(0, 40))})` };
   }
-  if (text.length < SMRY_MIN_CHARS) {
-    return { ok: false, reason: 'insufficient', detail: `smry returned ${text.length} chars (< ${SMRY_MIN_CHARS}) — likely a hard-paywall lede` };
+  const minChars = minCharsForUrl(originalUrl);
+  if (text.length < minChars) {
+    const why = minChars === SMRY_MIN_CHARS_HARD_PAYWALL ? 'likely a hard-paywall lede' : 'too little content to archive';
+    return { ok: false, reason: 'insufficient', detail: `smry returned ${text.length} chars (< ${minChars}) — ${why}` };
   }
 
   // Render our own document and run it through the same content checks as any
