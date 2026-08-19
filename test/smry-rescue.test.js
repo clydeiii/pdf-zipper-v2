@@ -69,3 +69,40 @@ test('buildSmryHtml omits byline pieces that are null', () => {
   const html = buildSmryHtml({ ...BASE_ARTICLE, author: null, siteName: null, publishedAt: null });
   assert.ok(!html.includes('class="byline"'), 'no byline div when all parts missing');
 });
+
+import { stripExtractionArtifacts } from '../dist/converters/smry-rescue.js';
+
+// Real contamination observed on Axios 2026-08-19: prose interleaved with
+// Tailwind class soup and attribute fragments. The gate rejected the whole
+// article as a machine blob until the scrub was added.
+const AXIOS_STYLE = `The data center fight is heating up. Here's how they work
+
+*:last-child]:mb-0 [&_h2]:mt-8 [&_h2]:mb-4 [&_p]:break-words [&_p]:my-4 sm:[&_p]:my-6 [&_ul]:my-4 [&_ul]:text-p sm:[&_ul]:my-6 [&_ol]:my-4 [&_ol]:text-p sm:[&_ol]:my-6 [&_p:last-of-type]:pb-0 [&_p:last-of-type]:mb-0 [&_a]:underline [&_a]:text-interactive-tertiary [&_a:active]:no-underline [&_a:hover]:no-underline [&_a:visited]:text-interactive-tertiary
+
+&.story-is-live data-chromatic="ignore">Data centers have become the face of AI backlash.
+Why it matters: Rising opposition could pose an existential threat to AI's growth.`;
+
+test('strip removes Tailwind class soup and attribute fragments', () => {
+  const out = stripExtractionArtifacts(AXIOS_STYLE);
+  assert.ok(!out.includes('[&_'), 'class soup removed');
+  assert.ok(!out.includes(']:'), 'variant tokens removed');
+  assert.ok(!out.includes('data-chromatic'), 'attribute fragment removed');
+  assert.ok(out.includes('Data centers have become the face of AI backlash'), 'prose after > survives');
+  assert.ok(out.includes('Why it matters: Rising opposition'), 'prose intact');
+});
+
+test('stripped Axios-style content passes the machine-blob gate', () => {
+  const contaminated = AXIOS_STYLE.repeat(10);
+  assert.equal(looksLikeMachineBlob(contaminated), true, 'raw contamination trips the gate');
+  assert.equal(looksLikeMachineBlob(stripExtractionArtifacts(contaminated)), false, 'scrubbed prose passes');
+});
+
+test('strip leaves ordinary prose untouched', () => {
+  const prose = 'A plain paragraph with "quotes" and a colon: nothing else.';
+  assert.equal(stripExtractionArtifacts(prose), prose);
+});
+
+test('strip does not rescue actual JSON blobs', () => {
+  const blob = '{"analytics":{"pageId":17614,"page":"article"}}'.repeat(30);
+  assert.equal(looksLikeMachineBlob(stripExtractionArtifacts(blob).trim()), true);
+});

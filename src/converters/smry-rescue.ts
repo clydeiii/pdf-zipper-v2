@@ -86,6 +86,28 @@ export type SmryResult =
     };
 
 /**
+ * Scrub extraction artifacts that leak into smry's text on some sites.
+ * Observed live on Axios (2026-08-19): real article prose interleaved with
+ * Tailwind arbitrary-variant class soup (`[&_h2]:mt-8 [&_p]:break-words …`)
+ * and stray HTML attribute fragments (`data-chromatic="ignore">`). Without
+ * scrubbing, the bracket density tripped the machine-blob gate and killed a
+ * legitimate rescue; with it, the junk also stays out of the rendered PDF.
+ * The patterns match syntax that never occurs in prose (`]:` inside a token,
+ * `attr="…">`), at the cost of mangling inline HTML/code samples — an
+ * acceptable trade on a last-resort rescue path.
+ */
+export function stripExtractionArtifacts(text: string): string {
+  return text
+    // Tailwind arbitrary-variant tokens: [&_p]:my-4, sm:[&_ul]:my-6, *:last-child]:mb-0
+    .replace(/\S*\[&\S*/g, ' ')
+    .replace(/\S*\]:\S*/g, ' ')
+    // Stray HTML attribute fragments: data-chromatic="ignore">  (keep the prose after '>')
+    .replace(/[\w-]+="[^"\n]*">?/g, ' ')
+    .replace(/&\.[\w-]+/g, ' ')
+    .replace(/[ \t]{2,}/g, ' ');
+}
+
+/**
  * True when the "article text" is actually a machine artifact — observed:
  * The Information hands smry its page-config JSON and smry returns all 28KB
  * of it as `qualityStatus: "usable"` article content.
@@ -189,7 +211,7 @@ export async function captureViaSmry(originalUrl: string): Promise<SmryResult> {
     return { ok: false, reason: 'api_error', detail: err instanceof Error ? err.message : String(err) };
   }
 
-  const text = article.content.trim();
+  const text = stripExtractionArtifacts(article.content).trim();
   if (looksLikeMachineBlob(text)) {
     return { ok: false, reason: 'garbage', detail: `smry content is a machine blob (${text.length} chars, starts ${JSON.stringify(text.slice(0, 40))})` };
   }
@@ -203,7 +225,8 @@ export async function captureViaSmry(originalUrl: string): Promise<SmryResult> {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   try {
     const page = await ctx.newPage();
-    await page.setContent(buildSmryHtml(article), { waitUntil: 'load' });
+    // Render from the scrubbed text so extraction artifacts stay out of the PDF.
+    await page.setContent(buildSmryHtml({ ...article, content: text }), { waitUntil: 'load' });
     const pdfBuffer = Buffer.from(await page.pdf({
       format: 'A4',
       margin: { top: '14mm', bottom: '14mm', left: '13mm', right: '13mm' },
