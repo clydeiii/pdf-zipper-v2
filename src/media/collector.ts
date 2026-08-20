@@ -11,7 +11,8 @@ import * as path from 'node:path';
 import { getWeeklyBinPath, ensureWeeklyBinExists, getMediaFilename } from './organization.js';
 import { env } from '../config/env.js';
 import type { MediaItem, MediaCollectionResult } from './types.js';
-import { downloadPatreonVideo } from './patreon.js';
+import { downloadPatreonVideo, isPatreonPostUrl } from './patreon.js';
+import { downloadVideoViaYtDlp } from './ytdlp-video.js';
 
 /**
  * Get authorization header for Karakeep asset downloads
@@ -76,10 +77,15 @@ export async function downloadMedia(item: MediaItem): Promise<MediaCollectionRes
       unlinkSync(filePath);
     }
 
-    // Streamed behind a login (Patreon): the enclosure URL is a page to extract
-    // from, not a file to GET, so hand it to yt-dlp instead of the HTTP path.
+    // The enclosure URL is a page to extract from, not a file to GET — hand it
+    // to yt-dlp instead of the HTTP path. Patreon needs the personal cookie
+    // session; everything else (YouTube/Vimeo self-download fallback when
+    // Karakeep's own downloader failed) goes through the anonymous-first
+    // public downloader.
     if (item.enclosure.downloadVia === 'yt-dlp') {
-      const outcome = await downloadPatreonVideo(item.enclosure.url, filePath);
+      const outcome = isPatreonPostUrl(item.enclosure.url)
+        ? await downloadPatreonVideo(item.enclosure.url, filePath)
+        : await downloadVideoViaYtDlp(item.enclosure.url, filePath);
       if (outcome.ok) {
         return {
           success: true,

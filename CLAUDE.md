@@ -24,7 +24,7 @@ These are non-obvious rules that aren't derivable from a quick code read. Respec
 
 ### URL Routing (by type, before queuing)
 - **Apple Podcasts** (`podcasts.apple.com`) → `podcastQueue` (iTunes API metadata + audio download + Parakeet transcription)
-- **Video** (YouTube/Vimeo) → rejected in direct API; from Karakeep with enclosure → media collection (yt-dlp)
+- **Video** (YouTube/Vimeo) → rejected in direct API; from Karakeep with enclosure → media collection. When Karakeep produces NO video asset within the poller's wait window (24 polls ≈ 2h), the item is **not dropped**: the poll worker points the enclosure at the watch URL with `downloadVia: 'yt-dlp'` and the collector runs our own yt-dlp (`src/media/ytdlp-video.ts` — needs `--js-runtimes node` for YouTube signature solving; anonymous first, `YT_DLP_COOKIES_FILE` retry only on age/bot-gate failures). Added 2026-08-20 after Karakeep's bundled yt-dlp spent days 403-blocked by YouTube, silently dropping every bookmarked video.
 - **PDF URLs** (`.pdf`, arxiv `/abs/` `/html/` `/pdf/`) → direct fetch pass-through (skip Playwright). arxiv `/abs/` is rewritten to `/pdf/` first
 - **Karakeep PDF asset** (`content.type: "asset"`, `assetType: "pdf"`) → media collection, download via `/api/assets/{id}`. Filename lives in `bookmark.assets[].fileName`, not `content.fileName`
 - **Twitter/X** → rewritten to local Nitter (`NITTER_HOST`). Exception: X Articles go direct (Nitter can't render)

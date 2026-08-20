@@ -106,14 +106,32 @@ function createFeedPollWorker(): Worker<FeedPollJobData> {
         if (isVideoWithoutEnclosure) {
           const retryKey = `${VIDEO_RETRY_PREFIX}${source}`;
           const retries = await redis.hincrby(retryKey, item.guid, 1);
-          if (retries >= MAX_VIDEO_RETRIES) {
-            await job.log(`Video URL without enclosure after ${retries} polls, giving up: ${item.url}`);
-            await deduplicator.markGuidSeen(source, item.guid);
-            await redis.hdel(retryKey, item.guid);
-          } else {
+          if (retries < MAX_VIDEO_RETRIES) {
             await job.log(`Video URL without enclosure (retry ${retries}/${MAX_VIDEO_RETRIES}): ${item.url}`);
+            continue;
           }
-          continue;
+          // Karakeep never delivered a video asset in the whole wait window.
+          // That is no longer presumed to mean the video is undownloadable —
+          // Karakeep's bundled yt-dlp goes stale and was observed 403-blocked
+          // by YouTube for days (2026-08-18..20), silently dropping every
+          // bookmarked video. Self-download instead: point the enclosure at
+          // the watch URL itself, exactly like the Patreon path, and let the
+          // collector run our own yt-dlp. Falls through to normal processing.
+          await job.log(`Video URL without enclosure after ${retries} polls — self-download fallback: ${item.url}`);
+          console.log(JSON.stringify({
+            event: 'video_selfdownload_fallback',
+            url: item.url,
+            source,
+            timestamp: new Date().toISOString(),
+          }));
+          await redis.hdel(retryKey, item.guid);
+          item.enclosure = {
+            url: item.url,
+            type: 'video/mp4',
+            length: undefined,
+            downloadVia: 'yt-dlp',
+          };
+          item.mediaType = 'video';
         }
 
         // Mark GUID as seen; drop any pending video-retry counter for this GUID
