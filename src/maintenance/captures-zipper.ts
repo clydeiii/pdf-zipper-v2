@@ -210,8 +210,12 @@ export async function collectTwitterImageFiles(
  * Snapshot the live twitter.db (WAL, concurrent writers) into `destPath`
  * using SQLite's online backup API. Returns size plus a loud error signal;
  * a missing database is represented by two nulls.
+ *
+ * Also used by the on-demand /api/twitter/export.zip route — a raw copy of
+ * the .db file is NOT a substitute (recent commits live in the -wal file and
+ * a mid-write copy can be torn).
  */
-async function snapshotTwitterDb(
+export async function snapshotTwitterDb(
   dataDir: string,
   destPath: string,
 ): Promise<{ bytes: number | null; error: string | null }> {

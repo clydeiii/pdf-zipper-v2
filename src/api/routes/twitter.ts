@@ -360,3 +360,108 @@ twitterRouter.get('/article/:id', (req: Request, res: Response): void => {
     res.status(500).json({ error: 'Failed to query Twitter database' });
   }
 });
+
+/**
+ * GET /api/twitter/export.zip — on-demand export for the KB workflow.
+ *
+ * Contents (same layout as the nightly captures zip, so the consuming side
+ * resolves the DB's imagestore `file` columns identically):
+ *   - twitter/twitter.db          full CONSISTENT snapshot via SQLite's
+ *                                 online-backup API (a raw file copy would
+ *                                 miss the -wal contents and can be torn)
+ *   - twitter/imagestore/...      files modified in the last 48 hours
+ *   - MANIFEST.txt                what's inside and the window used
+ *
+ * Streamed — no staging zip on disk; only the ~130MB db snapshot touches
+ * tmpfs, and it is deleted when the response ends. One export at a time: the
+ * snapshot + stream is heavy enough that a double-clicked button should not
+ * run it twice concurrently.
+ */
+const EXPORT_IMAGE_WINDOW_MS = 48 * 60 * 60 * 1000;
+let exportInFlight = false;
+
+twitterRouter.get('/export.zip', async (req: Request, res: Response): Promise<void> => {
+  if (exportInFlight) {
+    res.status(429).json({ error: 'An export is already being built — wait for it to finish.' });
+    return;
+  }
+  exportInFlight = true;
+
+  const { snapshotTwitterDb, collectTwitterImageFiles } = await import('../../maintenance/captures-zipper.js');
+  const os = await import('node:os');
+  const { unlink } = await import('node:fs/promises');
+  const archiver = (await import('archiver')).default;
+
+  const dataDir = path.resolve(env.DATA_DIR);
+  const tmpDb = path.join(os.tmpdir(), `twitter-export-${process.pid}-${Date.now()}.db`);
+
+  try {
+    const snapshot = await snapshotTwitterDb(dataDir, tmpDb);
+    if (snapshot.error) {
+      res.status(500).json({ error: snapshot.error });
+      return;
+    }
+    if (snapshot.bytes === null) {
+      res.status(404).json({ error: 'twitter.db does not exist yet' });
+      return;
+    }
+
+    const cutoffMs = Date.now() - EXPORT_IMAGE_WINDOW_MS;
+    const images = await collectTwitterImageFiles(dataDir, cutoffMs);
+    const imageBytes = images.reduce((acc, f) => acc + f.size, 0);
+
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[T:]/g, '-');
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="twitter-export-${stamp}.zip"`);
+
+    // Level 1 like the nightly zipper: near-passthrough for already-compressed
+    // media, still shrinks the db, keeps the stream CPU-light.
+    const archive = archiver('zip', { zlib: { level: 1 } });
+    archive.on('error', (err) => {
+      console.error('twitter export zip failed:', err.message);
+      res.destroy(err);
+    });
+    // Client gave up mid-download — stop reading files for a dead socket.
+    res.on('close', () => {
+      if (!res.writableEnded) archive.abort();
+    });
+    archive.pipe(res);
+
+    archive.file(tmpDb, { name: 'twitter/twitter.db' });
+    for (const img of images) {
+      archive.file(img.fullPath, { name: img.zipPath });
+    }
+    archive.append(
+      [
+        `Twitter/X database export — generated ${new Date().toISOString()}`,
+        '',
+        `twitter/twitter.db — full consistent snapshot (${snapshot.bytes} bytes, SQLite online backup; includes WAL contents)`,
+        `twitter/imagestore/ — ${images.length} file(s), ${imageBytes} bytes, modified in the last ${EXPORT_IMAGE_WINDOW_MS / 3600000} hours`,
+        '',
+        'Imagestore paths mirror the on-disk layout, so the DB\'s media `file` columns',
+        'resolve directly. Older imagestore files are in previous nightly captures zips.',
+      ].join('\n'),
+      { name: 'MANIFEST.txt' }
+    );
+
+    console.log(JSON.stringify({
+      event: 'twitter_export',
+      dbBytes: snapshot.bytes,
+      imageCount: images.length,
+      imageBytes,
+      timestamp: new Date().toISOString(),
+    }));
+
+    await archive.finalize();
+  } catch (error) {
+    console.error('Failed to build twitter export:', errorMessage(error));
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Failed to build export' });
+    } else {
+      res.destroy();
+    }
+  } finally {
+    exportInFlight = false;
+    await unlink(tmpDb).catch(() => {});
+  }
+});
