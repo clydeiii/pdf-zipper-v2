@@ -6,6 +6,7 @@
  */
 
 import { chatText } from '../utils/llm-chat.js';
+import { normalizeTranscript } from './s1-normalizer.js';
 import { env } from '../config/env.js';
 import type { PodcastMetadata } from './types.js';
 
@@ -140,6 +141,26 @@ export async function formatTranscriptWithLLM(
 
   const startTime = Date.now();
 
+  // Stage 1: S1-mini normalization (fillers/stutters/casing). Purpose-built
+  // and measured MORE faithful than the gemma pass at word level; per-chunk
+  // sanity checks keep the raw text wherever it misbehaves, so this stage can
+  // only ever be a no-op, never a corruption or a failure.
+  if (env.TRANSCRIPT_NORMALIZE_MODEL) {
+    const norm = await normalizeTranscript(cleanedTranscript);
+    if (norm.chunks > 0) {
+      console.log(JSON.stringify({
+        event: 'transcript_normalize_complete',
+        chunks: norm.chunks,
+        fallbacks: norm.fallbacks,
+        inputLength: cleanedTranscript.length,
+        outputLength: norm.text.length,
+        elapsedMs: norm.elapsedMs,
+        timestamp: new Date().toISOString(),
+      }));
+      cleanedTranscript = norm.text;
+    }
+  }
+
   // Process in chunks if transcript is very long (LLM context limits)
   // Most podcasts are 10-60 min = 5,000-30,000 chars, which should fit
   const maxChunkSize = 15000; // ~15k chars per chunk
@@ -270,7 +291,8 @@ PROPER NOUNS TO FIX (case-insensitive match): ${spellingHints}
 
 RULES:
 - Replace words that phonetically or textually match the proper nouns above with the correct spelling (e.g. "open claw" → "OpenClaw", "chat GPT" → "ChatGPT").
-- Remove standalone verbal filler: "um", "uh", "you know", "I mean", "sort of", "kind of" — only when filler, not when meaningful.
+- Remove standalone verbal filler: "um", "uh" — nothing else.
+- PRESERVE hedging and qualifier phrases exactly as spoken: "sort of", "kind of", "I think", "you know", "like", "I mean". They carry the speaker's stance and are part of the record.
 - DO NOT change any other words. If you see something unfamiliar (e.g. "01"), leave it exactly as is.
 - DO NOT add, remove, reorder, or summarize sentences. Output must be the same length as input.
 - Preserve all existing paragraph breaks (blank lines).

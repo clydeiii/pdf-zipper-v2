@@ -82,6 +82,9 @@ interface EnvConfig {
   TWITTER_DB_FETCH_DELAY_MS: number;
   /** Ollama model for transcript formatting - use larger model for better results (default: same as OLLAMA_MODEL) */
   TRANSCRIPT_FORMAT_MODEL: string;
+  /** S1-mini (or compatible) Ollama model for stage-1 transcript normalization
+   * (fillers/stutters/casing, pre-gemma). Empty disables the stage. */
+  TRANSCRIPT_NORMALIZE_MODEL: string;
   /** Comma-separated list of terms to filter from PDF captures for privacy (optional) */
   PRIVACY_FILTER_TERMS?: string;
   /** Enable AI self-healing fix feature (requires Claude CLI) */
@@ -221,6 +224,7 @@ export const env: EnvConfig = {
   TWITTER_DB_FETCH_DELAY_MS: parseIntegerEnv('TWITTER_DB_FETCH_DELAY_MS', 500, { min: 0 }),
   // Ollama model for transcript formatting (larger = better quality, slower)
   TRANSCRIPT_FORMAT_MODEL: process.env.TRANSCRIPT_FORMAT_MODEL || process.env.OLLAMA_MODEL || 'gemma4:latest',
+  TRANSCRIPT_NORMALIZE_MODEL: process.env.TRANSCRIPT_NORMALIZE_MODEL || '',
   // Privacy filter terms (comma-separated list of names/handles to hide from captures)
   PRIVACY_FILTER_TERMS: process.env.PRIVACY_FILTER_TERMS,
   // AI self-healing fix feature

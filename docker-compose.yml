@@ -36,6 +36,9 @@ services:
       - SMRY_API_KEY=${SMRY_API_KEY:-}
       # Use larger model for transcript formatting + metadata enrichment
       - TRANSCRIPT_FORMAT_MODEL=gemma4:latest
+      # Stage-1 transcript normalization (S1-mini by Superwhisper, 0.6B):
+      # fillers/stutters/casing before the gemma paragraphing pass. Empty disables.
+      - TRANSCRIPT_NORMALIZE_MODEL=hf.co/superwhisper/s1-mini-GGUF:Q4_K_M
 
       # llama.cpp OpenAI-compatible server for text-only round-robin/failover
       # (used by metadata enrichment only; vision + transcript formatting stay on Ollama)
