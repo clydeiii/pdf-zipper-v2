@@ -35,6 +35,7 @@ import type { Browser } from 'playwright';
 import { env } from '../config/env.js';
 import { ensureLiveBrowser } from '../utils/browser-health.js';
 import { analyzePdfContent } from '../quality/pdf-content.js';
+import { parseSubstackPostUrl } from '../substack/pangram.js';
 
 const SMRY_EXTRACT_ENDPOINT = 'https://api.smry.ai/v1/articles/extract';
 
@@ -205,6 +206,53 @@ ${paragraphs}
 }
 
 /**
+ * Word-count shortfall check for Substack paid posts. Returns a human-readable
+ * rejection reason, or null when the extraction is acceptable.
+ *
+ * Confirmed false accept (2026-08-21, groundlevel-ai.com): a paid post's free
+ * preview ended on a natural closing sentence, read as complete prose, cleared
+ * every text gate, and archived ~430 of 1,150 words as a success. No text
+ * heuristic can catch a preview that ends cleanly — but Substack's own post
+ * API reports `audience` and the TRUE `wordcount`, so compare against that.
+ * Exported for testing.
+ */
+export function substackPreviewShortfall(
+  extractedText: string,
+  audience: string | undefined,
+  wordcount: number | undefined
+): string | null {
+  if (!audience || audience === 'everyone') return null;
+  if (typeof wordcount !== 'number' || wordcount <= 0) return null;
+  const extractedWords = extractedText.split(/\s+/).filter(Boolean).length;
+  // 0.9: extraction drops captions/embeds legitimately; a real preview is
+  // typically well under half the full post.
+  if (extractedWords < wordcount * 0.9) {
+    return `Substack ${audience} post: extracted ${extractedWords} of ${wordcount} words — paid-preview only`;
+  }
+  return null;
+}
+
+/** Fetch-side wrapper for the preview gate. Null on any API failure — the
+ * check is an extra guard, never a reason to block a rescue on a network blip. */
+async function checkSubstackPreview(originalUrl: string, extractedText: string): Promise<string | null> {
+  const target = parseSubstackPostUrl(originalUrl);
+  if (!target) return null;
+  try {
+    const res = await fetch(`${target.apiBase}/api/v1/posts/${encodeURIComponent(target.slug)}`, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(15_000),
+      redirect: 'follow',
+    });
+    if (!res.ok) return null;
+    const post = (await res.json()) as { audience?: string; wordcount?: number } | null;
+    if (!post || typeof post !== 'object') return null;
+    return substackPreviewShortfall(extractedText, post.audience, post.wordcount);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Attempt a reader-view rescue of `originalUrl` via smry.ai.
  * Never throws; every failure mode returns ok:false with a reason so the
  * worker can fall through to the archive.today tier.
@@ -246,6 +294,13 @@ export async function captureViaSmry(originalUrl: string): Promise<SmryResult> {
   if (text.length < minChars) {
     const why = minChars === SMRY_MIN_CHARS_HARD_PAYWALL ? 'likely a hard-paywall lede' : 'too little content to archive';
     return { ok: false, reason: 'insufficient', detail: `smry returned ${text.length} chars (< ${minChars}) — ${why}` };
+  }
+
+  // Substack paid posts: a free preview can end on a clean sentence and pass
+  // every text gate — verify length against the post API's true wordcount.
+  const previewShortfall = await checkSubstackPreview(originalUrl, text);
+  if (previewShortfall) {
+    return { ok: false, reason: 'insufficient', detail: previewShortfall };
   }
 
   // Render our own document and run it through the same content checks as any

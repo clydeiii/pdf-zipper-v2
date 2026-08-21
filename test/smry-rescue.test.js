@@ -127,3 +127,28 @@ test('strip does not rescue actual JSON blobs', () => {
   const blob = '{"analytics":{"pageId":17614,"page":"article"}}'.repeat(30);
   assert.equal(looksLikeMachineBlob(stripExtractionArtifacts(blob).trim()), true);
 });
+
+import { substackPreviewShortfall } from '../dist/converters/smry-rescue.js';
+
+// Confirmed false accept 2026-08-21: groundlevel-ai.com paid post, preview of
+// ~430 words archived as complete because it ended on a clean closing sentence.
+test('paid-post preview shortfall is rejected against true wordcount', () => {
+  const preview = 'word '.repeat(430);
+  const reason = substackPreviewShortfall(preview, 'only_paid', 1150);
+  assert.ok(reason && reason.includes('430 of 1150'), String(reason));
+});
+
+test('full-length extraction of a paid post passes (subscriber-visible cases)', () => {
+  const full = 'word '.repeat(1100);
+  assert.equal(substackPreviewShortfall(full, 'only_paid', 1150), null);
+});
+
+test('free posts are never gated by wordcount', () => {
+  assert.equal(substackPreviewShortfall('word '.repeat(50), 'everyone', 1150), null);
+});
+
+test('missing audience or wordcount disables the gate', () => {
+  assert.equal(substackPreviewShortfall('word '.repeat(50), undefined, 1150), null);
+  assert.equal(substackPreviewShortfall('word '.repeat(50), 'only_paid', undefined), null);
+  assert.equal(substackPreviewShortfall('word '.repeat(50), 'only_paid', 0), null);
+});
