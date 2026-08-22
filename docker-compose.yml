@@ -25,9 +25,10 @@ services:
       # Ollama (on mac.mini)
       - OLLAMA_HOST=http://mac.mini:11434
       - OLLAMA_MODEL=gemma4:e4b
-      # 2026-08-22 consolidation: all pdf-zipper Ollama use is gemma4:e4b (vision,
-      # enrichment, transcript formatting); karakeep tags run on gemma3:4b (3.3GB,
-      # co-resident — e4b+3:4b+s1-mini+parakeet ≈ 16GB of 24GB, no swap).
+      # 2026-08-22 consolidation: gemma4:e4b is the ONLY model any service on this
+      # host requests from mac.mini's Ollama (pdf-zipper vision/enrichment/transcripts
+      # AND karakeep tag inference; tags queue behind vision during batches —
+      # acceptable for background tagging). Plus s1-mini (0.5GB) + parakeet.
       # Three big models cycling (~200 loads/day) had the 24GB box swapping and
       # hot. One resident model beats a faster-but-thrashing mix — do not
       # reintroduce per-task model routing without checking RAM co-residency.
