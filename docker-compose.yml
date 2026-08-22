@@ -25,9 +25,12 @@ services:
       # Ollama (on mac.mini)
       - OLLAMA_HOST=http://mac.mini:11434
       - OLLAMA_MODEL=gemma4:e4b
-      # Text-only enrichment on the faster model (4x vs e4b per ablation data);
-      # factual fields are hallucination-guarded in enrichment.ts. Vision stays on OLLAMA_MODEL.
-      - ENRICHMENT_MODEL=gemma3:4b
+      # 2026-08-22 consolidation: EVERYTHING on the mac.mini Ollama uses gemma4:e4b
+      # (vision, enrichment, transcript formatting; karakeep tag inference too).
+      # Three big models cycling (~200 loads/day) had the 24GB box swapping and
+      # hot. One resident model beats a faster-but-thrashing mix — do not
+      # reintroduce per-task model routing without checking RAM co-residency.
+      - ENRICHMENT_MODEL=gemma4:e4b
       # Paywall fallback via existing archive.today snapshots. Requires fresh
       # archive.is clearance cookies in cookies.txt (cf_clearance ~1-day TTL).
       - ARCHIVE_FALLBACK_ENABLED=true
@@ -35,7 +38,7 @@ services:
       # Key lives in .env; empty disables the tier.
       - SMRY_API_KEY=${SMRY_API_KEY:-}
       # Use larger model for transcript formatting + metadata enrichment
-      - TRANSCRIPT_FORMAT_MODEL=gemma4:latest
+      - TRANSCRIPT_FORMAT_MODEL=gemma4:e4b
       # Stage-1 transcript normalization (S1-mini by Superwhisper, 0.6B):
       # fillers/stutters/casing before the gemma paragraphing pass. Empty disables.
       - TRANSCRIPT_NORMALIZE_MODEL=hf.co/superwhisper/s1-mini-GGUF:Q4_K_M
