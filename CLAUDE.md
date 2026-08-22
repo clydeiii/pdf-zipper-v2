@@ -20,6 +20,7 @@ These are non-obvious rules that aren't derivable from a quick code read. Respec
 - **Original URL** (`originalUrl`): preserved for archive.is (archive.is treats `www.` and non-`www` as different)
 - Use `originalUrl` for HTTP fetch + external links; use canonical only for dedup keys
 - **Never** pass canonical URLs through conversion — sites like `uncoveralpha.com` require `www.`
+- **YouTube canonicalization** (`canonicalizeYouTubeUrl` in `src/urls/normalizer.ts`): every spelling of a video (watch/shorts/live/embed/youtu.be, any `is=`/`si=` share token, `t=` timestamps) collapses to `youtube.com/watch?v=<id>` for dedup keys ONLY. The phone share sheet mints a fresh `is=` token per share — before this, sharing the same video twice created two "new" bookmarks and two full downloads.
 - `BookmarkItem.url` / `MediaItem.url` is the ORIGINAL feed URL (it flows into file metadata: PDF Subject, MP4 source_url); `canonicalUrl` is a separate field used only for dedup jobIds. Don't set `url: canonicalUrl` when building items — that strips `www.` from every embedded source URL downstream.
 
 ### URL Routing (by type, before queuing)
