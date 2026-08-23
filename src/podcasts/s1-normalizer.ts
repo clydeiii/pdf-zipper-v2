@@ -48,6 +48,33 @@ export const MAX_OUTPUT_RATIO = 1.15;
 const CHUNK_TIMEOUT_MS = 180_000;
 
 /**
+ * Cold-loading s1-mini takes ~30s idle but can exceed the chunk timeout when
+ * e4b is saturated with back-to-back vision/enrichment/tag calls (observed
+ * 2026-08-22: first live run fell back on a 1,333-char chunk during a
+ * 15-bookmark burst). So the model is loaded explicitly before the chunk loop
+ * with its own generous timeout, and pinned resident afterwards — its 0.5GB is
+ * part of the planned steady state (e4b + s1-mini + parakeet ≈ 13GB of 24GB).
+ */
+const WARMUP_TIMEOUT_MS = 300_000;
+const KEEP_ALIVE = '2h';
+
+async function warmUpModel(): Promise<void> {
+  try {
+    await fetch(`${env.OLLAMA_HOST}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: env.TRANSCRIPT_NORMALIZE_MODEL,
+        keep_alive: KEEP_ALIVE,
+      }),
+      signal: AbortSignal.timeout(WARMUP_TIMEOUT_MS),
+    });
+  } catch {
+    // Best effort — the chunk loop has its own per-chunk fallback.
+  }
+}
+
+/**
  * Split at paragraph boundaries (falling back to sentence boundaries inside
  * oversized paragraphs) into chunks under NORMALIZE_CHUNK_CHARS.
  * Exported for testing.
@@ -113,6 +140,7 @@ async function normalizeChunk(chunk: string): Promise<string | null> {
         prompt: buildS1Prompt(chunk),
         raw: true,
         stream: false,
+        keep_alive: KEEP_ALIVE,
         options: {
           temperature: 0,
           num_predict: numPredict,
@@ -147,8 +175,14 @@ export async function normalizeTranscript(
   const out: string[] = [];
   let fallbacks = 0;
 
+  await warmUpModel();
+
   for (const chunk of chunks) {
-    const normalized = await normalizeChunk(chunk);
+    // One retry on transport failure only — a timeout during an Ollama burst
+    // often clears within the chunk window. Unacceptable OUTPUT is not
+    // retried: temperature 0 would reproduce it.
+    let normalized = await normalizeChunk(chunk);
+    if (normalized === null) normalized = await normalizeChunk(chunk);
     if (normalized !== null && normalizedOutputAcceptable(chunk, normalized)) {
       out.push(normalized);
     } else {
