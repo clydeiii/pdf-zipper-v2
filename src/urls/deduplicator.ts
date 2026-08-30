@@ -7,6 +7,7 @@
  */
 import { Redis } from 'ioredis';
 import { normalizeBookmarkUrl } from './normalizer.js';
+import { substackDedupCandidates } from './substack-canonical.js';
 import type { FeedSource } from '../feeds/types.js';
 
 const SEEN_URLS_KEY = 'bookmarks:seen-urls';
@@ -31,11 +32,25 @@ export class BookmarkDeduplicator {
   }
 
   /**
+   * All dedup keys a URL answers to. One entry (the normalized URL) for
+   * almost everything; Substack-hosted post URLs expand to the spellings the
+   * same post takes across the iOS share sheet, the pub subdomain, and the
+   * custom domain — see substack-canonical.ts for why one key can't cover it.
+   */
+  private async dedupCandidates(url: string): Promise<string[]> {
+    const substack = await substackDedupCandidates(url).catch(() => null);
+    return substack ?? [normalizeBookmarkUrl(url)];
+  }
+
+  /**
    * Check if normalized URL has been seen across any feed
    */
   async isUrlSeen(url: string): Promise<boolean> {
-    const canonical = normalizeBookmarkUrl(url);
-    return await this.redis.sismember(SEEN_URLS_KEY, canonical) === 1;
+    const candidates = await this.dedupCandidates(url);
+    const hits = await Promise.all(
+      candidates.map((c) => this.redis.sismember(SEEN_URLS_KEY, c))
+    );
+    return hits.some((h) => h === 1);
   }
 
   /**
@@ -46,9 +61,10 @@ export class BookmarkDeduplicator {
    * instead of re-converting and overwriting the manual capture.
    */
   async markUrlSeen(url: string, source: FeedSource | 'manual'): Promise<string> {
-    const canonical = normalizeBookmarkUrl(url);
-    await this.redis.sadd(SEEN_URLS_KEY, canonical);
-    // Store source in hash for debugging/analytics
+    const candidates = await this.dedupCandidates(url);
+    await this.redis.sadd(SEEN_URLS_KEY, ...candidates);
+    // Store source in hash for debugging/analytics (primary key only)
+    const canonical = candidates[0];
     await this.redis.hset(`bookmark:${canonical}`, 'source', source, 'seenAt', new Date().toISOString());
     return canonical;
   }
