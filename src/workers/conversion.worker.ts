@@ -24,6 +24,7 @@ import { getISOWeekNumber } from '../media/organization.js';
 import { notifyJobComplete, notifyJobFailed, isDiscordEnabled } from '../notifications/discord.js';
 import { addPendingFixes } from '../fix/pending.js';
 import { BookmarkDeduplicator } from '../urls/deduplicator.js';
+import { canonicalizeSubstackUrl } from '../urls/substack-canonical.js';
 import { classifyFailureMessage, isTransientNetworkMessage } from '../fix/failure.js';
 import { shouldAutoTriggerFix } from '../fix/trigger-policy.js';
 import { updateFixOutcome } from '../fix/ledger.js';
@@ -174,6 +175,17 @@ function isSmryRescueCandidate(message: string): boolean {
 }
 
 async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Promise<ConversionJobResult> {
+  // Substack posts are stored under one canonical URL no matter which device
+  // bookmarked them — and the sharer's personal `r=` reader token must never
+  // reach the PDF Subject. Rewriting job.data here covers every job source
+  // (feed poll, direct API, both rerun endpoints) before anything reads it.
+  const rawTarget = job.data.originalUrl || job.data.url;
+  const substackCanonical = await canonicalizeSubstackUrl(rawTarget).catch(() => null);
+  if (substackCanonical) {
+    console.log(`Substack canonical URL: ${rawTarget} → ${substackCanonical}`);
+    job.data.url = substackCanonical;
+    job.data.originalUrl = substackCanonical;
+  }
   try {
     return await runPrimaryCapture(job);
   } catch (primaryErr) {

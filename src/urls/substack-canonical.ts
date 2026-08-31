@@ -110,3 +110,62 @@ export async function substackDedupCandidates(
   candidates.add(normalizeBookmarkUrl(url));
   return [...candidates];
 }
+
+/**
+ * Substack share params. `r=` is the sharer's personal reader token — it
+ * identifies the user, so it must NEVER reach stored metadata (PDF Subject,
+ * Karakeep injection, exported files). The rest is share-flow noise.
+ */
+const SHARE_PARAMS = ['r', 'showWelcomeOnShare', 'triedRedirect'];
+
+/**
+ * Strip Substack share params from a post-shaped URL (`/p/<slug>` on any
+ * host — custom-domain "copy link" also appends `?r=…&utm_medium=web`, and
+ * the host alone can't tell us it's Substack). Returns null when unchanged.
+ * Exported for testing.
+ */
+export function stripSubstackShareParams(url: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (!/^\/p\/[^/]+\/?$/.test(parsed.pathname)) return null;
+  let changed = false;
+  for (const key of [...parsed.searchParams.keys()]) {
+    if (SHARE_PARAMS.includes(key) || /^utm_/i.test(key)) {
+      parsed.searchParams.delete(key);
+      changed = true;
+    }
+  }
+  return changed ? parsed.toString().replace(/\?$/, '') : null;
+}
+
+/**
+ * The URL a Substack post should be STORED under — capture target, PDF
+ * Subject, filename, Karakeep injection — regardless of which device made
+ * the bookmark. Substack-hosted spellings are rebuilt as
+ * `https://<canonical host>/p/<slug>` (custom domain when the pub root
+ * resolves, `<pub>.substack.com` otherwise — the share token is gone either
+ * way); custom-domain post URLs just lose their share params. Returns null
+ * when the URL isn't a Substack post or is already clean.
+ */
+export async function canonicalizeSubstackUrl(
+  url: string,
+  resolver: PubHostResolver = resolveViaRedirect
+): Promise<string | null> {
+  const post = parseSubstackPubPost(url);
+  if (!post) return stripSubstackShareParams(url);
+
+  let host = pubHostCache.get(post.pubHost);
+  if (!host) {
+    const resolved = await resolver(post.pubHost);
+    if (resolved) {
+      host = resolved;
+      pubHostCache.set(post.pubHost, resolved);
+    }
+  }
+  const canonical = `https://${host ?? post.pubHost}/p/${post.slug}`;
+  return canonical === url ? null : canonical;
+}

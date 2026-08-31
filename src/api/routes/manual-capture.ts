@@ -20,6 +20,7 @@ import { analyzePdfContent } from '../../quality/pdf-content.js';
 import { enrichDocumentMetadata, type EnrichedMetadata } from '../../metadata/enrichment.js';
 import { conversionQueue } from '../../queues/conversion.queue.js';
 import { normalizeBookmarkUrl } from '../../urls/normalizer.js';
+import { canonicalizeSubstackUrl } from '../../urls/substack-canonical.js';
 import { getISOWeekNumber } from '../../media/organization.js';
 import { BookmarkDeduplicator } from '../../urls/deduplicator.js';
 import { queueConnection } from '../../config/redis.js';
@@ -306,6 +307,15 @@ manualCaptureRouter.post(
             urlForSave = body.originalUrl;
           }
         } catch { /* invalid URL, skip swap */ }
+      }
+
+      // Substack posts: store the canonical spelling and drop the personal
+      // `r=` share token before it can reach the PDF Subject or the Karakeep
+      // injection. Same rewrite the conversion worker applies to feed jobs.
+      const substackCanonical = await canonicalizeSubstackUrl(urlForSave).catch(() => null);
+      if (substackCanonical) {
+        console.log(`[manual-capture] Substack canonical URL: ${urlForSave} → ${substackCanonical}`);
+        urlForSave = substackCanonical;
       }
 
       // Assemble extra Info Dict fields from client-side extraction

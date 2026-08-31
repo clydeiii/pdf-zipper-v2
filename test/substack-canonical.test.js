@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {
   parseSubstackPubPost,
   substackDedupCandidates,
+  stripSubstackShareParams,
+  canonicalizeSubstackUrl,
 } from '../dist/urls/substack-canonical.js';
 
 test('parses the iOS share-sheet reader form', () => {
@@ -82,4 +84,49 @@ test('successful resolution is cached per pub', async () => {
   await substackDedupCandidates('https://testpub-d.substack.com/p/one', counting);
   await substackDedupCandidates('https://testpub-d.substack.com/p/two', counting);
   assert.equal(calls, 1, 'second URL from the same pub uses the cache');
+});
+
+test('the personal r= share token never survives canonicalization', async () => {
+  const resolver = async () => 'www.example-custom3.com';
+  // iOS share-sheet spelling: rebuilt from host+slug, token gone
+  assert.equal(
+    await canonicalizeSubstackUrl(
+      'https://open.substack.com/pub/testpub-e/p/the-post?r=9qonx&utm_medium=ios',
+      resolver
+    ),
+    'https://www.example-custom3.com/p/the-post'
+  );
+  // custom-domain "copy link" spelling: params stripped in place
+  assert.equal(
+    await canonicalizeSubstackUrl(
+      'https://www.dwarkesh.com/p/the-post?r=9qonx&utm_campaign=post&utm_medium=web'
+    ),
+    'https://www.dwarkesh.com/p/the-post'
+  );
+});
+
+test('canonicalization keeps the static pub form when resolution fails', async () => {
+  const failing = async () => null;
+  assert.equal(
+    await canonicalizeSubstackUrl('https://testpub-f.substack.com/p/x?r=9qonx', failing),
+    'https://testpub-f.substack.com/p/x'
+  );
+});
+
+test('canonicalization returns null for clean or non-Substack URLs', async () => {
+  assert.equal(await canonicalizeSubstackUrl('https://www.dwarkesh.com/p/the-post'), null);
+  assert.equal(await canonicalizeSubstackUrl('https://example.com/article?r=keepme'), null);
+  assert.equal(
+    await canonicalizeSubstackUrl('https://testpub-g.substack.com/p/x', async () => 'testpub-g.substack.com'),
+    null
+  );
+});
+
+test('stripSubstackShareParams removes only share params on post-shaped paths', () => {
+  assert.equal(
+    stripSubstackShareParams('https://www.dwarkesh.com/p/x?r=9qonx&utm_medium=web&foo=bar'),
+    'https://www.dwarkesh.com/p/x?foo=bar'
+  );
+  assert.equal(stripSubstackShareParams('https://example.com/blog?r=meaningful'), null);
+  assert.equal(stripSubstackShareParams('https://www.dwarkesh.com/p/x'), null);
 });
