@@ -5,6 +5,7 @@ import { BookmarkDeduplicator } from '../urls/deduplicator.js';
 import { FEED_QUEUE_NAME, metadataQueue } from './monitor.js';
 import type { FeedPollJobData, MetadataJobData } from './monitor.js';
 import type { BookmarkItem, FeedCacheState } from './types.js';
+import { isApplePodcastsUrl } from '../podcasts/apple.js';
 
 // Redis keys for feed cache state
 const FEED_CACHE_PREFIX = 'feed:cache:';
@@ -139,10 +140,30 @@ function createFeedPollWorker(): Worker<FeedPollJobData> {
         await deduplicator.markGuidSeen(source, item.guid);
         await redis.hdel(`${VIDEO_RETRY_PREFIX}${source}`, item.guid);
 
-        // Skip if URL already seen (cross-feed dedup)
+        // URL already seen (cross-feed dedup). Media items stay hard-skipped:
+        // re-downloading a video/podcast was the exact duplicate-work problem
+        // the YouTube share-token fix closed. Articles are different — a
+        // deliberate re-bookmark means "capture this again", and canonical
+        // filenames make the refresh overwrite in place rather than pile up
+        // copies. One exception: a URL whose first capture was MANUAL (the
+        // Chrome-extension paywall rescue) must never be clobbered by an
+        // automated re-capture that would hit the same paywall.
         if (await deduplicator.isUrlSeen(item.url)) {
-          await job.log(`Duplicate URL skipped: ${item.canonicalUrl}`);
-          continue;
+          const isMediaItem =
+            Boolean(item.enclosure) ||
+            item.mediaType === 'video' ||
+            isApplePodcastsUrl(item.url);
+          const firstSource = await deduplicator.getUrlSource(item.url);
+          if (isMediaItem || firstSource === 'manual') {
+            await job.log(`Duplicate URL skipped: ${item.canonicalUrl}`);
+            continue;
+          }
+          console.log(JSON.stringify({
+            event: 'rebookmark_refresh',
+            url: item.url,
+            source,
+            timestamp: new Date().toISOString(),
+          }));
         }
 
         // Mark URL as seen

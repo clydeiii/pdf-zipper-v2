@@ -70,12 +70,18 @@ export class BookmarkDeduplicator {
   }
 
   /**
-   * Get which source first provided this URL
+   * Get which source first provided this URL. Checks every candidate
+   * spelling so a manual capture recorded under one Substack form is still
+   * found when the query arrives as another — the re-bookmark refresh in the
+   * poll worker relies on this to avoid clobbering manual captures.
    */
-  async getUrlSource(url: string): Promise<FeedSource | null> {
-    const canonical = normalizeBookmarkUrl(url);
-    const source = await this.redis.hget(`bookmark:${canonical}`, 'source');
-    return source as FeedSource | null;
+  async getUrlSource(url: string): Promise<FeedSource | 'manual' | null> {
+    const candidates = await this.dedupCandidates(url);
+    for (const candidate of candidates) {
+      const source = await this.redis.hget(`bookmark:${candidate}`, 'source');
+      if (source) return source as FeedSource | 'manual';
+    }
+    return null;
   }
 
   /**
