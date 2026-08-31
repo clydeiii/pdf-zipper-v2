@@ -7,7 +7,7 @@
  * byte-compatible, Karpathy-aligned PDFs.
  */
 
-import { writeFile, mkdir, readFile } from 'node:fs/promises';
+import { writeFile, mkdir, readFile, readdir, unlink } from 'node:fs/promises';
 import * as path from 'node:path';
 import { createRequire } from 'node:module';
 import { PDFDocument } from 'pdf-lib';
@@ -82,6 +82,40 @@ const GENERIC_PDF_STEMS = new Set([
 export function isGenericPdfBasename(name: string): boolean {
   const stem = name.replace(/(\.pdf)+$/i, '').toLowerCase().trim();
   return stem === '' || GENERIC_PDF_STEMS.has(stem);
+}
+
+/**
+ * Delete copies of the same file (same basename, same type subdir) left in
+ * OTHER week bins by an earlier capture of this URL. Basenames derive from
+ * the canonical URL, so a same-basename file in another week IS a stale
+ * capture of the same article — the just-written file is the fresh copy and
+ * is never touched. Returns the number of stale copies removed.
+ */
+export async function deleteStaleCopiesInOtherWeeks(filePath: string): Promise<number> {
+  const basename = path.basename(filePath);
+  const typeDir = path.basename(path.dirname(filePath)); // pdfs / podcasts / …
+  const mediaRoot = path.dirname(path.dirname(path.dirname(filePath)));
+  let deleted = 0;
+  let weekDirs: string[] = [];
+  try {
+    weekDirs = (await readdir(mediaRoot, { withFileTypes: true }))
+      .filter((d) => d.isDirectory() && /^\d{4}-W\d{2}$/.test(d.name))
+      .map((d) => d.name);
+  } catch {
+    return 0;
+  }
+  for (const week of weekDirs) {
+    const candidate = path.join(mediaRoot, week, typeDir, basename);
+    if (path.resolve(candidate) === path.resolve(filePath)) continue;
+    try {
+      await unlink(candidate);
+      deleted++;
+      console.log(`Deleted stale copy from earlier week: ${candidate}`);
+    } catch {
+      // ENOENT for most weeks — expected
+    }
+  }
+  return deleted;
 }
 
 export function buildUrlBaseName(
@@ -363,6 +397,14 @@ export async function savePdfToWeeklyBin(
 
   // Write PDF with all metadata embedded directly (writeFile overwrites)
   await writeFile(filePath, pdfWithMetadata);
+
+  // Re-capture freshness: the same URL captured in an earlier ISO week left a
+  // same-basename copy in that week's bin. One canonical copy wins (this one);
+  // without this, a rerun or re-bookmark that crosses a week boundary leaves
+  // the stale version exportable from the old week forever. Non-fatal.
+  try {
+    await deleteStaleCopiesInOtherWeeks(filePath);
+  } catch { /* cleanup is best-effort */ }
 
   return filePath;
 }

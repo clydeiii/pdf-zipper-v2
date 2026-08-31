@@ -27,44 +27,14 @@ import { queueConnection } from '../../config/redis.js';
 import { createKarakeepBookmark } from '../../feeds/karakeep-api.js';
 import { removePendingFixesByUrl } from '../../fix/pending.js';
 import { sendDiscordNotification } from '../../notifications/discord.js';
-import { readdir, unlink } from 'node:fs/promises';
 
 export const manualCaptureRouter = Router();
 
 const deduplicator = new BookmarkDeduplicator(queueConnection);
 
-/**
- * Delete copies of the same PDF (same basename) left in OTHER week bins by an
- * earlier capture/conversion of this URL. A re-capture in a new ISO week would
- * otherwise leave the stale version exportable from the old week forever.
- * The just-written file itself is never touched.
- */
-async function deleteStaleCopiesInOtherWeeks(filePath: string): Promise<number> {
-  const basename = path.basename(filePath);
-  const pdfDir = path.dirname(filePath);                 // .../media/<week>/pdfs
-  const mediaRoot = path.dirname(path.dirname(pdfDir));  // .../media
-  let deleted = 0;
-  let weekDirs: string[] = [];
-  try {
-    weekDirs = (await readdir(mediaRoot, { withFileTypes: true }))
-      .filter((d) => d.isDirectory() && /^\d{4}-W\d{2}$/.test(d.name))
-      .map((d) => d.name);
-  } catch {
-    return 0;
-  }
-  for (const week of weekDirs) {
-    const candidate = path.join(mediaRoot, week, 'pdfs', basename);
-    if (path.resolve(candidate) === path.resolve(filePath)) continue;
-    try {
-      await unlink(candidate);
-      deleted++;
-      console.log(`[manual-capture] Deleted stale copy from earlier week: ${candidate}`);
-    } catch {
-      // ENOENT for most weeks — expected
-    }
-  }
-  return deleted;
-}
+// Stale-copy cleanup across ISO-week bins now lives in savePdfToWeeklyBin
+// itself (src/utils/save-pdf.ts), so every capture path gets it — not just
+// manual captures.
 
 /** Plugin creator tag embedded in PDF Creator field — includes extension-reported version. */
 const CREATOR_PREFIX = 'pdf-zipper-v2-chrome-plugin';
@@ -440,10 +410,6 @@ manualCaptureRouter.post(
         console.warn('[manual-capture] removePendingFixesByUrl failed (non-fatal):', error instanceof Error ? error.message : error);
       }
 
-      // Re-capture across ISO weeks: remove the stale copy an earlier capture
-      // left in an old week bin, so only the fresh version remains exportable.
-      const removedStaleCopies = await deleteStaleCopiesInOtherWeeks(filePath);
-
       // Inject the URL into Karakeep (fire-and-forget): a later bookmark via
       // the Karakeep Chrome plugin then dedupes there ("already saved").
       // markUrlSeen above already protects against the resulting feed item.
@@ -481,8 +447,7 @@ manualCaptureRouter.post(
         `[manual-capture] Saved ${filename} in ${durationMs}ms` +
           ` (enrichment: ${enrichedMetadata ? 'yes' : 'no'},` +
           ` markdown: ${mdLen > 0 ? `${mdLen} chars` : 'no'},` +
-          ` removed ${removedFailedJobs} failed/queued job(s),` +
-          ` ${removedStaleCopies} stale copy(ies))`
+          ` removed ${removedFailedJobs} failed/queued job(s))`
       );
 
       res.json({
@@ -491,7 +456,6 @@ manualCaptureRouter.post(
         filePath,
         weekId,
         removedFailedJobs,
-        removedStaleCopies,
         durationMs,
         markdownChars: mdLen,
         metadata: enrichedMetadata
