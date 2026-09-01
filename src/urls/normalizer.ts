@@ -49,12 +49,34 @@ export function canonicalizeYouTubeUrl(rawUrl: string): string | null {
 }
 
 /**
+ * X/Twitter share params: the iOS share sheet appends `?s=20` (and sometimes
+ * `t=<token>`) that the web UI's copy-link doesn't, so the same tweet
+ * bookmarked from phone and laptop produced two different dedup keys
+ * (observed live 2026-08-31: x.com/JaredKubin/status/2094136005435564399
+ * bookmarked as `?s=20` and bare). Tweet identity is the status path — strip
+ * the share params. Host-gated: `s`/`t` can be meaningful on other sites.
+ * Exported for testing.
+ */
+export function stripTwitterShareParams(rawUrl: string): string {
+  try {
+    const url = new URL(rawUrl);
+    const host = url.hostname.toLowerCase().replace(/^(www|mobile)\./, '');
+    if (host !== 'x.com' && host !== 'twitter.com') return rawUrl;
+    url.searchParams.delete('s');
+    url.searchParams.delete('t');
+    return url.toString().replace(/\?$/, '');
+  } catch {
+    return rawUrl;
+  }
+}
+
+/**
  * Normalize URL to canonical form for deduplication (BOOK-03)
  */
 export function normalizeBookmarkUrl(rawUrl: string): string {
   const youtube = canonicalizeYouTubeUrl(rawUrl);
   if (youtube) return youtube;
-  return normalizeUrl(rawUrl, {
+  return normalizeUrl(stripTwitterShareParams(rawUrl), {
     stripWWW: true,
     removeQueryParameters: [
       /^utm_\w+/i,     // UTM tracking
