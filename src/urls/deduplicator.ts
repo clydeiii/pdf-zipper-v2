@@ -8,6 +8,7 @@
 import { Redis } from 'ioredis';
 import { normalizeBookmarkUrl } from './normalizer.js';
 import { substackDedupCandidates } from './substack-canonical.js';
+import { declaredCanonicalCandidates } from './canonical-declaration.js';
 import type { FeedSource } from '../feeds/types.js';
 
 const SEEN_URLS_KEY = 'bookmarks:seen-urls';
@@ -32,14 +33,20 @@ export class BookmarkDeduplicator {
   }
 
   /**
-   * All dedup keys a URL answers to. One entry (the normalized URL) for
-   * almost everything; Substack-hosted post URLs expand to the spellings the
-   * same post takes across the iOS share sheet, the pub subdomain, and the
-   * custom domain — see substack-canonical.ts for why one key can't cover it.
+   * All dedup keys a URL answers to. Substack-hosted post URLs expand to the
+   * spellings the same post takes across the iOS share sheet, the pub
+   * subdomain, and the custom domain (substack-canonical.ts). Everything
+   * else gets the normalized URL plus, for the long tail, whatever the page
+   * itself declares via rel=canonical / og:url (canonical-declaration.ts) —
+   * dedup keys only, guarded, and a failed fetch just means no extra key.
    */
   private async dedupCandidates(url: string): Promise<string[]> {
     const substack = await substackDedupCandidates(url).catch(() => null);
-    return substack ?? [normalizeBookmarkUrl(url)];
+    if (substack) return substack;
+    const candidates = new Set([normalizeBookmarkUrl(url)]);
+    const declared = await declaredCanonicalCandidates(url).catch(() => null);
+    for (const c of declared ?? []) candidates.add(c);
+    return [...candidates];
   }
 
   /**
