@@ -81,15 +81,24 @@ export type GuidSeenChecker = (guid: string) => Promise<boolean>;
  * @param feedUrl - Karakeep API URL with token (e.g., http://localhost:3001/api/v1/bookmarks?token=...)
  * @param cache - Previous state for tracking seen bookmarks (etag/lastModified)
  * @param isGuidSeen - Optional callback to check if GUID already processed (enables pagination catchup)
+ * @param pendingGuids - GUIDs deliberately left unseen because they're waiting
+ *   for a Karakeep video asset. Pagination continues past seen items until
+ *   every one has been encountered — otherwise a burst of newer bookmarks
+ *   pushes a waiting video off the first page and it is never polled again
+ *   (observed 2026-09-02: 45 videos stranded mid-wait by a 385-bookmark
+ *   evening). GUIDs the feed no longer contains at all are returned in
+ *   `missingPendingGuids` so the caller can stop waiting on them.
  */
 export async function parseKarakeepFeed(
   feedUrl: string,
   cache?: { etag?: string; lastModified?: string },
-  isGuidSeen?: GuidSeenChecker
+  isGuidSeen?: GuidSeenChecker,
+  pendingGuids?: Set<string>
 ): Promise<{
   items: BookmarkItem[];
   cache: { etag?: string; lastModified?: string };
   wasModified: boolean;
+  missingPendingGuids?: string[];
 }> {
   // Parse the feedUrl to extract base URL and token
   const url = new URL(feedUrl);
@@ -106,6 +115,8 @@ export async function parseKarakeepFeed(
   let nextCursor: string | undefined;
   let pageCount = 0;
   const MAX_PAGES = 20; // Safety limit to prevent infinite loops
+  const pendingRemaining = new Set(pendingGuids ?? []);
+  let feedExhausted = false;
 
   // Paginate through Karakeep API until we hit seen items or run out of pages
   do {
@@ -135,6 +146,8 @@ export async function parseKarakeepFeed(
     let newItemsOnPage = 0;
 
     for (const bookmark of data.bookmarks) {
+      pendingRemaining.delete(bookmark.id);
+
       // Check if we've already processed this GUID (if checker provided)
       if (isGuidSeen && await isGuidSeen(bookmark.id)) {
         foundSeenItem = true;
@@ -235,15 +248,20 @@ export async function parseKarakeepFeed(
     }
 
     // Stop pagination if:
-    // 1. We found a seen item (caught up to where we left off)
+    // 1. We found a seen item (caught up to where we left off) AND every
+    //    pending video GUID has been encountered on the way
     // 2. No more pages (nextCursor is empty)
     // 3. Hit max pages safety limit
-    if (foundSeenItem) {
+    if (foundSeenItem && pendingRemaining.size === 0) {
       console.log(`Karakeep catchup complete: found previously seen item on page ${pageCount}`);
       break;
     }
+    if (foundSeenItem) {
+      console.log(`Karakeep page ${pageCount}: past seen items, continuing for ${pendingRemaining.size} pending video(s)`);
+    }
 
     nextCursor = data.nextCursor;
+    if (!nextCursor) feedExhausted = true;
 
     if (pageCount >= MAX_PAGES) {
       console.warn(`Karakeep pagination hit safety limit of ${MAX_PAGES} pages`);
@@ -263,5 +281,8 @@ export async function parseKarakeepFeed(
       lastModified: cache?.lastModified,
     },
     wasModified: allItems.length > 0,
+    // Only when the feed genuinely ended: a pending GUID absent from the
+    // whole feed was deleted in Karakeep. Hitting MAX_PAGES proves nothing.
+    missingPendingGuids: pendingGuids ? (feedExhausted ? [...pendingRemaining] : []) : undefined,
   };
 }

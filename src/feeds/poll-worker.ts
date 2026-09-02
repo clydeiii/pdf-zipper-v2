@@ -62,7 +62,24 @@ function createFeedPollWorker(): Worker<FeedPollJobData> {
       if (source === 'karakeep') {
         // Create GUID checker callback for pagination catchup
         const isGuidSeen = async (guid: string) => deduplicator.isGuidSeen(source, guid);
-        result = await parseKarakeepFeed(feedUrl, cache, isGuidSeen);
+        // Videos still waiting on a Karakeep asset must keep being polled even
+        // after newer bookmarks push them off the first page — see the
+        // parser's pendingGuids contract.
+        const videoRetryKey = `${VIDEO_RETRY_PREFIX}${source}`;
+        const pendingGuids = new Set(await redis.hkeys(videoRetryKey));
+        result = await parseKarakeepFeed(feedUrl, cache, isGuidSeen, pendingGuids);
+        for (const guid of result.missingPendingGuids ?? []) {
+          // The bookmark is gone from Karakeep entirely (user deleted it):
+          // stop waiting, or pagination would walk the whole feed every poll.
+          await redis.hdel(videoRetryKey, guid);
+          console.log(JSON.stringify({
+            event: 'video_wait_abandoned',
+            guid,
+            source,
+            reason: 'bookmark_gone',
+            timestamp: new Date().toISOString(),
+          }));
+        }
       } else {
         result = await parseMatterFeed(feedUrl, cache);
       }
