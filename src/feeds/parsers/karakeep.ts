@@ -68,6 +68,98 @@ interface KarakeepApiResponse {
 export type GuidSeenChecker = (guid: string) => Promise<boolean>;
 
 /**
+ * Build a BookmarkItem from one Karakeep bookmark record, or null when it
+ * isn't something we capture. Shared by feed pagination and by the direct
+ * by-id lookup used for videos still waiting on an asset.
+ */
+function buildKarakeepItem(bookmark: KarakeepBookmark, baseUrl: string): BookmarkItem | null {
+  // Handle different bookmark content types
+  const contentType = bookmark.content?.type;
+
+  // Skip bookmarks without content
+  if (!bookmark.content) {
+    return null;
+  }
+
+  let bookmarkItem: BookmarkItem | null = null;
+  const guid = bookmark.id;
+
+  if (contentType === 'link' && bookmark.content.url) {
+    // Standard link bookmark
+    const bookmarkUrl = bookmark.content.url;
+    bookmarkItem = {
+      url: bookmarkUrl,
+      canonicalUrl: normalizeBookmarkUrl(bookmarkUrl),
+      guid,
+      source: 'karakeep',
+      title: bookmark.content.title || bookmark.title || undefined,
+      creator: bookmark.content.author,
+      bookmarkedAt: bookmark.createdAt,
+    };
+
+    // Karakeep auto-extracts video assets from articles, but for non-video-
+    // primary URLs (BI, NYT, Verge, etc.) those embeds are usually unrelated
+    // supplemental content, not what the user wanted. Only forward the video
+    // enclosure when the bookmark URL itself is a video-primary host.
+    const videoAsset = bookmark.assets?.find(a => a.assetType === 'video');
+    if (videoAsset && bookmark.content.videoAssetId && isVideoPrimaryHost(bookmarkUrl)) {
+      // Karakeep serves assets at /api/assets/{assetId}
+      bookmarkItem.enclosure = {
+        url: `${baseUrl}/api/assets/${bookmark.content.videoAssetId}`,
+        type: 'video/mp4',
+        length: undefined,
+      };
+      bookmarkItem.mediaType = 'video';
+    } else if (isPatreonPostUrl(bookmarkUrl)) {
+      // Patreon posts never arrive with a video asset — Karakeep has no
+      // Patreon session, so it files them as plain links (confirmed across
+      // four real bookmarks). Point the enclosure at the post itself and
+      // let yt-dlp extract the member-only HLS stream with our cookies.
+      // The post still goes on to its normal PDF capture, so a bookmark
+      // yields both, exactly like an x.com video.
+      bookmarkItem.enclosure = {
+        url: bookmarkUrl,
+        type: 'video/mp4',
+        length: undefined,
+        downloadVia: 'yt-dlp',
+      };
+      bookmarkItem.mediaType = 'video';
+    }
+  } else if (contentType === 'asset' && bookmark.content.assetType === 'pdf' && bookmark.content.assetId) {
+    // Uploaded PDF file - create a direct URL to the asset
+    const pdfUrl = `${baseUrl}/api/assets/${bookmark.content.assetId}`;
+    // Filename may be in content.fileName OR in the assets array
+    const assetId = bookmark.content!.assetId;
+    const assetInfo = bookmark.assets?.find(a => a.id === assetId);
+    const fileName = bookmark.content.fileName || assetInfo?.fileName || `pdf-${bookmark.content.assetId.slice(0, 8)}.pdf`;
+
+    bookmarkItem = {
+      url: pdfUrl,
+      canonicalUrl: pdfUrl,  // Use asset URL as canonical (no normalization needed)
+      guid,
+      source: 'karakeep',
+      title: bookmark.title || fileName.replace(/\.pdf$/i, ''),
+      bookmarkedAt: bookmark.createdAt,
+      mediaType: 'pdf',
+      enclosure: {
+        url: pdfUrl,
+        type: 'application/pdf',
+        length: undefined,
+      },
+    };
+
+    console.log(`Karakeep PDF asset: ${fileName} -> ${pdfUrl}`);
+  }
+
+  // Skip if we couldn't create a bookmark item
+  if (!bookmarkItem) {
+    return null;
+  }
+
+  return bookmarkItem;
+}
+
+/**
  * Parse Karakeep API and extract bookmark items with pagination support
  *
  * Karakeep uses a JSON API with Bearer token authentication.
@@ -81,24 +173,15 @@ export type GuidSeenChecker = (guid: string) => Promise<boolean>;
  * @param feedUrl - Karakeep API URL with token (e.g., http://localhost:3001/api/v1/bookmarks?token=...)
  * @param cache - Previous state for tracking seen bookmarks (etag/lastModified)
  * @param isGuidSeen - Optional callback to check if GUID already processed (enables pagination catchup)
- * @param pendingGuids - GUIDs deliberately left unseen because they're waiting
- *   for a Karakeep video asset. Pagination continues past seen items until
- *   every one has been encountered — otherwise a burst of newer bookmarks
- *   pushes a waiting video off the first page and it is never polled again
- *   (observed 2026-09-02: 45 videos stranded mid-wait by a 385-bookmark
- *   evening). GUIDs the feed no longer contains at all are returned in
- *   `missingPendingGuids` so the caller can stop waiting on them.
  */
 export async function parseKarakeepFeed(
   feedUrl: string,
   cache?: { etag?: string; lastModified?: string },
-  isGuidSeen?: GuidSeenChecker,
-  pendingGuids?: Set<string>
+  isGuidSeen?: GuidSeenChecker
 ): Promise<{
   items: BookmarkItem[];
   cache: { etag?: string; lastModified?: string };
   wasModified: boolean;
-  missingPendingGuids?: string[];
 }> {
   // Parse the feedUrl to extract base URL and token
   const url = new URL(feedUrl);
@@ -115,8 +198,6 @@ export async function parseKarakeepFeed(
   let nextCursor: string | undefined;
   let pageCount = 0;
   const MAX_PAGES = 20; // Safety limit to prevent infinite loops
-  const pendingRemaining = new Set(pendingGuids ?? []);
-  let feedExhausted = false;
 
   // Paginate through Karakeep API until we hit seen items or run out of pages
   do {
@@ -146,8 +227,6 @@ export async function parseKarakeepFeed(
     let newItemsOnPage = 0;
 
     for (const bookmark of data.bookmarks) {
-      pendingRemaining.delete(bookmark.id);
-
       // Check if we've already processed this GUID (if checker provided)
       if (isGuidSeen && await isGuidSeen(bookmark.id)) {
         foundSeenItem = true;
@@ -155,85 +234,7 @@ export async function parseKarakeepFeed(
         continue;
       }
 
-      // Handle different bookmark content types
-      const contentType = bookmark.content?.type;
-
-      // Skip bookmarks without content
-      if (!bookmark.content) {
-        continue;
-      }
-
-      let bookmarkItem: BookmarkItem | null = null;
-      const guid = bookmark.id;
-
-      if (contentType === 'link' && bookmark.content.url) {
-        // Standard link bookmark
-        const bookmarkUrl = bookmark.content.url;
-        bookmarkItem = {
-          url: bookmarkUrl,
-          canonicalUrl: normalizeBookmarkUrl(bookmarkUrl),
-          guid,
-          source: 'karakeep',
-          title: bookmark.content.title || bookmark.title || undefined,
-          creator: bookmark.content.author,
-          bookmarkedAt: bookmark.createdAt,
-        };
-
-        // Karakeep auto-extracts video assets from articles, but for non-video-
-        // primary URLs (BI, NYT, Verge, etc.) those embeds are usually unrelated
-        // supplemental content, not what the user wanted. Only forward the video
-        // enclosure when the bookmark URL itself is a video-primary host.
-        const videoAsset = bookmark.assets?.find(a => a.assetType === 'video');
-        if (videoAsset && bookmark.content.videoAssetId && isVideoPrimaryHost(bookmarkUrl)) {
-          // Karakeep serves assets at /api/assets/{assetId}
-          bookmarkItem.enclosure = {
-            url: `${baseUrl}/api/assets/${bookmark.content.videoAssetId}`,
-            type: 'video/mp4',
-            length: undefined,
-          };
-          bookmarkItem.mediaType = 'video';
-        } else if (isPatreonPostUrl(bookmarkUrl)) {
-          // Patreon posts never arrive with a video asset — Karakeep has no
-          // Patreon session, so it files them as plain links (confirmed across
-          // four real bookmarks). Point the enclosure at the post itself and
-          // let yt-dlp extract the member-only HLS stream with our cookies.
-          // The post still goes on to its normal PDF capture, so a bookmark
-          // yields both, exactly like an x.com video.
-          bookmarkItem.enclosure = {
-            url: bookmarkUrl,
-            type: 'video/mp4',
-            length: undefined,
-            downloadVia: 'yt-dlp',
-          };
-          bookmarkItem.mediaType = 'video';
-        }
-      } else if (contentType === 'asset' && bookmark.content.assetType === 'pdf' && bookmark.content.assetId) {
-        // Uploaded PDF file - create a direct URL to the asset
-        const pdfUrl = `${baseUrl}/api/assets/${bookmark.content.assetId}`;
-        // Filename may be in content.fileName OR in the assets array
-        const assetId = bookmark.content!.assetId;
-        const assetInfo = bookmark.assets?.find(a => a.id === assetId);
-        const fileName = bookmark.content.fileName || assetInfo?.fileName || `pdf-${bookmark.content.assetId.slice(0, 8)}.pdf`;
-
-        bookmarkItem = {
-          url: pdfUrl,
-          canonicalUrl: pdfUrl,  // Use asset URL as canonical (no normalization needed)
-          guid,
-          source: 'karakeep',
-          title: bookmark.title || fileName.replace(/\.pdf$/i, ''),
-          bookmarkedAt: bookmark.createdAt,
-          mediaType: 'pdf',
-          enclosure: {
-            url: pdfUrl,
-            type: 'application/pdf',
-            length: undefined,
-          },
-        };
-
-        console.log(`Karakeep PDF asset: ${fileName} -> ${pdfUrl}`);
-      }
-
-      // Skip if we couldn't create a bookmark item
+      const bookmarkItem = buildKarakeepItem(bookmark, baseUrl);
       if (!bookmarkItem) {
         continue;
       }
@@ -248,20 +249,15 @@ export async function parseKarakeepFeed(
     }
 
     // Stop pagination if:
-    // 1. We found a seen item (caught up to where we left off) AND every
-    //    pending video GUID has been encountered on the way
+    // 1. We found a seen item (caught up to where we left off)
     // 2. No more pages (nextCursor is empty)
     // 3. Hit max pages safety limit
-    if (foundSeenItem && pendingRemaining.size === 0) {
+    if (foundSeenItem) {
       console.log(`Karakeep catchup complete: found previously seen item on page ${pageCount}`);
       break;
     }
-    if (foundSeenItem) {
-      console.log(`Karakeep page ${pageCount}: past seen items, continuing for ${pendingRemaining.size} pending video(s)`);
-    }
 
     nextCursor = data.nextCursor;
-    if (!nextCursor) feedExhausted = true;
 
     if (pageCount >= MAX_PAGES) {
       console.warn(`Karakeep pagination hit safety limit of ${MAX_PAGES} pages`);
@@ -281,8 +277,38 @@ export async function parseKarakeepFeed(
       lastModified: cache?.lastModified,
     },
     wasModified: allItems.length > 0,
-    // Only when the feed genuinely ended: a pending GUID absent from the
-    // whole feed was deleted in Karakeep. Hitting MAX_PAGES proves nothing.
-    missingPendingGuids: pendingGuids ? (feedExhausted ? [...pendingRemaining] : []) : undefined,
   };
+}
+
+/**
+ * Fetch ONE bookmark by id and build its item. Used for videos that are
+ * deliberately left GUID-unseen while waiting for a Karakeep asset: the feed
+ * pagination stops at the first seen bookmark, so once newer bookmarks push a
+ * waiting video off the first page it would never be polled again (45 videos
+ * found stranded that way on 2026-09-02, some weeks old). Looking each
+ * pending GUID up directly keeps the wait window independent of feed
+ * position at one cheap request per pending video.
+ *
+ * Returns 'gone' when Karakeep no longer has the bookmark (404 — deleted, or
+ * swept by the retention cleaner), null on a transient failure (leave it
+ * pending), or the item.
+ */
+export async function fetchKarakeepBookmarkItem(
+  feedUrl: string,
+  guid: string
+): Promise<BookmarkItem | null | 'gone'> {
+  const url = new URL(feedUrl);
+  const token = url.searchParams.get('token');
+  const baseUrl = `${url.protocol}//${url.host}`;
+  try {
+    const response = await fetch(`${baseUrl}/api/v1/bookmarks/${encodeURIComponent(guid)}`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+    });
+    if (response.status === 404) return 'gone';
+    if (!response.ok) return null;
+    const bookmark = (await response.json()) as KarakeepBookmark;
+    return buildKarakeepItem(bookmark, baseUrl);
+  } catch {
+    return null;
+  }
 }

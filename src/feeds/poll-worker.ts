@@ -1,6 +1,7 @@
 import { Worker, Job } from 'bullmq';
 import { workerConnection, createConnection } from '../config/redis.js';
 import { parseMatterFeed, parseKarakeepFeed } from './parsers/index.js';
+import { fetchKarakeepBookmarkItem } from './parsers/karakeep.js';
 import { BookmarkDeduplicator } from '../urls/deduplicator.js';
 import { FEED_QUEUE_NAME, metadataQueue } from './monitor.js';
 import type { FeedPollJobData, MetadataJobData } from './monitor.js';
@@ -62,23 +63,32 @@ function createFeedPollWorker(): Worker<FeedPollJobData> {
       if (source === 'karakeep') {
         // Create GUID checker callback for pagination catchup
         const isGuidSeen = async (guid: string) => deduplicator.isGuidSeen(source, guid);
-        // Videos still waiting on a Karakeep asset must keep being polled even
-        // after newer bookmarks push them off the first page — see the
-        // parser's pendingGuids contract.
+        result = await parseKarakeepFeed(feedUrl, cache, isGuidSeen);
+
+        // Videos still waiting on a Karakeep asset are GUID-unseen on
+        // purpose, but pagination stops at the first seen bookmark — so once
+        // newer bookmarks push a waiting video off the first page the feed
+        // never surfaces it again and its retry counter freezes (45 stranded
+        // on 2026-09-02). Look each pending video up directly by id instead;
+        // one cheap request per pending video, independent of feed position.
         const videoRetryKey = `${VIDEO_RETRY_PREFIX}${source}`;
-        const pendingGuids = new Set(await redis.hkeys(videoRetryKey));
-        result = await parseKarakeepFeed(feedUrl, cache, isGuidSeen, pendingGuids);
-        for (const guid of result.missingPendingGuids ?? []) {
-          // The bookmark is gone from Karakeep entirely (user deleted it):
-          // stop waiting, or pagination would walk the whole feed every poll.
-          await redis.hdel(videoRetryKey, guid);
-          console.log(JSON.stringify({
-            event: 'video_wait_abandoned',
-            guid,
-            source,
-            reason: 'bookmark_gone',
-            timestamp: new Date().toISOString(),
-          }));
+        const inFeed = new Set(result.items.map((i) => i.guid));
+        for (const guid of await redis.hkeys(videoRetryKey)) {
+          if (inFeed.has(guid)) continue;
+          const lookup = await fetchKarakeepBookmarkItem(feedUrl, guid);
+          if (lookup === 'gone') {
+            // Deleted in Karakeep (or swept by its retention cleaner): stop waiting.
+            await redis.hdel(videoRetryKey, guid);
+            console.log(JSON.stringify({
+              event: 'video_wait_abandoned',
+              guid,
+              source,
+              reason: 'bookmark_gone',
+              timestamp: new Date().toISOString(),
+            }));
+          } else if (lookup) {
+            result.items.push(lookup);
+          }
         }
       } else {
         result = await parseMatterFeed(feedUrl, cache);
