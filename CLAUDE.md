@@ -62,7 +62,7 @@ When a primary capture fails on an access wall, two rescue tiers run in order:
 
 ### Quality Pipeline
 Two-layer quality check, both must pass:
-1. **Vision score** (`src/quality/scorer.ts`): Ollama sees viewport-only screenshot (~800px). Don't flag "truncated" from viewport alone. Threshold configurable via `QUALITY_THRESHOLD`.
+1. **Vision score** (`src/quality/scorer.ts`): Ollama sees viewport-only screenshot (~800px). Don't flag "truncated" from viewport alone. Threshold configurable via `QUALITY_THRESHOLD`. A **`blank_page` verdict is deferred to content analysis** (worker, 2026-09-03): a dark hero fills the viewport-only screenshot, so openai.com's GPT-6 Astra launch page (black body background) scored 0 three times while its PDF held 31K chars over 20 pages. Blank is only credible when the PDF has no text — the override needs `analyzePdfContent` to pass with ≥2,000 chars (`BLANK_VERDICT_OVERRIDE_MIN_CHARS`), so shells and bot-challenge pages still fail. Logs `vision_blank_overridden`.
 2. **PDF content analysis** (`src/quality/pdf-content.ts`): extracts text, checks char counts, char/KB ratio, error-page patterns, paywall patterns.
 
 Tunable bypasses in pdf-content.ts — don't re-introduce false positives that were explicitly worked around:

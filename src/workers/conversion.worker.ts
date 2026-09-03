@@ -17,6 +17,13 @@ import { env } from '../config/env.js';
 import type { ConversionJobData, ConversionJobResult } from '../jobs/types.js';
 import { initBrowser, closeBrowser } from '../browsers/manager.js';
 import { convertUrlToPDF, isPdfUrl, downloadPdfDirect, rewriteToPdfUrl } from '../converters/pdf.js';
+
+/**
+ * A vision "blank_page" verdict is overridden when the PDF extracts at least
+ * this much text — far above any shell (headline + chrome ≈ 900) and any
+ * bot-challenge page, so a truly blank render still fails.
+ */
+const BLANK_VERDICT_OVERRIDE_MIN_CHARS = 2000;
 import { checkOllamaHealth } from '../quality/ollama.js';
 import { scoreScreenshotQuality } from '../quality/scorer.js';
 import { analyzePdfContent } from '../quality/pdf-content.js';
@@ -489,6 +496,27 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
         if (isTweetCapture && softIssues.includes(qualityResult.score.issue)) {
           console.log(`Vision layout complaint on tweet capture for ${url} — deferring to PDF content analysis`);
           qualityResult = { ...qualityResult, passed: true };
+        } else if (qualityResult.score.issue === 'blank_page') {
+          // The screenshot is viewport-only, so a dark hero reads as "solid
+          // black" — openai.com's GPT-6 Astra launch page (black body
+          // background) scored 0 three times while its PDF held 31K chars over
+          // 20 pages (2026-09-03). A blank verdict is only credible when the
+          // PDF itself has no text: defer to content analysis, which still
+          // fails truly empty renders and bot-challenge shells.
+          const blankCheck = await analyzePdfContent(result.pdfBuffer, { sourceUrl: originalUrl || url });
+          if (blankCheck.passed && blankCheck.charCount >= BLANK_VERDICT_OVERRIDE_MIN_CHARS) {
+            console.log(JSON.stringify({
+              event: 'vision_blank_overridden',
+              url,
+              charCount: blankCheck.charCount,
+              pageCount: blankCheck.pageCount,
+              timestamp: new Date().toISOString(),
+            }));
+            qualityResult = { ...qualityResult, passed: true };
+          } else {
+            await saveDebugPdf(job.id!, result.pdfBuffer);
+            throw new Error(`blank_page: ${qualityResult.score.reasoning}`);
+          }
         } else {
           // Save debug PDF before failing (so user can inspect the actual output)
           await saveDebugPdf(job.id!, result.pdfBuffer);
