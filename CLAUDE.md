@@ -50,6 +50,9 @@ Manual captures (Chrome extension → `/api/manual-capture`) must never be overw
 
 Verify changes here against a spread of live URLs, not just the target site — the phase runs on every capture. A before/after harness comparing page count + extracted chars is the cheap way to prove a change is surgical.
 
+### Print-Stylesheet Chrome Rules Need a Content Guard (`src/converters/pdf.ts`)
+The injected print stylesheet hides modals/CTAs/paywall prompts with **substring class selectors** (`[class*="modal"]`, `[class*="gate"]`, `[class*="paywall"]`…). Those match the class *attribute*, and Tailwind arbitrary variants put whole selectors inside class names — axios.com's story container carries `[&:has(#piano-container…)~.gated-content]:hidden` and `[&_#paywall-fallback-container]:relative`, so two of those rules hid the entire article body and a 921-char headline+hero shell saved as "successful" (2026-09-03). No selector tweak survives the next such class; instead a **content guard** runs after injection: any matched element that is hidden yet holds ≥500 chars and ≥30% of the page's pre-injection text is restored with inline `!important` (`CONTENT_GUARDED_HIDE_SELECTORS` mirrors the CSS groups — keep them in sync). Verified: Axios 921→3,757 chars; Dwarkesh/Ars controls byte-identical. **`CAPTURE_PHASE_TRACE=1`** logs body text length at each in-page phase boundary (navigation → scroll/privacy → overlay removal → un-pin → pre-print) — the way this was bisected; run a one-off `convertUrlToPDF` in the container with it set rather than redeploying.
+
 ### Paywall/Bot-Wall Rescue Tiers (order matters)
 When a primary capture fails on an access wall, two rescue tiers run in order:
 1. **smry.ai reader view** (`src/converters/smry-rescue.ts`, needs `SMRY_API_KEY` — paid Pro, 500 fresh extractions/day, repeat URLs are free cache hits). One authenticated API call; rescues bot-walled free content (Reuters, Fortune), metered paywalls, gift links, and sites that connection-reset our IP (its candidate set adds `timeout`/`navigation_error` on top of the archive tier's). Renders a clean reader PDF (`ViaSmry` Info Dict field, creator `pdf-zipper-v2-smry`).
@@ -240,6 +243,7 @@ curl -X POST http://localhost:3002/api/jobs \
 | `VIDEO_COMPRESS_KBPS_PER_MEGAPIXEL` | 2000 | Bitrate allowance before re-encode kicks in (plus 1200 kbps absolute floor) |
 | `VIDEO_COMPRESS_CRF` | 26 | x264 quality for the re-encode (lower = bigger/better) |
 | `SMRY_API_KEY` | — | smry.ai Pro key; enables the reader-view rescue tier (empty = off). Key lives in `.env` only |
+| `CAPTURE_PHASE_TRACE` | — | `1` logs visible-text length at each converter phase boundary; for bisecting body-loss captures via a one-off `convertUrlToPDF` in the container |
 | `FIX_ENABLED` | false | Enable AI self-healing |
 | `CLAUDE_CLI_PATH` | `claude` | Path to Claude CLI |
 | `DISCORD_WEBHOOK_URL` | — | Job event notifications |

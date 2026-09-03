@@ -527,6 +527,45 @@ function getPrivacyFilterTerms(): string[] {
  * Apply privacy filtering by hiding elements containing specified terms
  * Runs in-page JS to find and hide matching elements
  */
+/**
+ * The substring class selectors from the injected print stylesheet's
+ * modal/overlay and CTA/paywall hide groups (keep in sync with that CSS).
+ * They match on the class ATTRIBUTE, and Tailwind arbitrary variants put
+ * selectors inside class names: axios.com's story container carries
+ * `[&:has(#piano-container…)~.gated-content]:hidden` and
+ * `[&_#paywall-fallback-container]:relative`, so `[class*="gate"]` and
+ * `[class*="paywall"]` hid the entire article body (2026-09-03: 921-char
+ * "successful" capture of headline + hero, story gone). No string tweak
+ * survives the next such class, so after injection a content guard restores
+ * any matched element that holds the bulk of the page's text — a CTA never
+ * does, an article body always does.
+ */
+const CONTENT_GUARDED_HIDE_SELECTORS = [
+  '[class*="modal"]', '[class*="overlay"]', '[class*="popup"]', '[class*="dialog"]',
+  '[class*="pc-modal"]', '[class*="gh-post-upgrade"]', '[class*="subscribe-form"]',
+  '[class*="outpost-cta"]', '[class*="outpost-subscribe"]', '[class*="outpost-slideup"]',
+  '[class*="outpost-pub-container"]', '[class*="footer-cta"]', '[class*="beehiiv"]',
+  '[class*="paywall"]', '[class*="subscribe-prompt"]', '[class*="subscription-prompt"]',
+  '[class*="newsletter-signup"]', '[class*="email-signup"]', '[class*="signup-modal"]',
+  '[class*="signup-overlay"]', '[class*="gate"]', '[class*="Gate"]',
+];
+
+/**
+ * Phase tracer (CAPTURE_PHASE_TRACE=1): logs the page's visible text length
+ * at each in-page phase boundary, so a capture that prints a body-less shell
+ * can be bisected to the phase that dropped the body (axios.com, 2026-09-03:
+ * the DOM held the full story at navigation but the PDF kept only sidebars).
+ * Off by default — one extra evaluate per boundary when on.
+ */
+const PHASE_TRACE = process.env.CAPTURE_PHASE_TRACE === '1';
+async function tracePhase(page: import('playwright').Page, url: string, label: string): Promise<void> {
+  if (!PHASE_TRACE) return;
+  const len = await page
+    .evaluate(() => (document.body?.innerText || '').replace(/\s+/g, ' ').trim().length)
+    .catch(() => -1);
+  console.log(`[phase-trace] ${label}: bodyText=${len} ${url}`);
+}
+
 async function applyPrivacyFilter(page: import('playwright').Page): Promise<void> {
   const terms = getPrivacyFilterTerms();
   if (terms.length === 0) return;
@@ -946,6 +985,8 @@ export async function convertUrlToPDF(
       console.warn('Nitter image rewrite failed:', err instanceof Error ? err.message : err);
     }
 
+    await tracePhase(page, url, 'after-navigation');
+
     // Scroll through page to trigger any remaining lazy-loaded content
     try {
       await Promise.race([
@@ -1146,6 +1187,8 @@ export async function convertUrlToPDF(
     } catch (privacyError) {
       console.warn(`Privacy filter failed for ${url}: ${privacyError instanceof Error ? privacyError.message : privacyError}`);
     }
+
+    await tracePhase(page, url, 'after-scroll-and-privacy-filter');
 
     // Remove ALL fixed/sticky positioned elements (cookie banners, newsletter popups,
     // dark/light toggles, floating share buttons, chat widgets, "back to top", etc.)
@@ -1399,6 +1442,7 @@ export async function convertUrlToPDF(
     // and pinned purely by height, so it misses them. This is self-gating: it
     // only fires when an element's content overflows its pinned box, which never
     // happens on a normally-flowing article — so other sites pay nothing.
+    await tracePhase(page, url, 'after-overlay-removal');
     try {
       const unpinned = await page.evaluate(() => {
         const vh = window.innerHeight;
@@ -1708,6 +1752,12 @@ export async function convertUrlToPDF(
     // Preserve screen formatting (not print CSS)
     await page.emulateMedia({ media: 'screen' });
 
+    // Visible text before the chrome rules apply — the content guard after the
+    // injection measures hidden candidates against this, not the post-hide remainder.
+    const preStyleTextLen: number = await page
+      .evaluate(() => (document.body?.innerText || '').replace(/\s+/g, ' ').trim().length)
+      .catch(() => 0);
+
     // Add print-friendly styles (wrapped in try-catch for SPAs that might not have body ready)
     try {
     // 1. Preserve colors in print
@@ -1962,6 +2012,35 @@ export async function convertUrlToPDF(
       console.warn(`Style injection failed for ${url}: ${styleError instanceof Error ? styleError.message : styleError}`);
     }
 
+    // Content guard for the substring hide rules (see CONTENT_GUARDED_HIDE_SELECTORS):
+    // an element they hid that holds the bulk of the page's text is the article,
+    // not chrome — restore it. Inline !important outranks the stylesheet's.
+    try {
+      const restored = await page.evaluate(
+        ({ selectors, pageLen }: { selectors: string; pageLen: number }) => {
+          let count = 0;
+          for (const el of document.querySelectorAll(selectors)) {
+            const h = el as HTMLElement;
+            if (['BODY', 'HTML', 'MAIN', 'ARTICLE'].includes(h.tagName)) continue;
+            if (window.getComputedStyle(h).display !== 'none') continue;
+            // innerText of an unrendered element falls back to its text content.
+            const len = (h.innerText || h.textContent || '').replace(/\s+/g, ' ').trim().length;
+            if (len < 500 || len < pageLen * 0.3) continue;
+            h.style.setProperty('display', 'revert', 'important');
+            h.style.setProperty('visibility', 'visible', 'important');
+            count++;
+          }
+          return count;
+        },
+        { selectors: CONTENT_GUARDED_HIDE_SELECTORS.join(', '), pageLen: preStyleTextLen }
+      );
+      if (restored > 0) {
+        console.log(`Restored ${restored} content-bearing element(s) hidden by chrome rules from ${url}`);
+      }
+    } catch (guardError) {
+      console.warn(`Content guard failed for ${url}: ${guardError instanceof Error ? guardError.message : guardError}`);
+    }
+
     // archive.today snapshot chrome removal: when capturing an archive.is/.today
     // snapshot (paywall fallback), strip archive's own UI so the PDF is just the
     // archived article — #HEADER is the top toolbar ("archive.today webpage
@@ -2029,6 +2108,8 @@ export async function convertUrlToPDF(
     } catch {
       // Title extraction failed, continue without it
     }
+
+    await tracePhase(page, url, 'pre-print');
 
     // Generate PDF with scale to fit wide content on A4
     // 1280px viewport → 595pt A4 width requires ~0.8 scale
