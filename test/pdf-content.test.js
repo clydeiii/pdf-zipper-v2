@@ -545,3 +545,37 @@ test('prose "the latest in a string of" does NOT trip the Latest-in widget marke
   const r = await analyzePdfContent(pdf);
   assert.equal(r.passed, true);
 });
+
+/**
+ * Helper: PDF with given text spread over pages and a size-inflating noise
+ * attachment of the given KB (stand-in for a hero image), so the file lands
+ * at a chosen size BELOW the 500KB large-PDF threshold.
+ */
+async function createMidSizePdf(text, pageCount, noiseKb) {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const chunk = Math.ceil(text.length / pageCount);
+  for (let i = 0; i < pageCount; i++) {
+    const page = doc.addPage([612, 792]);
+    page.drawText(text.slice(i * chunk, (i + 1) * chunk).slice(0, 2000), { x: 50, y: 700, size: 10, font, maxWidth: 500 });
+  }
+  await doc.attach(pseudoRandomNoise(noiseKb * 1024), 'hero.bin', { mimeType: 'application/octet-stream' });
+  return Buffer.from(await doc.save());
+}
+
+test('catches a body-less SPA shell under the 500KB line by text density (axios shape)', async () => {
+  // Real case 2026-09-03: 921 chars, 2 pages, 458KB, 2 chars/KB — headline,
+  // byline and hero only; the story body never rendered. Slipped under
+  // LARGE_PDF_THRESHOLD and past Check 3's per-page bypass.
+  const pdf = await createMidSizePdf(filler(920), 2, 420);
+  assert.ok(pdf.length > 250 * 1024 && pdf.length < 500 * 1024, `fixture size ${pdf.length}`);
+  const result = await analyzePdfContent(pdf, 'https://www.axios.com/2026/09/02/some-story');
+  assert.equal(result.passed, false);
+  assert.match(result.reason, /truncated/i);
+});
+
+test('a self-declared short read with the same density still passes', async () => {
+  const pdf = await createMidSizePdf('1 min read. ' + filler(900), 2, 420);
+  const result = await analyzePdfContent(pdf, 'https://example.com/brief-announcement');
+  assert.equal(result.passed, true, `read-time badge should exempt; got: ${result.reason}`);
+});

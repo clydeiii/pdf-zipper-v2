@@ -66,6 +66,7 @@ Tunable bypasses in pdf-content.ts — don't re-introduce false positives that w
 - `SUFFICIENT_CHARS_BYPASS_RATIO = 5000` — skip ratio check on image-heavy articles
 - `MIN_CHARS_PER_PAGE_BYPASS = 400` — skip ratio check on short announcement pages
 - Error-page regex only runs when content < 2000 chars (real 404s don't have long bodies)
+- Check 2 ("large PDF, little text" — the SPA-shell catch) also fires below the 500KB size line when density is extreme (`SHELL_DENSITY_CHARS_PER_KB = 3`, PDF ≥ 250KB): an axios.com shell at 921 chars / 458KB / 2 chars/KB passed as "successful" on 2026-09-03 because it sat under the size line and Check 3's per-page bypass (460 chars/page) doesn't look at density. All of Check 2's exemptions (read-time badge, social post, read-time-consistent body) still apply. Rejecting a shell is cheap — smry rescues Axios reliably — while a wrong pass archives a headline with no story
 - Pass-through PDFs (arxiv, direct .pdf) skip quality checks but **do** run metadata enrichment
 
 ### Video Compression (`src/media/video-compress.ts`)

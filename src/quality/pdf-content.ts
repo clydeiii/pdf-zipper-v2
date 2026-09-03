@@ -63,6 +63,18 @@ const LARGE_PDF_THRESHOLD = 500 * 1024; // 500KB
 const MIN_CHARS_FOR_LARGE_PDF = 1500;
 
 /**
+ * Below LARGE_PDF_THRESHOLD the same body-less shell still slips through when
+ * its hero image is modest: an axios.com SPA shell printed 921 chars in a
+ * 458KB PDF (2 chars/KB) on 2026-09-03 — under the size line, so Check 2
+ * never ran, and Check 3's per-page bypass (460 chars/page) waved it past.
+ * Text density is the size-independent shell signature, so Check 2 also fires
+ * on a mid-size PDF whose density sits far below the Check 3 floor. The size
+ * floor keeps small one-image pages out of it.
+ */
+const SHELL_DENSITY_CHARS_PER_KB = 3;
+const SHELL_DENSITY_MIN_PDF_BYTES = 250 * 1024;
+
+/**
  * Chars-per-KB ratio threshold
  * Normal article PDFs have 50-200+ chars/KB
  * Image-heavy truncated PDFs might have <10 chars/KB
@@ -756,10 +768,12 @@ export async function analyzePdfContent(
     // the same badge extracts far fewer chars than advertised and is caught
     // by the reading-time mismatch check (0.95) before reaching this one.
     const readTimeConsistent = bodyMatchesAdvertisedReadTime(normalizedText, charCount);
+    const shellDensity =
+      pdfSize > SHELL_DENSITY_MIN_PDF_BYTES && charCount / (pdfSize / 1024) < SHELL_DENSITY_CHARS_PER_KB;
     if (
       !options.lenient &&
       !homepage &&
-      pdfSize > LARGE_PDF_THRESHOLD &&
+      (pdfSize > LARGE_PDF_THRESHOLD || shellDensity) &&
       charCount < MIN_CHARS_FOR_LARGE_PDF &&
       !legitimatelyShort &&
       !readTimeConsistent
