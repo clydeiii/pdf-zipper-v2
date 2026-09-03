@@ -2018,11 +2018,18 @@ export async function convertUrlToPDF(
     try {
       const restored = await page.evaluate(
         ({ selectors, pageLen }: { selectors: string; pageLen: number }) => {
-          let count = 0;
+          const restoredDesc: string[] = [];
           // Never-rendered elements carry text too (tomshardware.com ships
           // its paywall library in <script class="paywall-preact-lib">, 329K
           // chars of JS) — only rendering elements are candidates.
           const skip = new Set(['BODY', 'HTML', 'MAIN', 'ARTICLE', 'SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'LINK', 'META', 'HEAD']);
+          // Text volume alone can't tell an article from a widget: thenewstack.io's
+          // hidden subscribe modal holds 46% of the page text in 2 long paragraphs,
+          // its CookieYes preferences modal 75% in 8. What a widget always has and
+          // an article body never does: form controls (toggles, inputs, vote
+          // buttons) and consent/subscribe naming. Article bodies also run to
+          // several long paragraphs (axios: 15).
+          const WIDGET_CLASS = /cookie|consent|cky|onetrust|gdpr|subscribe|newsletter|voxpop|poll/i;
           for (const el of document.querySelectorAll(selectors)) {
             const h = el as HTMLElement;
             if (skip.has(h.tagName)) continue;
@@ -2030,16 +2037,30 @@ export async function convertUrlToPDF(
             // innerText of an unrendered element falls back to its text content.
             const len = (h.innerText || h.textContent || '').replace(/\s+/g, ' ').trim().length;
             if (len < 500 || len < pageLen * 0.3) continue;
-            h.style.setProperty('display', 'revert', 'important');
-            h.style.setProperty('visibility', 'visible', 'important');
-            count++;
+            if (WIDGET_CLASS.test(h.getAttribute('class') || '')) continue;
+            if (h.querySelector('input, select, textarea, [role="switch"], [role="checkbox"], form')) continue;
+            let longParagraphs = 0;
+            for (const p of h.querySelectorAll('p, blockquote')) {
+              if ((p.textContent || '').trim().length >= 120 && ++longParagraphs >= 3) break;
+            }
+            if (longParagraphs < 3) continue;
+            // The element was visible before injection (its text counted toward
+            // pageLen), so every ancestor hidden now was hidden by our own rules —
+            // a wrapper that fails the widget tests (axios's story container holds
+            // a newsletter form) still has to reappear for the body inside to show.
+            for (let n: HTMLElement | null = h; n && n !== document.body; n = n.parentElement) {
+              if (window.getComputedStyle(n).display !== 'none') continue;
+              n.style.setProperty('display', 'revert', 'important');
+              n.style.setProperty('visibility', 'visible', 'important');
+            }
+            restoredDesc.push(`${h.tagName.toLowerCase()}.${(h.getAttribute('class') || '').slice(0, 30)} ${len}ch`);
           }
-          return count;
+          return restoredDesc;
         },
         { selectors: CONTENT_GUARDED_HIDE_SELECTORS.join(', '), pageLen: preStyleTextLen }
       );
-      if (restored > 0) {
-        console.log(`Restored ${restored} content-bearing element(s) hidden by chrome rules from ${url}`);
+      if (restored.length > 0) {
+        console.log(`Restored ${restored.length} content-bearing element(s) hidden by chrome rules from ${url}: ${restored.join('; ')}`);
       }
     } catch (guardError) {
       console.warn(`Content guard failed for ${url}: ${guardError instanceof Error ? guardError.message : guardError}`);
