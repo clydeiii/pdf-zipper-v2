@@ -2019,9 +2019,13 @@ export async function convertUrlToPDF(
       const restored = await page.evaluate(
         ({ selectors, pageLen }: { selectors: string; pageLen: number }) => {
           let count = 0;
+          // Never-rendered elements carry text too (tomshardware.com ships
+          // its paywall library in <script class="paywall-preact-lib">, 329K
+          // chars of JS) — only rendering elements are candidates.
+          const skip = new Set(['BODY', 'HTML', 'MAIN', 'ARTICLE', 'SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'LINK', 'META', 'HEAD']);
           for (const el of document.querySelectorAll(selectors)) {
             const h = el as HTMLElement;
-            if (['BODY', 'HTML', 'MAIN', 'ARTICLE'].includes(h.tagName)) continue;
+            if (skip.has(h.tagName)) continue;
             if (window.getComputedStyle(h).display !== 'none') continue;
             // innerText of an unrendered element falls back to its text content.
             const len = (h.innerText || h.textContent || '').replace(/\s+/g, ' ').trim().length;
