@@ -25,6 +25,19 @@ test('the gate that judges the batch is never editable by it', () => {
   assert.equal(isAllowedFixPath('src/workers/fix.worker.ts'), false);
 });
 
+test('held-out fidelity data, evaluator, entry points and boundary cannot be edited by a batch', () => {
+  for (const file of [
+    'src/quality/fidelity-harness.ts', 'src/quality/fidelity-future.ts',
+    'src/scripts/fidelity-check.ts', 'src/scripts/fidelity-seed.ts',
+    'scripts/fidelity-check.ts', 'scripts/fidelity-seed.ts',
+    'src/fix/boundary.ts', 'test/fidelity-harness.test.js', 'test/fix-boundary.test.js',
+    'data/fidelity-corpus/manifest.json', 'data/fidelity-corpus/case.pdf',
+    '/data/fidelity-corpus/manifest.json', 'src/quality/fidelity-corpus/manifest.json',
+    'src/quality/../scripts/fidelity-check.ts', 'src/quality/./fidelity-harness.ts',
+    'src/quality//fidelity-harness.ts', 'src/quality/../../data/fidelity-corpus/manifest.json',
+  ]) assert.equal(isAllowedFixPath(file), false, file);
+});
+
 test('everything else is outside the boundary and gets reverted', () => {
   for (const p of [
     'package.json',
