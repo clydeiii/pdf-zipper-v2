@@ -15,6 +15,9 @@ pdf-zipper-v2 is an async URL-to-PDF conversion system:
 
 These are non-obvious rules that aren't derivable from a quick code read. Respect them when making changes.
 
+### Automated Article Markdown (`src/converters/markdown-extract.ts`)
+Playwright captures extract Readability + Turndown Markdown after the image wait, **before privacy/overlay/un-pin/print mutations**, and the main worker embeds it in the PDF Info Dict for the airgapped KB consumer. **Always clone the document** — Readability mutates its input, and the live page still has to print. Skip X/Twitter (including X Articles), the configured Nitter host, archive.today snapshots, HF Spaces, Datawrapper embeds, non-readerable pages and extractions under 500 chars. Errors/timeouts are non-fatal (8s budget). `MARKDOWN_MAX_CHARS` defaults to 200,000; cap at a paragraph boundary, retain the full `MarkdownLength`, and set `MarkdownTruncated=true` only when capped. If no paragraph fits, embed nothing. `Readability*` is additive context, never an override of enrichment. Images remain remote links; the files list must keep reading named metadata fields rather than decoding Markdown.
+
 ### URL Handling
 - **Canonical URL** (`url`): normalized for deduplication (strips `www.`, normalizes protocol)
 - **Original URL** (`originalUrl`): preserved for archive.is (archive.is treats `www.` and non-`www` as different)

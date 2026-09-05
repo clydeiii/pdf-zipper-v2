@@ -1,175 +1,25 @@
-# Self-Healing Upgrade Note
+# Automated article Markdown implementation
 
-## Plan Summary
-The upgrade focused on four goals:
+Implemented in the `feat/markdown` worktree. No commit, deployment, extension edits, fix-worker edits or data-directory writes.
 
-1. Improve reliability by reducing repeated dead-end retries (captcha/paywall/auth walls).
-2. Make autonomous fixing safer and more controllable with explicit gates.
-3. Increase diagnosis diversity by alternating between Claude and Codex.
-4. Improve operator control and visibility with API/UI batch status and apply flow.
+## Judgment calls
 
-## Why This Plan
-The original system could diagnose/fix issues, but it had key operational gaps:
+- Extraction runs immediately after the image wait in `convertUrlToPDF`, before privacy filtering and print cleanup. Readability receives `document.cloneNode(true)`. The successful result carries capped Markdown, original length, truncation state, version provenance and Readability metadata; only the main Playwright worker save embeds them.
+- The URL gate checks both the requested URL and `page.url()` after redirects/frame hops. The configured Nitter hostname is supplied explicitly to keep the decision helper testable. All X/Twitter URLs, including X Articles, are excluded in accordance with the requested `isTwitterUrl` gate. Archive aliases, HF Spaces shells/direct frames and Datawrapper wrappers/CDN embeds are excluded; ordinary HF/Datawrapper blog articles remain eligible.
+- The 500-character floor applies to the full Markdown extraction, before capping. Length means JavaScript UTF-16 code units, matching the manual path. Invalid, zero, negative or fractional `MARKDOWN_MAX_CHARS` values fall back to 200,000.
+- Truncation retains the last complete paragraph within the cap and avoids blank lines inside fenced code. If no paragraph fits, extraction is skipped (`no_paragraph_within_cap`) rather than storing an empty value or splitting a paragraph. No ellipsis or other invented text is appended. `MarkdownTruncated` is the Info Dict string `true`, absent on uncapped results.
+- Readability metadata is allowlisted as `ReadabilityByline`, `ReadabilitySiteName`, `ReadabilityPublishedTime`, `ReadabilityExcerpt` and `ReadabilityLang`. No enrichment field names are copied, so enrichment remains authoritative.
+- Turndown uses ATX headings, fenced code and the GFM tables plugin. Headerless tables retain HTML via the plugin rather than losing their structure. URL normalization runs on private DOM nodes before the built-in Turndown rules, preserving normal escaping, titles and alt text. The document clone also receives a base URL from `page.url()`. Images remain remote URLs, as documented in the consumer contract.
+- The eight-second Node-side `Promise.race` covers script injection and evaluation, including CDP setup. On timeout, `Runtime.terminateExecution` also interrupts synchronous renderer JavaScript; otherwise the timeout could return while printing remained blocked. Errors, script/CSP failures and timeouts produce one structured skip log and return no extraction.
+- Browser scripts and versions are read once at module initialization using package resolution. Load failure is cached as a non-fatal skip condition. Vendor globals are scoped away from page libraries. Dependencies are Readability 0.6.0, Turndown 7.2.4 and turndown-plugin-gfm 1.0.2. The inspected primary Dockerfile actually uses `npm install` and then `npm prune --omit=dev`; all four browser scripts ship in these production packages, so no Dockerfile change is needed.
+- npm replaced the original node_modules symlink during installation. The four newly required package directories (including Turndown's transitive Domino package) were copied into the authorized shared node_modules and the worktree symlink was restored. Package manifests/lockfile changes are confined to this worktree.
 
-1. No durable retry-memory beyond short dedupe windows.
-2. No provider abstraction (single CLI path and brittle output parsing).
-3. No hard verification gate before considering an auto-fix "ready".
-4. Weak security boundaries on some mutating routes and path checks.
+## Validation and limitations
 
-The chosen design addresses those issues with:
-
-1. A persistent ledger and cooldown policy.
-2. Round-robin provider orchestration with structured output validation.
-3. Build + replay verification gate.
-4. Optional API token auth and stronger path containment checks.
-
-## Implemented Changes
-
-### 1) Retry Memory + Trigger Policy
-Added persistent fix-ledger and classification/policy modules:
-
-- `src/fix/failure.ts`
-- `src/fix/trigger-policy.ts`
-- `src/fix/ledger.ts`
-
-What this adds:
-
-1. Failure class normalization (paywall/captcha/auth/bot/timeout/etc.).
-2. Class-based cooldowns.
-3. Outcome tracking (`queued`, `skipped`, `ready`, `applied`, etc.).
-4. Append-only event log for fix actions.
-
-### 2) Fix Queue Storage Improvements
-Updated pending/history handling in:
-
-- `src/fix/pending.ts`
-
-Key changes:
-
-1. Atomic consume of pending fixes (`MULTI` read+clear pattern).
-2. Pending URL dedupe set.
-3. Cooldown-aware enqueue with manual override support.
-4. Batch detail storage and retrieval (`getFixBatch`, `updateFixBatch`).
-
-### 3) Provider Abstraction + Round-Robin
-Added provider runtime layer:
-
-- `src/fix/providers.ts`
-
-What it does:
-
-1. Round-robin primary provider selection between Claude and Codex.
-2. Optional forced provider override.
-3. Structured JSON extraction/validation from provider output.
-4. Single fallback attempt to alternate provider.
-
-### 4) Gated Fix Worker
-Replaced fix worker implementation:
-
-- `src/workers/fix.worker.ts`
-
-New behavior:
-
-1. Consume pending contexts.
-2. Diagnose via provider runtime.
-3. Prepare fix branch/commit for changed allowed files.
-4. Verification gate:
-   - build (`npm run build --silent`)
-   - targeted replay conversion jobs
-5. Persist gate status (`diagnosed/patched/verifying/ready/rejected/applied/failed`).
-6. Update ledger outcomes and send richer notifications.
-
-### 5) Selective Auto-Fix Trigger From Conversion Failures
-Updated:
-
-- `src/workers/conversion.worker.ts`
-
-Behavior:
-
-1. On final failure, classify error.
-2. Auto-submit only if policy allows.
-3. Skip known hard blockers automatically, while still allowing manual submission.
-4. Record ledger outcomes for skipped/queued items.
-
-### 6) Weekly Index for Efficiency
-Added:
-
-- `src/jobs/week-index.ts`
-
-Integrated into:
-
-- `src/workers/conversion.worker.ts`
-- `src/api/routes/files.ts`
-
-Benefit:
-
-1. Week failure/rerun endpoints now use Redis weekly indexes first.
-2. Fallback to full queue scans for older historical jobs.
-
-### 7) Security Hardening
-Added:
-
-- `src/api/auth.ts`
-- `src/utils/paths.ts`
-
-Applied to mutating routes:
-
-- `src/api/routes/files.ts`
-- `src/api/routes/fix.ts`
-- `src/api/routes/cookies.ts`
-
-Path safety improvements applied to:
-
-- `src/api/routes/download.ts`
-- `src/api/routes/serve.ts`
-- `src/api/routes/files.ts`
-- `src/api/routes/fix.ts`
-
-### 8) Fix APIs + UI Operator Flow
-Updated backend:
-
-- `src/api/routes/fix.ts`
-
-New endpoints:
-
-1. `GET /api/fix/ledger?url=...`
-2. `GET /api/fix/batches/:batchId`
-3. `POST /api/fix/batches/:batchId/reverify`
-4. `POST /api/fix/batches/:batchId/apply`
-
-Updated frontend:
-
-- `public/index.html`
-- `public/app.js`
-- `public/style.css`
-
-UI additions:
-
-1. Fix Center modal for batch visibility.
-2. Apply/reverify actions.
-3. API token prompt and local storage for authenticated mutating calls.
-
-### 9) Config Surface Updates
-Updated:
-
-- `src/config/env.ts`
-- `.env.example`
-- `docker-compose.yml`
-
-New env controls include:
-
-1. `CODEX_CLI_PATH`
-2. `CODEX_CLI_ARGS`
-3. `API_AUTH_TOKEN`
-4. `FIX_PROVIDER_TIMEOUT_MINUTES`
-
-## Risks / Follow-Ups
-
-1. No comprehensive integration tests yet for full provider+git+replay flow.
-2. Provider CLIs must be configured correctly in runtime environment.
-3. Build/test gate is currently build + replay; lint/static policy can be added later.
-
-## Current Validation
-
-1. TypeScript build passes (`npm run build --silent`).
-2. Unit tests added for classification/trigger/path modules (see `test/`).
+- `npm run build` and `npm test` pass (395 tests).
+- `test/markdown-extraction.test.js` imports compiled modules and exercises URL gates, cap boundaries including fenced code/Unicode, environment parsing, version tags, optional/additive Info Dict fields, extraction failures/timeouts, logging and the shared Turndown HTML fixture. No jsdom or linkedom dependency was added. Readability results are tested indirectly in the Node suite.
+- A separate offline Chromium fixture smoke test exercised the actual injected Readability/browser Turndown builds: 2,629 Markdown characters, author/language metadata, code/table/absolute-link preservation, byte-identical live body HTML before/after extraction, and a successful 31,609-byte PDF. It used the already installed Chromium headless shell; no live publisher requests or data writes.
+- A separate real Chromium infinite-loop test returned a timeout skip after 8,002ms, then read the original body and printed an 8,262-byte PDF successfully. The unit test also checks the eight-second deadline and execution-interrupt command.
+- A 200,000-character Unicode Markdown field round-trips as valid PDF hex-string UTF-16 bytes. pdf-lib 1.17.1's `decodeText()` itself overflows its call stack at this size because its decoder spreads the whole character array into `String.fromCodePoint`; consumers using that method need a chunked or streaming UTF-16 decoder. The test uses `TextDecoder('utf-16be')` on the stored bytes. This does not affect writing the field or the files list.
+- The large-field test executes the actual compiled `loadPdfFileInfo` function in isolation, verifies its normal metadata output, and asserts it never requests any `Markdown*` field. Production files API code is unchanged. The existing public HTML-escaping tests pass.
+- No live-site fidelity survey or Docker image build was performed. Readability remains heuristic; its non-readerable decision or an unavailable extraction leaves the rendered PDF as the downstream fallback.

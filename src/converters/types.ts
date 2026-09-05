@@ -1,3 +1,5 @@
+import type { MarkdownExtraction } from './markdown-extract.js';
+
 /**
  * PDF conversion options
  */
@@ -56,6 +58,8 @@ export interface PDFSuccessResult {
    * capture fails content analysis.
    */
   embeddedPdfUrl?: string;
+  /** Reader-view text and metadata captured before print mutations. */
+  markdownExtraction?: MarkdownExtraction;
 }
 
 /**

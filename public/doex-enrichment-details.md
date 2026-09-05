@@ -7,7 +7,7 @@ these files — can reconstruct sources, timelines, and relationships without
 guessing. Everything needed is shipped inside the bundle; there is no external
 state to fetch.
 
-Last updated: 2026-09-04.
+Last updated: 2026-09-05.
 
 ## Bundle layout
 
@@ -52,7 +52,25 @@ Read with any PDF metadata reader (`pdfinfo`, pypdf, pdf-lib). Custom fields:
 | `QualityCheck` | Which save-time quality gates actually judged this file. Playwright captures: `vision+content` — the vision model scored the rendered page AND the text analysis passed; `vision-overridden+content` — the vision model objected but the text analysis overrode it (tweet layouts, dark hero pages); `content-only:vision-unavailable` — the vision host was unreachable, so only text analysis ran; `content-only:no-screenshot` — the screenshot itself failed. Rescue tiers: `content-only:smry-reader`, `content-only:archive-snapshot` (text gates only, no vision). No gate at all: `none:passthrough` (direct/arXiv/embedded PDF, taken as published), `none:karakeep-asset` (uploaded file), `none:scroll-harvest` (ChatGPT share, rendered by us from harvested text), `external:chrome-extension` (printed by the user's own browser, saved unconditionally). Absent on files captured before 2026-09-04. A `content-only`/`none`/`external` value does not mean a worse file — it means a less-verified one |
 | `QualityScore` | The vision model's 0–100 score, when it ran. Informational — the gate was 50 |
 | `CaptureScope` | Manual captures: `page`, `reader`, or `selection` |
-| `Markdown` / `MarkdownLength` / `MarkdownExtractedBy` | Manual captures: a clean Readability/Turndown markdown extraction of the article, embedded alongside the rendered PDF |
+| `Markdown` | Manual captures and eligible automated Playwright articles: clean reader-view Markdown embedded alongside the rendered PDF. Deterministic Readability/Turndown extraction, with no LLM rewriting. Headings, quotes, code blocks and tables are retained (GFM tables, or HTML for tables without a heading row) |
+| `MarkdownLength` | Character count of the **full extraction before any cap**, measured as JavaScript UTF-16 code units. May exceed the embedded Markdown length |
+| `MarkdownExtractedBy` | Automated articles: `readability+turndown@server r<version> t<version>` (e.g. `readability+turndown@server r0.6.0 t7.2.4`). Manual captures retain `readability+turndown` or `selection+turndown` |
+| `MarkdownTruncated` | String `true` only when automated Markdown was capped at a paragraph boundary (`MARKDOWN_MAX_CHARS`, default 200,000). Absent otherwise; the full extraction length remains in `MarkdownLength` |
+| `ReadabilityByline` / `ReadabilitySiteName` / `ReadabilityPublishedTime` / `ReadabilityExcerpt` / `ReadabilityLang` | Optional source metadata from Readability on manual and automated article captures. Additive context; these do **not** override `Author`, `Publication`, `PublishDate`, `Summary` or `Language` |
+
+Automated Markdown is captured after lazy content and images settle, before
+print cleanup, from a clone of the page. Tweet captures never carry this
+extraction; automated X Articles/Nitter, archive.today snapshots, HF Spaces
+frames and Datawrapper embeds also skip it. Non-readerable pages, extractions
+under 500 chars, failures, an eight-second timeout, or a first paragraph too
+large for the cap leave all these extraction fields absent. Direct PDF
+downloads and separate rescue/transcript converters do not gain this field.
+Absence means no extraction was stored, not that the rendered PDF is empty.
+
+Article links and image links in automated Markdown use absolute URLs.
+**Images remain Markdown links to remote URLs; image bytes are not embedded
+in the Markdown.** They cannot be fetched on the airgapped network; use the
+rendered PDF for the captured images.
 
 AI-detection caveats — these fields are evidence, not verdicts:
 - **Absence means "not measured", never "human-written".** Only Substack posts
