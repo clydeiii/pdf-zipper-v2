@@ -28,7 +28,7 @@ const REPORT_KEY = 'coverage:last-report';
 export const COVERAGE_STATUSES = ['archived', 'partial', 'pending', 'stale_pending', 'failed', 'manual', 'manual_missing', 'skipped', 'unaccounted'] as const;
 export type CoverageStatus = typeof COVERAGE_STATUSES[number];
 export type ArtifactRole = 'pdf' | 'mp4' | 'mp3' | 'transcript';
-export type MatchKind = 'exact' | 'no-query' | 'youtube-id' | 'substack';
+export type MatchKind = 'exact' | 'no-query' | 'youtube-id' | 'substack' | 'substack-slug';
 export interface UrlKey { key: string; matchedBy: MatchKind }
 export interface CoverageArtifact { file: string; role: ArtifactRole; keys: UrlKey[] }
 export interface CoverageJob {
@@ -89,9 +89,28 @@ export function coverageUrlKeys(url: string, candidates: string[] = []): UrlKey[
     const normalized = normalizeBookmarkUrl(url);
     const youtube = canonicalizeYouTubeUrl(url);
     const raw = new URL(url);
-    const shareTweet = /(^|\.)(x|twitter)\.com$/.test(raw.hostname) && (raw.searchParams.has('s') || raw.searchParams.has('t'));
+    const isTweet = /(^|\.)(x|twitter)\.com$/.test(raw.hostname);
+    const shareTweet = isTweet && (raw.searchParams.has('s') || raw.searchParams.has('t'));
     add(normalized, youtube && url !== youtube ? 'youtube-id' : shareTweet ? 'no-query' : 'exact');
+    // X handles are case-insensitive and the same tweet arrives as
+    // x.com/Reuters/… from the web and x.com/reuters/… from the iOS share
+    // sheet; the status id is the identity. Lowercase the path on both sides.
+    if (isTweet) {
+      try {
+        const lowered = new URL(normalized);
+        lowered.pathname = lowered.pathname.toLowerCase();
+        add(lowered.toString(), 'exact');
+      } catch { /* normalized is a URL already */ }
+    }
     if (youtube) add(youtube, 'youtube-id');
+    // Weakest key: the post slug alone for `/p/<slug>` paths. Substack's
+    // pub→custom-domain mapping needs a network lookup the audit may not get
+    // (429 after a restart burst); slugs are long and distinctive, and a
+    // cross-publication collision surfaces as a shared artifact with this
+    // match kind, never as a silent loss.
+    const slugPost = parseSubstackPubPost(url);
+    const slug = slugPost?.slug ?? raw.pathname.match(/^\/p\/([^/?#]+)\/?$/)?.[1];
+    if (slug && slug.length >= 8) add(`substack-slug:${slug.toLowerCase()}`, 'substack-slug');
     for (const candidate of candidates) {
       add(normalizeBookmarkUrl(candidate), parseSubstackPubPost(url) || parseSubstackPubPost(candidate) ? 'substack' : 'exact');
     }
@@ -99,14 +118,20 @@ export function coverageUrlKeys(url: string, candidates: string[] = []): UrlKey[
     // of one Apple show. These query parameters ARE identity, not share tokens.
     if (!youtube && !(isApplePodcastsUrl(url) && raw.searchParams.has('i'))) {
       const stripped = stripUrlQuery(normalized);
-      if (stripped) add(normalizeBookmarkUrl(stripped), 'no-query');
+      if (stripped) {
+        const key = normalizeBookmarkUrl(stripped);
+        add(key, 'no-query');
+        if (isTweet) {
+          try { const l = new URL(key); l.pathname = l.pathname.toLowerCase(); add(l.toString(), 'no-query'); } catch { /* ignore */ }
+        }
+      }
     }
   } catch { /* Malformed provenance cannot prove a capture exists. */ }
   return [...keys].map(([key, matchedBy]) => ({ key, matchedBy }));
 }
 
 export function matchCoverageKeys(left: UrlKey[], right: UrlKey[]): MatchKind | null {
-  const priority: MatchKind[] = ['exact', 'youtube-id', 'substack', 'no-query'];
+  const priority: MatchKind[] = ['exact', 'youtube-id', 'substack', 'no-query', 'substack-slug'];
   let best: MatchKind | null = null;
   for (const a of left) for (const b of right) {
     if (a.key !== b.key) continue;
@@ -151,6 +176,13 @@ export function classifyBookmark(bookmark: CoverageBookmark, lookups: CoverageLo
   const manual = lookups.source === 'manual';
   if (!missing.length) return finish(manual ? 'manual' : 'archived', `${manual ? 'Manual capture; ' : ''}found ${result.foundRoles.join(', ')}`);
   if (manual && !result.artifacts.length) return finish('manual_missing', 'Manual-source URL has no artifact');
+  // A manual capture of a VIDEO-ONLY page (YouTube/Vimeo) is a PDF on
+  // purpose — the user printed it with the extension — not a missing MP4.
+  // A manual tweet PDF with its video still missing stays `partial`: the
+  // media job may yet run, and its absence is real.
+  if (manual && result.foundRoles.includes('pdf') && !result.expectedRoles.includes('pdf')) {
+    return finish('manual', `Manual capture; found ${result.foundRoles.join(', ')} (an automated capture would expect ${result.expectedRoles.join(', ')})`);
+  }
 
   const jobs = lookups.jobs.filter(job => matchCoverageKeys(lookups.keys, job.keys));
   const pending = jobs.filter(job => ['waiting', 'active', 'delayed'].includes(job.state) &&
@@ -452,16 +484,19 @@ export async function runCoverageAudit(windowDays = configuredNumber('COVERAGE_A
     const dedup = new BookmarkDeduplicator(redis);
     const candidateCache = new Map<string, Promise<string[]>>();
     const candidatesFor = (url: string) => {
-      if (!candidateCache.has(url)) candidateCache.set(url, dedup.dedupCandidates(url, { allowNetwork: false }).catch(error => { logError(errors, 'URL candidates', error); return []; }));
+      if (!candidateCache.has(url)) candidateCache.set(url, dedup.dedupCandidates(url, { allowNetwork: false, allowSubstackResolve: true }).catch(error => { logError(errors, 'URL candidates', error); return []; }));
       return candidateCache.get(url)!;
     };
     const keysFor: KeyResolver = async url => coverageUrlKeys(url, await candidatesFor(url));
     const base = process.env.KARAKEEP_API_BASE!.replace(/\/$/, '');
-    const [bookmarks, artifacts, jobs, retries] = await Promise.all([
+    const [bookmarks, artifacts, jobs, retries, rechecks] = await Promise.all([
       fetchCoverageBookmarks(base, process.env.KARAKEEP_API_TOKEN!, cutoff, errors),
       scanCoverageArtifacts(path.resolve(env.DATA_DIR), redis, keysFor, errors),
       readQueueJobs(keysFor, errors),
       boundedRead(redis.hgetall('feed:video-retries:karakeep')).catch(error => { logError(errors, 'video retries', error); return {} as Record<string, string>; }),
+      // Tweets waiting for a late Karakeep video asset (poll-worker's
+      // media re-check) are pending MP4 work, not partial captures.
+      boundedRead(redis.hgetall('feed:media-recheck:karakeep')).catch(error => { logError(errors, 'media recheck', error); return {} as Record<string, string>; }),
     ]);
     const artifactsFor = indexByKeys(artifacts);
     const jobsFor = indexByKeys(jobs);
@@ -503,7 +538,7 @@ export async function runCoverageAudit(windowDays = configuredNumber('COVERAGE_A
           }
         }
         return classifyBookmark(input, { now: startedAt.getTime(), keys, artifacts: artifactsFor(keys), jobs: jobsFor(keys),
-          source, videoRetry: Object.hasOwn(retries, bookmark.id),
+          source, videoRetry: Object.hasOwn(retries, bookmark.id) || Object.hasOwn(rechecks, bookmark.id),
           mediaRebookmark: seenBefore && guidSeen && Boolean(input.item && (input.item.enclosure || expectedCoverageRoles(input.item).includes('mp4') || isApplePodcastsUrl(input.url))),
         });
       } catch (error) {

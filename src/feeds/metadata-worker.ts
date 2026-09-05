@@ -1,6 +1,6 @@
 import { Worker, Job } from 'bullmq';
 import { workerConnection } from '../config/redis.js';
-import { METADATA_QUEUE_NAME, mediaCollectionQueue } from './monitor.js';
+import { METADATA_QUEUE_NAME, mediaCollectionQueue, mediaJobId } from './monitor.js';
 import { extractUrlMetadata } from '../urls/metadata.js';
 import { conversionQueue } from '../queues/conversion.queue.js';
 import { podcastQueue } from '../podcasts/podcast.queue.js';
@@ -10,16 +10,6 @@ import type { ConversionJobData } from '../jobs/types.js';
 import type { PodcastJobData } from '../podcasts/types.js';
 import type { BookmarkItem } from './types.js';
 import type { MediaItem } from '../media/types.js';
-
-/**
- * Sanitize a URL for use as a BullMQ job ID
- * BullMQ doesn't allow colons in job IDs
- */
-function sanitizeJobId(prefix: string, url: string): string {
-  // Replace problematic characters with underscores
-  const sanitized = url.replace(/[^a-zA-Z0-9_-]/g, '_');
-  return `${prefix}-${sanitized}`;
-}
 
 /**
  * Type guard to check if a BookmarkItem has media enclosure
@@ -113,7 +103,7 @@ function createMetadataWorker(): Worker<MetadataJobData> {
       await mediaCollectionQueue.add(
         `media-${enrichedItem.guid}`,
         { item: enrichedItem },
-        { jobId: sanitizeJobId('media', enrichedItem.canonicalUrl) }  // Dedupe by canonical URL
+        { jobId: mediaJobId(enrichedItem.canonicalUrl) }  // Dedupe by canonical URL
       );
 
       console.log(JSON.stringify({

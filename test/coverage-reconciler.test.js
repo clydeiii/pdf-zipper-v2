@@ -138,7 +138,11 @@ test('Substack candidate sets bridge open spelling and custom domains in either 
   assert.equal(result.status, 'archived');
   assert.deepEqual(result.matchedBy, ['substack']);
   assert.equal(classify(bookmark(custom), { artifacts: [{ ...artifact(open), keys }] }).status, 'archived');
-  assert.equal(classify(bookmark(open), { keys, artifacts: [artifact('https://unrelated.test/p/some-post')] }).status, 'unaccounted');
+  // An unrelated host with the SAME long slug is accepted only as the weakest
+  // match kind, and says so — that is the price of surviving a Substack 429.
+  const slugOnly = classify(bookmark(open), { keys, artifacts: [artifact('https://unrelated.test/p/some-post')] });
+  assert.equal(slugOnly.status, 'archived');
+  assert.deepEqual(slugOnly.matchedBy, ['substack-slug']);
 });
 
 test('audit candidate mode never fetches or poisons declaration cache; reuses live mappings', async () => {
@@ -341,4 +345,33 @@ test('either persistence destination survives the other failing and records inco
     assert.equal(latest.complete, false);
     assert.match(latest.errors[0], /file persistence/);
   });
+});
+
+test('tweet keys are case-insensitive on the handle (x.com/Reuters vs x.com/reuters?s=12)', async () => {
+  const { coverageUrlKeys, matchCoverageKeys } = await import('../dist/maintenance/coverage-reconciler.js');
+  const bookmark = coverageUrlKeys('https://x.com/Reuters/status/2095823526125252742');
+  const artifact = coverageUrlKeys('https://x.com/reuters/status/2095823526125252742?s=12');
+  // Share-token spellings are reported as 'no-query' matches by design; what matters is that they match at all.
+  assert.ok(matchCoverageKeys(bookmark, artifact), 'case-different handles must still match');
+});
+
+test('a manual capture with any artifact is "manual", never "partial"', async () => {
+  const { classifyBookmark, coverageUrlKeys } = await import('../dist/maintenance/coverage-reconciler.js');
+  const url = 'https://www.youtube.com/watch?v=67M02CnIbtk';
+  const keys = coverageUrlKeys(url);
+  const item = { url, canonicalUrl: url, guid: 'g', source: 'karakeep', bookmarkedAt: '2026-09-03T03:11:09.000Z' };
+  const out = classifyBookmark({ bookmarkId: 'g', createdAt: item.bookmarkedAt, url, item }, {
+    now: Date.now(), keys, jobs: [], source: 'manual',
+    artifacts: [{ file: 'media/2026-W36/pdfs/youtube.com-watch.pdf', role: 'pdf', keys }],
+  });
+  assert.equal(out.status, 'manual');
+});
+
+test('an unresolved Substack share still matches its custom-domain capture by slug (weakest kind)', async () => {
+  const { coverageUrlKeys, matchCoverageKeys } = await import('../dist/maintenance/coverage-reconciler.js');
+  const bookmark = coverageUrlKeys('https://open.substack.com/pub/aistopwatch/p/shutting-it-down?r=9qonx&utm_medium=ios', ['https://aistopwatch.substack.com/p/shutting-it-down']);
+  const artifact = coverageUrlKeys('https://aistop.watch/p/shutting-it-down');
+  assert.equal(matchCoverageKeys(bookmark, artifact), 'substack-slug');
+  // Short slugs are too collision-prone to count.
+  assert.equal(matchCoverageKeys(coverageUrlKeys('https://open.substack.com/pub/a/p/astra'), coverageUrlKeys('https://b.example/p/astra')), null);
 });

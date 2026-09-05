@@ -42,9 +42,14 @@ export class BookmarkDeduplicator {
    * `allowNetwork: false` reuses static rules and existing canonical caches
    * for coverage audits without visiting any bookmarked site.
    */
-  public async dedupCandidates(url: string, options: { allowNetwork?: boolean } = {}): Promise<string[]> {
+  public async dedupCandidates(url: string, options: { allowNetwork?: boolean; allowSubstackResolve?: boolean } = {}): Promise<string[]> {
     const allowNetwork = options.allowNetwork !== false;
-    const substack = await substackDedupCandidates(url, allowNetwork ? undefined : async () => null).catch(() => null);
+    // Substack pub→custom-domain resolution is one cached HEAD against
+    // substack.com (not the bookmarked page); the coverage audit allows it
+    // because without it every iOS-shared Substack post whose publication
+    // wasn't resolved since the last restart reads as "unaccounted".
+    const allowSubstack = allowNetwork || options.allowSubstackResolve === true;
+    const substack = await substackDedupCandidates(url, allowSubstack ? undefined : async () => null).catch(() => null);
     if (substack) return substack;
     const candidates = new Set([normalizeBookmarkUrl(url)]);
     const declared = await declaredCanonicalCandidates(url, undefined, allowNetwork).catch(() => null);

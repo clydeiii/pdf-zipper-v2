@@ -1,3 +1,5 @@
+import { mediaJobId } from './media-recheck.js';
+export { mediaJobId };
 import { Queue } from 'bullmq';
 import { queueConnection } from '../config/redis.js';
 import { env } from '../config/env.js';

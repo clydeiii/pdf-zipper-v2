@@ -80,8 +80,23 @@ async function resolveViaRedirect(pubHost: string): Promise<string | null> {
   }
 }
 
-/** pubHost → canonical host. In-memory only: one HEAD per pub per process. */
+/** pubHost → canonical host. In-memory, plus an optional persistent store. */
 const pubHostCache = new Map<string, string>();
+/**
+ * Persistent pub→host store (Redis in production, wired at startup by
+ * index.ts). The in-memory map alone is lost on every deploy, and each
+ * restart used to cost one HEAD per publication — and made every
+ * iOS-shared Substack post from an unresolved pub read as "unaccounted" in
+ * the coverage audit until its publication was seen again.
+ */
+export interface PubHostStore {
+  get(pubHost: string): Promise<string | null>;
+  set(pubHost: string, canonicalHost: string): Promise<void>;
+}
+let pubHostStore: PubHostStore | null = null;
+export function setPubHostStore(store: PubHostStore | null): void {
+  pubHostStore = store;
+}
 
 /**
  * Dedup key candidates for a Substack-hosted post URL, or null when the URL
@@ -96,11 +111,22 @@ export async function substackDedupCandidates(
   if (!post) return null;
 
   let canonicalHost = pubHostCache.get(post.pubHost);
+  if (!canonicalHost && pubHostStore) {
+    const stored = await pubHostStore.get(post.pubHost).catch(() => null);
+    if (stored) {
+      canonicalHost = stored;
+      pubHostCache.set(post.pubHost, stored);
+    }
+  }
   if (!canonicalHost) {
+    // A failed resolution (Substack 429s a burst of HEADs) is NOT cached: the
+    // next URL from the same pub retries. The persistent store is what keeps
+    // bursts rare — a pub is resolved once per lifetime, not once per deploy.
     const resolved = await resolver(post.pubHost);
     if (resolved) {
       canonicalHost = resolved;
       pubHostCache.set(post.pubHost, resolved);
+      if (pubHostStore) await pubHostStore.set(post.pubHost, resolved).catch(() => { /* best-effort */ });
     }
   }
 

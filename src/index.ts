@@ -58,6 +58,7 @@ import { startDependencyMonitor, stopDependencyMonitor } from './maintenance/dep
 // Nightly bookmark→artifact reconciliation (what did we bookmark that produced no file?)
 import { startCoverageReconciler, stopCoverageReconciler } from './maintenance/coverage-reconciler.js';
 import { closeTwitterDb } from './twitter/db.js';
+import { setPubHostStore } from './urls/substack-canonical.js';
 import type { Server } from 'node:http';
 
 console.log(`Environment: ${env.NODE_ENV}`);
@@ -198,6 +199,13 @@ async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
 
   // Start nightly coverage reconciliation (23:00: every Karakeep bookmark → file / pending / failed / unaccounted)
   startCoverageReconciler();
+
+  // Substack pub→custom-domain mapping survives restarts (Redis hash), so
+  // neither the poller nor the coverage audit re-resolves known publications.
+  setPubHostStore({
+    get: async (pub) => queueConnection.hget('substack:pubhost', pub),
+    set: async (pub, host) => { await queueConnection.hset('substack:pubhost', pub, host); },
+  });
 
   // Start the 2-hourly enrichment repair sweep (re-enrich PDFs saved bare)
   startEnrichmentRepair();

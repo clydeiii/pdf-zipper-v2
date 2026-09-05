@@ -130,3 +130,17 @@ test('stripSubstackShareParams removes only share params on post-shaped paths', 
   assert.equal(stripSubstackShareParams('https://example.com/blog?r=meaningful'), null);
   assert.equal(stripSubstackShareParams('https://www.dwarkesh.com/p/x'), null);
 });
+
+test('pub→host store: a stored mapping is used without resolving, and a fresh resolution is persisted', async () => {
+  const { substackDedupCandidates, setPubHostStore } = await import('../dist/urls/substack-canonical.js');
+  const stored = new Map([['storedpub.substack.com', 'stored.example']]);
+  const writes = [];
+  setPubHostStore({ get: async (p) => stored.get(p) ?? null, set: async (p, h) => { writes.push([p, h]); } });
+  let resolverCalls = 0;
+  const fromStore = await substackDedupCandidates('https://open.substack.com/pub/storedpub/p/some-long-post-slug', async () => { resolverCalls++; return null; });
+  assert.ok(fromStore.includes('https://stored.example/p/some-long-post-slug'));
+  assert.equal(resolverCalls, 0, 'store hit skips the network');
+  await substackDedupCandidates('https://open.substack.com/pub/freshpub/p/another-long-post-slug', async () => 'fresh.example');
+  assert.deepEqual(writes, [['freshpub.substack.com', 'fresh.example']]);
+  setPubHostStore(null);
+});

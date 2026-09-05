@@ -116,6 +116,27 @@ export async function embedVttInMp4(mp4Path: string, vttContent: string): Promis
  * Write metadata AND embed subtitles in a single ffmpeg pass
  * More efficient than two separate passes
  */
+/**
+ * The dedup cross-reference (`also_bookmarked_as`) is written by a DIFFERENT
+ * job than the one enriching the canonical file: a quote-tweet's media job
+ * can find the original's freshly downloaded mp4 and tag it while the
+ * original's own job is still transcribing. Every later metadata write must
+ * carry that tag forward, or the KB loses the "these tweets share this video"
+ * edge it is documented to rely on (observed 2026-09-05: x.com/tbpn's video
+ * had no trace of the heidykhlaaf bookmark that deduped onto it).
+ */
+async function existingCrossRef(mp4Path: string): Promise<string | undefined> {
+  try {
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'error', '-show_entries', 'format_tags=also_bookmarked_as', '-of', 'json', mp4Path,
+    ], { timeout: 30000 });
+    const value = (JSON.parse(stdout).format?.tags ?? {}).also_bookmarked_as as string | undefined;
+    return value && value.trim() ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function enrichVideoFile(
   mp4Path: string,
   meta: VideoMetadataOptions,
@@ -125,6 +146,10 @@ export async function enrichVideoFile(
   let vttPath: string | undefined;
 
   try {
+    if (!meta.custom?.also_bookmarked_as) {
+      const kept = await existingCrossRef(mp4Path);
+      if (kept) meta = { ...meta, custom: { ...(meta.custom ?? {}), also_bookmarked_as: kept } };
+    }
     const args = ['-i', mp4Path];
 
     // Add VTT input if provided

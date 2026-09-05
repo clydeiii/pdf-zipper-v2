@@ -3,10 +3,30 @@ import { workerConnection, createConnection } from '../config/redis.js';
 import { parseMatterFeed, parseKarakeepFeed } from './parsers/index.js';
 import { fetchKarakeepBookmarkItem } from './parsers/karakeep.js';
 import { BookmarkDeduplicator } from '../urls/deduplicator.js';
-import { FEED_QUEUE_NAME, metadataQueue } from './monitor.js';
+import { FEED_QUEUE_NAME, metadataQueue, mediaCollectionQueue } from './monitor.js';
+import { mediaJobId, needsMediaRecheck } from './media-recheck.js';
 import type { FeedPollJobData, MetadataJobData } from './monitor.js';
 import type { BookmarkItem, FeedCacheState } from './types.js';
+import type { MediaItem } from '../media/types.js';
 import { isApplePodcastsUrl } from '../podcasts/apple.js';
+
+/**
+ * Late-video re-check for tweets. Karakeep runs yt-dlp on an x.com bookmark
+ * AFTER the bookmark appears in the API, and the feed poll usually sees the
+ * bookmark first: the tweet is processed as a plain link (PDF only) and the
+ * video asset that lands a minute later is never collected. YouTube has a
+ * wait loop for exactly this (the item is left GUID-unseen); tweets can't
+ * use it because their PDF must not wait. Instead the GUID is parked here,
+ * and each poll looks it up by id for up to MAX_MEDIA_RECHECKS polls; the
+ * moment the asset exists the media job is queued directly. The coverage
+ * audit found 6 such tweets in 2 days on 2026-09-05 (Karakeep held the
+ * video, the library had only the PDF).
+ */
+const MEDIA_RECHECK_PREFIX = 'feed:media-recheck:';
+const MAX_MEDIA_RECHECKS = Number(process.env.FEED_MEDIA_MAX_RECHECKS) || 8; // ≈40 min at 5-min polls
+
+
+interface MediaRecheckEntry { url: string; attempts: number; since: string }
 
 // Redis keys for feed cache state
 const FEED_CACHE_PREFIX = 'feed:cache:';
@@ -90,6 +110,43 @@ function createFeedPollWorker(): Worker<FeedPollJobData> {
             result.items.push(lookup);
           }
         }
+        // Tweets parked for a late video asset: look each up by id; queue the
+        // media job as soon as Karakeep has the asset, give up after the cap.
+        const recheckKey = `${MEDIA_RECHECK_PREFIX}${source}`;
+        for (const [guid, raw] of Object.entries(await redis.hgetall(recheckKey))) {
+          let entry: MediaRecheckEntry;
+          try { entry = JSON.parse(raw); } catch { await redis.hdel(recheckKey, guid); continue; }
+          const lookup = await fetchKarakeepBookmarkItem(feedUrl, guid);
+          if (lookup === 'gone') {
+            await redis.hdel(recheckKey, guid);
+            continue;
+          }
+          if (lookup && lookup.enclosure && lookup.mediaType === 'video') {
+            await mediaCollectionQueue.add(
+              `media-${guid}`,
+              { item: lookup as MediaItem },
+              { jobId: mediaJobId(lookup.canonicalUrl) }
+            );
+            await redis.hdel(recheckKey, guid);
+            console.log(JSON.stringify({
+              event: 'late_video_asset_collected',
+              url: lookup.url,
+              guid,
+              attempts: entry.attempts + 1,
+              since: entry.since,
+              timestamp: new Date().toISOString(),
+            }));
+            continue;
+          }
+          entry.attempts += 1;
+          if (entry.attempts >= MAX_MEDIA_RECHECKS) {
+            // No asset after the whole window: a text/image tweet, or a video
+            // Karakeep couldn't fetch. Either way nothing more to collect.
+            await redis.hdel(recheckKey, guid);
+          } else {
+            await redis.hset(recheckKey, guid, JSON.stringify(entry));
+          }
+        }
       } else {
         result = await parseMatterFeed(feedUrl, cache);
       }
@@ -166,6 +223,13 @@ function createFeedPollWorker(): Worker<FeedPollJobData> {
         // since we're now proceeding normally (enclosure arrived).
         await deduplicator.markGuidSeen(source, item.guid);
         await redis.hdel(`${VIDEO_RETRY_PREFIX}${source}`, item.guid);
+
+        // Tweet with no video asset (yet): park it for the late-video re-check
+        // while the PDF capture proceeds normally below.
+        if (source === 'karakeep' && needsMediaRecheck(item)) {
+          const entry: MediaRecheckEntry = { url: item.url, attempts: 0, since: new Date().toISOString() };
+          await redis.hset(`${MEDIA_RECHECK_PREFIX}${source}`, item.guid, JSON.stringify(entry));
+        }
 
         // URL already seen (cross-feed dedup). Media items stay hard-skipped:
         // re-downloading a video/podcast was the exact duplicate-work problem
