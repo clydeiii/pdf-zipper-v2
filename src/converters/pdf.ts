@@ -1294,12 +1294,33 @@ export async function convertUrlToPDF(
           const textLen = (el.innerText || '').trim().length;
           return textLen >= 500 && pageTextLen > 0 && textLen >= pageTextLen * 0.3;
         };
+        // Sticky TABLE PARTS and captions are content, not chrome. Sites pin a
+        // table's header row and label column (position:sticky on `thead th`,
+        // `th[scope=row]`, a "pinned" first data column) so they stay visible
+        // while the table scrolls; the un-pinned cells are ordinary. Removing
+        // them prints a grid of bare numbers: anthropic.com's benchmark table
+        // lost its header row (model names), every row label (benchmark
+        // names) AND the pinned Fable 5.1 column (2026-09-05). Sticky
+        // headings/captions (section headers in long lists) are content too.
+        // These go back into normal flow instead of being removed.
+        const PINNED_CONTENT_TAGS = new Set(['table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'caption',
+          'figcaption', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'dt', 'summary']);
+        const isPinnedContent = (el: Element): boolean =>
+          PINNED_CONTENT_TAGS.has(el.tagName.toLowerCase()) || el.closest('table') !== null;
+        let unstuck = 0;
         const allElements = document.querySelectorAll('*');
         for (const el of allElements) {
           const style = window.getComputedStyle(el);
           const position = style.position;
           if (position === 'fixed' || position === 'sticky') {
             const tag = el.tagName.toLowerCase();
+            if (position === 'sticky' && isPinnedContent(el)) {
+              const h = el as HTMLElement;
+              h.style.setProperty('position', 'static', 'important');
+              for (const side of ['top', 'left', 'right', 'bottom']) h.style.setProperty(side, 'auto', 'important');
+              unstuck++;
+              continue;
+            }
             if (tag !== 'html' && tag !== 'body' && isContentBearing(el as HTMLElement)) {
               const h = el as HTMLElement;
               h.style.setProperty('position', 'static', 'important');
@@ -1468,10 +1489,10 @@ export async function convertUrlToPDF(
           }
         }
 
-        return count;
+        return { removed: count, unstuck };
       }, { accept: CONSENT_ACCEPT_RE.source, notAccept: CONSENT_NOT_ACCEPT_RE.source });
-      if (removed > 0) {
-        console.log(`Removed ${removed} fixed/sticky/overlay elements from ${url}`);
+      if (removed.removed > 0 || removed.unstuck > 0) {
+        console.log(`Removed ${removed.removed} fixed/sticky/overlay elements${removed.unstuck ? `, returned ${removed.unstuck} sticky table/caption element(s) to flow` : ''} from ${url}`);
       }
     } catch {
       // Element removal failed, CSS fallback will handle it

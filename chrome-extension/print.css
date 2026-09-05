@@ -12,6 +12,16 @@
   visibility: hidden !important;
 }
 
+/* Sticky table headers/label columns and captions are content: keep them, in normal flow. */
+.pdfzipper-unstick,
+.pdfzipper-capturing .pdfzipper-unstick {
+  position: static !important;
+  top: auto !important;
+  left: auto !important;
+  right: auto !important;
+  bottom: auto !important;
+}
+
 /* Clean page background during capture */
 .pdfzipper-capturing,
 .pdfzipper-capturing body {

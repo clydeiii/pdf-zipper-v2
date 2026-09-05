@@ -140,9 +140,24 @@
   // Floating element cleanup (marks for CSS to hide)
   // ============================================================
   const markedElements = [];
+  const unstuckElements = [];
+
+  // Sticky TABLE PARTS and captions are content, not chrome: sites pin a
+  // table's header row and label column (position:sticky on thead th /
+  // th[scope=row] / a "pinned" first data column) so they stay visible while
+  // the table scrolls. Hiding them prints a grid of bare numbers —
+  // anthropic.com's benchmark table lost its header row, every row label and
+  // the pinned Fable 5.1 column (v3.3.4, 2026-09-05). Return them to normal
+  // flow instead (same rule as the server-side Playwright converter).
+  const PINNED_CONTENT_TAGS = new Set(['TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'TH', 'TD', 'CAPTION',
+    'FIGCAPTION', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'DT', 'SUMMARY']);
+  function isPinnedContent(el) {
+    return PINNED_CONTENT_TAGS.has(el.tagName) || el.closest('table') !== null;
+  }
 
   function hideFloatingElements() {
     markedElements.length = 0;
+    unstuckElements.length = 0;
     const viewportArea = window.innerWidth * window.innerHeight;
     const all = document.querySelectorAll('*');
     for (let i = 0; i < all.length; i++) {
@@ -157,6 +172,11 @@
         const rect = el.getBoundingClientRect();
         // Skip full-page wrappers (some sites wrap everything in position:fixed for scroll effects)
         if (rect.width * rect.height > viewportArea * 0.75) continue;
+        if (style.position === 'sticky' && isPinnedContent(el)) {
+          el.classList.add('pdfzipper-unstick');
+          unstuckElements.push(el);
+          continue;
+        }
         el.classList.add('pdfzipper-hide');
         markedElements.push(el);
         continue;
@@ -211,6 +231,10 @@
       el.classList.remove('pdfzipper-hide');
     }
     markedElements.length = 0;
+    for (const el of unstuckElements) {
+      el.classList.remove('pdfzipper-unstick');
+    }
+    unstuckElements.length = 0;
   }
 
   // ============================================================
