@@ -35,7 +35,7 @@ import type { Browser } from 'playwright';
 import { env } from '../config/env.js';
 import { ensureLiveBrowser } from '../utils/browser-health.js';
 import { analyzePdfContent } from '../quality/pdf-content.js';
-import { parseSubstackPostUrl } from '../substack/pangram.js';
+import { substackPreviewShortfall, checkSubstackPreview } from '../quality/substack-preview.js';
 
 const SMRY_EXTRACT_ENDPOINT = 'https://api.smry.ai/v1/articles/extract';
 
@@ -205,52 +205,10 @@ ${paragraphs}
 </body></html>`;
 }
 
-/**
- * Word-count shortfall check for Substack paid posts. Returns a human-readable
- * rejection reason, or null when the extraction is acceptable.
- *
- * Confirmed false accept (2026-08-21, groundlevel-ai.com): a paid post's free
- * preview ended on a natural closing sentence, read as complete prose, cleared
- * every text gate, and archived ~430 of 1,150 words as a success. No text
- * heuristic can catch a preview that ends cleanly — but Substack's own post
- * API reports `audience` and the TRUE `wordcount`, so compare against that.
- * Exported for testing.
- */
-export function substackPreviewShortfall(
-  extractedText: string,
-  audience: string | undefined,
-  wordcount: number | undefined
-): string | null {
-  if (!audience || audience === 'everyone') return null;
-  if (typeof wordcount !== 'number' || wordcount <= 0) return null;
-  const extractedWords = extractedText.split(/\s+/).filter(Boolean).length;
-  // 0.9: extraction drops captions/embeds legitimately; a real preview is
-  // typically well under half the full post.
-  if (extractedWords < wordcount * 0.9) {
-    return `Substack ${audience} post: extracted ${extractedWords} of ${wordcount} words — paid-preview only`;
-  }
-  return null;
-}
-
-/** Fetch-side wrapper for the preview gate. Null on any API failure — the
- * check is an extra guard, never a reason to block a rescue on a network blip. */
-async function checkSubstackPreview(originalUrl: string, extractedText: string): Promise<string | null> {
-  const target = parseSubstackPostUrl(originalUrl);
-  if (!target) return null;
-  try {
-    const res = await fetch(`${target.apiBase}/api/v1/posts/${encodeURIComponent(target.slug)}`, {
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(15_000),
-      redirect: 'follow',
-    });
-    if (!res.ok) return null;
-    const post = (await res.json()) as { audience?: string; wordcount?: number } | null;
-    if (!post || typeof post !== 'object') return null;
-    return substackPreviewShortfall(extractedText, post.audience, post.wordcount);
-  } catch {
-    return null;
-  }
-}
+/** The Substack preview gate lives in src/quality/substack-preview.ts (shared
+ * with the primary capture path and replayed by the fidelity corpus); the
+ * re-export keeps this module's tests and callers stable. */
+export { substackPreviewShortfall, checkSubstackPreview };
 
 /**
  * Attempt a reader-view rescue of `originalUrl` via smry.ai.

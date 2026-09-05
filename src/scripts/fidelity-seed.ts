@@ -8,9 +8,16 @@ import { Redis } from 'ioredis';
 import { classifyFailureMessage } from '../fix/failure.js';
 import { readInfoDictField } from '../utils/pdf-info-dict.js';
 import { fidelityCorpusDir, loadFidelityManifest, type FidelityEntry, type FidelityManifest } from '../quality/fidelity-harness.js';
+import { fetchSubstackPostFacts, type SubstackPostFacts } from '../quality/substack-preview.js';
+import { stripSubstackShareParams } from '../urls/substack-canonical.js';
 
 type Candidate = { sourceFile: string; entry: FidelityEntry };
 type JobReader = { hmget(key: string, ...fields: string[]): Promise<(string | null)[]> };
+type SubstackFactsReader = (url: string) => Promise<SubstackPostFacts | null>;
+/** The sharer's personal `r=` reader token must never be persisted, not even in a review manifest. */
+const cleanSourceUrl = (url: string) => stripSubstackShareParams(url) ?? url;
+/** Retries of one job differ only in counts ("726 characters" vs "727"); digits are not case identity. */
+const caseKeyOf = (sourceUrl: string, reason: string) => `${sourceUrl}|${reason.replace(/\d+/g, '#')}`;
 const sha256 = (buffer: Buffer) => createHash('sha256').update(buffer).digest('hex');
 const log = (event: string, fields: Record<string, unknown>) => console.log(JSON.stringify({ event, ...fields }));
 
@@ -67,8 +74,8 @@ function spread(candidates: Candidate[], limit: number): Candidate[] {
 }
 
 export async function seedFidelityCorpus({
-  sourceDataDir, corpusDir, redis, rejectLimit = 60, acceptLimit = 60,
-}: { sourceDataDir: string; corpusDir: string; redis: JobReader; rejectLimit?: number; acceptLimit?: number }) {
+  sourceDataDir, corpusDir, redis, rejectLimit = 60, acceptLimit = 60, substackFacts = fetchSubstackPostFacts,
+}: { sourceDataDir: string; corpusDir: string; redis: JobReader; rejectLimit?: number; acceptLimit?: number; substackFacts?: SubstackFactsReader }) {
   for (const limit of [rejectLimit, acceptLimit]) if (!Number.isInteger(limit) || limit < 0) throw new Error('Seed limits must be non-negative integers');
   // Only this directory is writable. Originals are read into buffers and never opened for writing.
   await mkdir(corpusDir, { recursive: true });
@@ -87,20 +94,23 @@ export async function seedFidelityCorpus({
     const knownIds = new Set(manifest.entries.map(entry => entry.id));
     // Retries of one failed job write byte-different debug PDFs with the same
     // content; one (url, reason) pair is one case, not six.
-    const knownCases = new Set(manifest.entries.map(entry => `${entry.sourceUrl}|${entry.reason}`));
+    const knownCases = new Set(manifest.entries.map(entry => caseKeyOf(entry.sourceUrl, entry.reason)));
     const candidates: Candidate[] = [];
     const addedAt = new Date().toISOString();
-    const propose = (buffer: Buffer, sourceFile: string, entry: Omit<FidelityEntry, 'id' | 'sha256' | 'file' | 'addedAt' | 'reviewed'>) => {
+    const propose = async (buffer: Buffer, sourceFile: string, entry: Omit<FidelityEntry, 'id' | 'sha256' | 'file' | 'addedAt' | 'reviewed'>) => {
       const hash = sha256(buffer);
       if (knownHashes.has(hash)) return;
-      const caseKey = `${entry.sourceUrl}|${entry.reason}`;
+      const caseKey = caseKeyOf(entry.sourceUrl, entry.reason);
       if (knownCases.has(caseKey)) return;
       knownCases.add(caseKey);
       const id = `${entry.expected}-${hash.slice(0, 20)}`;
       if (knownIds.has(id)) throw new Error(`Candidate ID collision: ${id}`);
       knownIds.add(id);
       knownHashes.add(hash);
-      candidates.push({ sourceFile, entry: { ...entry, id, sha256: hash, file: `${id}.pdf`, addedAt, reviewed: false } });
+      // Substack posts carry the API's audience + true wordcount so the harness
+      // can replay the preview gate offline. Best-effort; absent on any failure.
+      const substackPost = (await substackFacts(entry.sourceUrl).catch(() => null)) ?? undefined;
+      candidates.push({ sourceFile, entry: { ...entry, ...(substackPost ? { substackPost } : {}), id, sha256: hash, file: `${id}.pdf`, addedAt, reviewed: false } });
     };
     if (manifest.entries.filter(entry => entry.expected === 'reject').length < rejectLimit) {
       for (const sourceFile of await files(path.join(sourceRoot, 'debug'))) {
@@ -110,9 +120,9 @@ export async function seedFidelityCorpus({
         try {
           const data = JSON.parse(rawData);
           if (typeof data.url !== 'string' || !data.url) continue;
-          const sourceUrl = typeof data.originalUrl === 'string' && data.originalUrl ? data.originalUrl : data.url;
+          const sourceUrl = cleanSourceUrl(typeof data.originalUrl === 'string' && data.originalUrl ? data.originalUrl : data.url);
           const lenient = isTweet(sourceUrl);
-          propose(await readFile(sourceFile), sourceFile, {
+          await propose(await readFile(sourceFile), sourceFile, {
             sourceUrl, expected: 'reject', class: rejectClass(reason), reason,
             options: { sourceUrl, lenient },
             notes: `Proposed from debug/${jobId}.pdf; Redis failureClass=${classifyFailureMessage(reason)}. ${lenient ? 'Tweet leniency inferred from status URL; confirm this is not an X Article. ' : ''}Failure history is evidence, not a reviewed verdict. Inspect PDF and call options.`,
@@ -134,8 +144,9 @@ export async function seedFidelityCorpus({
           const rawScore = readInfoDictField(pdf, 'QualityScore');
           const score = rawScore?.trim() ? Number(rawScore) : NaN;
           if (check !== 'vision+content' || !Number.isFinite(score) || score < 85 || score > 100) continue;
-          const sourceUrl = pdf.getSubject();
-          if (!sourceUrl || !/^https?:\/\//i.test(sourceUrl)) continue;
+          const rawSubject = pdf.getSubject();
+          if (!rawSubject || !/^https?:\/\//i.test(rawSubject)) continue;
+          const sourceUrl = cleanSourceUrl(rawSubject);
           const name = path.basename(sourceFile);
           const tweet = /^(x\.com|twitter\.com)-.*-post-/.test(name);
           const host = hostname(sourceUrl);
@@ -146,7 +157,7 @@ export async function seedFidelityCorpus({
           const kind = tweet ? 'tweet' : passthrough ? 'passthrough' :
             /(^|\.)substack\.com$/.test(host) || /substack/i.test(result.extractedText || '') ? 'substack' :
             result.charCount < 2500 ? 'short_announcement' : result.charsPerKb < 10 ? 'image_heavy' : 'article';
-          propose(buffer, sourceFile, {
+          await propose(buffer, sourceFile, {
             sourceUrl, expected: 'accept', class: kind, options,
             reason: `QualityCheck=vision+content; QualityScore=${score}`,
             notes: `Proposed from ${path.relative(sourceRoot, sourceFile)}; ${result.charCount} chars, ${result.pageCount} pages, ${result.charsPerKb} chars/KB. Category and completeness need visual review; confirm options (including dark Nitter threads).`,

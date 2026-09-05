@@ -157,7 +157,8 @@ export function stripSubstackShareParams(url: string): string | null {
   } catch {
     return null;
   }
-  if (!/^\/p\/[^/]+\/?$/.test(parsed.pathname)) return null;
+  // `/p/<slug>` on any host, or the app share form `open.substack.com/pub/<pub>/p/<slug>`.
+  if (!/^\/(?:pub\/[\w-]+\/)?p\/[^/]+\/?$/.test(parsed.pathname)) return null;
   let changed = false;
   for (const key of [...parsed.searchParams.keys()]) {
     if (SHARE_PARAMS.includes(key) || /^utm_/i.test(key)) {

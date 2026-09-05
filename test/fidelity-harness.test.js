@@ -172,3 +172,48 @@ test('seeding copies evidence only, preserves originals and never resets human r
   assert.deepEqual(JSON.parse(await readFile(manifestPath, 'utf8')), manifest);
   for (const [file, buffer] of originals) assert.deepEqual(await readFile(file), buffer);
 });
+
+test('recorded substackPost facts replay the preview gate: a clean-ending preview is a reject, a full free post is not', async t => {
+  // `article` is 270 words and passes analyzePdfContent on its own.
+  const { dir } = await fixture(t, [
+    { id: 'preview', text: article, substackPost: { audience: 'only_paid', wordcount: 1346 } },
+    { id: 'preview-no-facts', text: article },
+    { id: 'free-full', text: article, expected: 'accept', class: 'substack', substackPost: { audience: 'everyone', wordcount: 300 } },
+  ]);
+  const { summary } = await runFidelityHarness({ corpusDir: dir });
+  const byId = Object.fromEntries(summary.results.map(row => [row.id, row]));
+  assert.equal(byId.preview.status, 'match');
+  assert.match(byId.preview.reason, /^paywall: Substack only_paid post: extracted \d+ of 1346 words/); // pdf.js merges a few words at wrap points
+  assert.equal(byId['preview-no-facts'].status, 'false_accept', 'without facts the analyzer alone passes the preview');
+  assert.equal(byId['free-full'].status, 'match');
+  assert.equal(summary.falseAccepts, 1);
+  // Malformed facts fail closed.
+  const bad = await fixture(t, [{ id: 'bad', text: article, substackPost: { audience: 'only_paid', wordcount: '1346' } }]);
+  const result = await runFidelityHarness({ corpusDir: bad.dir });
+  assert.equal(result.ok, false);
+  assert.match(result.summary.issues.join('\n'), /Invalid substackPost facts: bad/);
+});
+
+test('seeding strips Substack share tokens, dedupes retries that differ only in counts, and records post facts', async t => {
+  const source = await mkdtemp(path.join(tmpdir(), 'fidelity-source-'));
+  t.after(() => rm(source, { recursive: true, force: true }));
+  await mkdir(path.join(source, 'debug'));
+  await mkdir(path.join(source, 'media'));
+  await writeFile(path.join(source, 'debug', '1.pdf'), await pdf('Tiny one'));
+  await writeFile(path.join(source, 'debug', '2.pdf'), await pdf('Tiny two'));
+  const shared = 'https://open.substack.com/pub/sourcesnews/p/sam-altman-openai-agi?r=9qonx&utm_medium=ios';
+  const redis = { async hmget(key) {
+    return [key.endsWith(':1') ? 'truncated: PDF has only 726 characters' : 'truncated: PDF has only 727 characters', JSON.stringify({ url: shared, originalUrl: shared })];
+  } };
+  const asked = [];
+  const substackFacts = async url => { asked.push(url); return { audience: 'everyone', wordcount: 1314 }; };
+  const corpusDir = path.join(source, 'fidelity-corpus');
+  const summary = await seedFidelityCorpus({ sourceDataDir: source, corpusDir, redis, substackFacts });
+  assert.equal(summary.added, 1, 'two retries of one job are one case');
+  const [entry] = JSON.parse(await readFile(path.join(corpusDir, 'manifest.json'), 'utf8')).entries;
+  assert.equal(entry.sourceUrl, 'https://open.substack.com/pub/sourcesnews/p/sam-altman-openai-agi');
+  assert.equal(entry.options.sourceUrl, entry.sourceUrl);
+  assert.ok(!JSON.stringify(entry).includes('9qonx'), 'reader token must not be persisted anywhere in the entry');
+  assert.deepEqual(entry.substackPost, { audience: 'everyone', wordcount: 1314 });
+  assert.deepEqual(asked, [entry.sourceUrl]);
+});

@@ -144,7 +144,10 @@ test('full-length extraction of a paid post passes (subscriber-visible cases)', 
 });
 
 test('free posts are never gated by wordcount', () => {
-  assert.equal(substackPreviewShortfall('word '.repeat(50), 'everyone', 1150), null);
+  // Free posts are held only to a gross-shortfall bar (Substack's sign-in gate
+  // rendered sources.news at 120 of 1,314 words on 2026-09-05).
+  assert.equal(substackPreviewShortfall('word '.repeat(700), 'everyone', 1150), null);
+  assert.match(substackPreviewShortfall('word '.repeat(50), 'everyone', 1150), /preview only/);
 });
 
 test('missing audience or wordcount disables the gate', () => {

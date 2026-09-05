@@ -129,6 +129,11 @@ test('stripSubstackShareParams removes only share params on post-shaped paths', 
   );
   assert.equal(stripSubstackShareParams('https://example.com/blog?r=meaningful'), null);
   assert.equal(stripSubstackShareParams('https://www.dwarkesh.com/p/x'), null);
+  // The app share form is unambiguous too (the seeder persists these; the reader token must not survive).
+  assert.equal(
+    stripSubstackShareParams('https://open.substack.com/pub/sourcesnews/p/sam-altman-openai-agi?r=9qonx&utm_medium=ios'),
+    'https://open.substack.com/pub/sourcesnews/p/sam-altman-openai-agi');
+  assert.equal(stripSubstackShareParams('https://open.substack.com/pub/sourcesnews'), null);
 });
 
 test('pub→host store: a stored mapping is used without resolving, and a fresh resolution is persisted', async () => {

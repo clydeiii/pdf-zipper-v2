@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import type { AnalyzePdfContentOptions } from './pdf-content.js';
+import { substackPreviewShortfall, type SubstackPostFacts } from './substack-preview.js';
 
 export interface FidelityEntry {
   id: string;
@@ -16,6 +17,12 @@ export interface FidelityEntry {
   notes: string;
   /** Explicit call arguments preserve worker behavior, including {} for pass-throughs. */
   options: AnalyzePdfContentOptions;
+  /**
+   * Substack post facts (`audience`, true `wordcount` from the post API) recorded
+   * at review time so the worker's preview gate can be replayed offline: an
+   * entry with these is judged by analyzePdfContent AND substackPreviewShortfall.
+   */
+  substackPost?: SubstackPostFacts;
 }
 
 export interface FidelityManifest {
@@ -77,6 +84,9 @@ export function parseFidelityManifest(value: unknown): FidelityManifest {
         !Number.isFinite(Date.parse(entry.addedAt as string))) throw new Error(`Invalid fidelity entry: ${id}`);
     // Flat filenames keep both readers and the seeder away from original captures.
     if (!/^[^/\\]+\.pdf$/i.test(entry.file as string) || path.isAbsolute(entry.file as string)) throw new Error(`Unsafe corpus file: ${id}`);
+    if (entry.substackPost !== undefined && (!object(entry.substackPost) ||
+        typeof entry.substackPost.audience !== 'string' || !(entry.substackPost.audience as string).trim() ||
+        typeof entry.substackPost.wordcount !== 'number' || !(entry.substackPost.wordcount as number > 0))) throw new Error(`Invalid substackPost facts: ${id}`);
     if (!object(entry.options) || Object.keys(entry.options).some(key => !['lenient', 'sourceUrl'].includes(key)) ||
         (entry.options.lenient !== undefined && typeof entry.options.lenient !== 'boolean') ||
         (entry.options.sourceUrl !== undefined && typeof entry.options.sourceUrl !== 'string')) throw new Error(`Invalid analysis options: ${id}`);
@@ -121,14 +131,19 @@ export async function runFidelityHarness(
         if (createHash('sha256').update(buffer).digest('hex') !== entry.sha256) throw new Error('SHA256 mismatch');
         const result = await analyzePdfContent(buffer, entry.options);
         summary.evaluated++;
-        row.actual = result.passed ? 'accept' : 'reject';
-        row.reason = result.reason;
+        // Replay the worker's Substack preview gate when the facts were recorded.
+        const shortfall = result.passed && entry.substackPost
+          ? substackPreviewShortfall(result.extractedText ?? '', entry.substackPost.audience, entry.substackPost.wordcount)
+          : null;
+        row.actual = result.passed && !shortfall ? 'accept' : 'reject';
+        row.reason = shortfall ? `paywall: ${shortfall}` : result.reason;
         row.charCount = result.charCount;
         row.pageCount = result.pageCount;
-        if (entry.expected === 'reject' && result.passed) {
+        const accepted = row.actual === 'accept';
+        if (entry.expected === 'reject' && accepted) {
           row.status = 'false_accept';
           summary.falseAccepts++;
-        } else if (entry.expected === 'accept' && !result.passed) {
+        } else if (entry.expected === 'accept' && !accepted) {
           summary.falseRejects++;
           if (allowed.has(entry.id)) { row.status = 'allowed_false_reject'; summary.allowedFalseRejects++; }
           else { row.status = 'false_reject'; summary.unexpectedFalseRejects++; }

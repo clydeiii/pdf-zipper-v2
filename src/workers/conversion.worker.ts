@@ -31,6 +31,7 @@ const BLANK_VERDICT_OVERRIDE_MIN_CHARS = 2000;
 import { checkOllamaHealth } from '../quality/ollama.js';
 import { scoreScreenshotQuality } from '../quality/scorer.js';
 import { analyzePdfContent } from '../quality/pdf-content.js';
+import { checkSubstackPreview } from '../quality/substack-preview.js';
 import { getISOWeekNumber } from '../media/organization.js';
 import { notifyJobComplete, notifyJobFailed, isDiscordEnabled } from '../notifications/discord.js';
 import { addPendingFixes } from '../fix/pending.js';
@@ -614,6 +615,21 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
       console.log(`Re-classified short "X Article" as tweet for ${url} (${asTweet.charCount} chars) — saving as post`);
       contentResult = asTweet;
       isXArticle = false; // tweet → "-post-" filename, not "-article-"
+    }
+  }
+
+  // Substack preview gate: a paid post rendered without the subscription (or
+  // a free post behind Substack's sign-in gate) prints the free portion ending
+  // on a clean sentence and clears every text gate — the PDF is a short,
+  // complete-looking article. Only the post API's true wordcount can tell.
+  // Fails as `paywall:` so the smry/archive tiers get their turn (a snapshot
+  // of the full post often exists). See src/quality/substack-preview.ts.
+  if (contentResult.passed) {
+    const shortfall = await checkSubstackPreview(originalUrl || url, contentResult.extractedText || '');
+    if (shortfall) {
+      console.log(`Substack preview gate failed for ${url}: ${shortfall}`);
+      await saveDebugPdf(job.id!, result.pdfBuffer);
+      throw new Error(`paywall: ${shortfall}`);
     }
   }
 
