@@ -60,6 +60,18 @@ When a primary capture fails on an access wall, two rescue tiers run in order:
 
 **smry's API quality fields are unreliable — never gate on them.** Validated 2026-08-17: a WSJ lede-only partial (1,933 chars) and The Information's 28KB page-config JSON both returned `truncated: false, qualityStatus: "usable"`. The real gates are ours: `stripExtractionArtifacts` (smry's Axios text arrives laced with Tailwind class soup that otherwise trips the blob gate), `looksLikeMachineBlob`, a **host-aware char floor** (`minCharsForUrl`: 2500 on known hard-paywall hosts — above their observed lede sizes — and 1200 elsewhere, because a complete short Axios piece (1,949 chars) is the same length as a WSJ lede (1,933); ledes are a property of the publisher, not of length), a **Substack paid-preview gate** (the post API's true `wordcount` vs extracted words — a preview ending on a clean sentence passes every text heuristic; confirmed false accept 2026-08-21), and `analyzePdfContent` on the rendered PDF. A rejected rescue costs nothing (falls through); a wrong accept silently archives a partial article as a success.
 
+### Shared Ollama Model: One Context Size, Resident (`src/utils/llm-chat.ts`)
+Every pdf-zipper call to gemma4:e4b — vision scoring, enrichment, translation, transcript formatting — MUST request `LLM_NUM_CTX` (8192) and `LLM_KEEP_ALIVE` (2h). Ollama sizes the runner's KV cache from the request's `num_ctx` × `OLLAMA_NUM_PARALLEL` (2 on mac.mini); a request for a different size evicts the loaded model and reloads it, and the default 5-minute idle expiry unloads it between jobs. Before 2026-09-04 enrichment asked for 8K and the transcript formatter for 16K: mac.mini's server.log showed ~100 reloads of the 9GB model per day and 30–60 "predicted to exceed available memory, evicting" events, and pdf-zipper's own LLM calls ran p50 34s / p90 73s. Callers that need more room chunk their input (the formatter's 10k-char chunk and the 10k-char translation chunk are sized to fit 8K in+out); never raise a single call's `num_ctx`. `test/llm-context-size.test.js` fails on any literal `num_ctx`/`numCtx` outside `llm-chat.ts` (s1-normalizer is exempt — different model).
+
+### Enrichment Is Non-Fatal, So It Must Be Repaired and Labeled
+A capture saved while Ollama is unreachable still saves (the page may be gone tomorrow), and quality scoring falls back to "pass". On 2026-09-02 a six-hour outage left 34 PDFs with no Title/Summary/Tags and nothing noticed. Three rules now:
+- **`EnrichedAt` means validated enrichment** (`applyEnrichedMetadata` in `save-pdf.ts`): written only when `isUsableEnrichment` (non-empty Summary). An attempt that produced nothing usable writes `EnrichmentStatus=unusable_reply` instead. Enrichment uses Ollama structured output (`METADATA_RESPONSE_SCHEMA` via `format`) and retries once on an unusable reply (`enrichment_unusable_reply` log event).
+- **Every bare save is queued for repair**: `savePdfToWeeklyBin` calls the listener registered by `src/maintenance/enrichment-repair.ts`, which SADDs the path to Redis `enrichment:pending-pdfs`. The sweep runs every 2h (`ENRICHMENT_REPAIR_INTERVAL_HOURS`), is gated on an Ollama health probe, drains the pending set first and then a 48h window scan as backstop, ≤40 files per tick, re-embedding in place via the existing backfill. A repaired file's new mtime makes it "new" again for the nightly bundle and Select New, so the repaired copy supersedes the bare one downstream. `POST /api/audit/repair-enrichment?hours=N&dryRun=1` runs it on demand. The nightly capture auditor flags anything still `no_enrichment` / `empty_summary`.
+- **`QualityCheck` records what actually judged the file** (`vision+content`, `vision-overridden+content`, `content-only:vision-unavailable`, `content-only:no-screenshot`) plus `QualityScore` when vision ran, so the KB consumer can tell "verified" from "passed because the checker was down". Field semantics are in `public/doex-enrichment-details.md`.
+
+### Dependency Monitor (`src/maintenance/dependency-monitor.ts`)
+Probes Ollama (model present), Parakeet primary/fallback, Nitter and Karakeep every 5 min; after 3 consecutive failures (~15 min) posts a Discord warning, and a recovery note with the outage length when it comes back. `GET /api/audit/dependencies` probes on demand. Graceful degradation without this is how the 09-02 outage went unnoticed — keep the two together.
+
 ### Quality Pipeline
 Two-layer quality check, both must pass:
 1. **Vision score** (`src/quality/scorer.ts`): Ollama sees viewport-only screenshot (~800px). Don't flag "truncated" from viewport alone. Threshold configurable via `QUALITY_THRESHOLD`. A **`blank_page` verdict is deferred to content analysis** (worker, 2026-09-03): a dark hero fills the viewport-only screenshot, so openai.com's GPT-6 Astra launch page (black body background) scored 0 three times while its PDF held 31K chars over 20 pages. Blank is only credible when the PDF has no text — the override needs `analyzePdfContent` to pass with ≥2,000 chars (`BLANK_VERDICT_OVERRIDE_MIN_CHARS`), so shells and bot-challenge pages still fail. Logs `vision_blank_overridden`.
@@ -244,6 +256,8 @@ curl -X POST http://localhost:3002/api/jobs \
 | `VIDEO_COMPRESS_CRF` | 26 | x264 quality for the re-encode (lower = bigger/better) |
 | `SMRY_API_KEY` | — | smry.ai Pro key; enables the reader-view rescue tier (empty = off). Key lives in `.env` only |
 | `CAPTURE_PHASE_TRACE` | — | `1` logs visible-text length at each converter phase boundary; for bisecting body-loss captures via a one-off `convertUrlToPDF` in the container |
+| `ENRICHMENT_REPAIR_ENABLED` | true | 2-hourly re-enrichment of PDFs saved bare (`ENRICHMENT_REPAIR_INTERVAL_HOURS`, `ENRICHMENT_REPAIR_WINDOW_HOURS`=48, `ENRICHMENT_REPAIR_MAX_PER_TICK`=40) |
+| `DEPENDENCY_MONITOR_ENABLED` | true | Ollama/Parakeet/Nitter/Karakeep probes → Discord on sustained outage (`DEPENDENCY_CHECK_INTERVAL_MINUTES`=5, `DEPENDENCY_ALERT_AFTER_FAILURES`=3) |
 | `FIX_ENABLED` | false | Enable AI self-healing |
 | `CLAUDE_CLI_PATH` | `claude` | Path to Claude CLI |
 | `DISCORD_WEBHOOK_URL` | — | Job event notifications |
@@ -254,6 +268,8 @@ curl -X POST http://localhost:3002/api/jobs \
 - **undici default 5min timeout** — whisper/parakeet calls use a custom `Agent` with 4hr timeouts (6hr podcasts exist); don't revert to default fetch
 - **Chrome extension debugger conflict** — extension uses `chrome.debugger` + `Page.printToPDF`; conflicts with Matter, React/Redux DevTools, Lighthouse, claude-in-chrome, and other extensions that claim the debugger
 - **Parakeet launchd PATH** — must include `/opt/homebrew/bin` (Apple Silicon Homebrew) for ffmpeg
+- **Podcast audio downloads need a User-Agent** — Node's fetch sends none, and Cloudflare-fronted hosts (Buzzsprout: LessWrong Curated, Mystery AI Hype Theater 3000, The Data Exchange) answer 403; that was a third of all podcast failures until 2026-09-04. `downloadAudio` presents a browser UA, retries once as a podcast client, and rejects an HTML/JSON body that came back with a 200
+- **Container memory** — `mem_limit` was 1536m until 2026-09-04 and the cgroup showed 15 OOM kills (chart-heavy epoch.ai pages → "Target crashed"); it's 3072m now. Check `memory.events` under the container's cgroup before blaming a site for renderer crashes
 
 ## Ollama MLX vs GGUF (2026-06-30)
 

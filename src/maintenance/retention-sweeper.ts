@@ -83,7 +83,40 @@ export interface SweepResult {
   weeksDeleted: string[];
   weeksKept: number;
   bytesFreed: number;
+  /** Debug artifacts (data/debug/*.pdf|*.json) older than the cutoff, removed. */
+  debugFilesDeleted: number;
   errors: Array<{ week: string; error: string }>;
+}
+
+/**
+ * Prune failed-job debug artifacts older than the cutoff. They exist so a
+ * failure can be inspected from the UI's failure badge; a debug PDF for a job
+ * BullMQ pruned weeks ago serves nothing and nothing else ever deleted them
+ * (769 files / 1.1GB by 2026-09-04, 424 past 30 days). Same policy as the
+ * week bins: RETENTION_DAYS. Best-effort; returns {count, bytes}.
+ */
+async function pruneDebugArtifacts(cutoffMs: number): Promise<{ count: number; bytes: number }> {
+  const debugDir = path.join(env.DATA_DIR, 'debug');
+  let entries: string[];
+  try {
+    entries = await readdir(debugDir);
+  } catch {
+    return { count: 0, bytes: 0 };
+  }
+  let count = 0;
+  let bytes = 0;
+  for (const entry of entries) {
+    if (!/\.(pdf|json|png)$/i.test(entry)) continue;
+    const filePath = path.join(debugDir, entry);
+    try {
+      const s = await stat(filePath);
+      if (!s.isFile() || s.mtimeMs >= cutoffMs) continue;
+      await rm(filePath, { force: true });
+      count++;
+      bytes += s.size;
+    } catch { /* unreadable or already gone */ }
+  }
+  return { count, bytes };
 }
 
 /**
@@ -97,6 +130,7 @@ export async function sweepOldWeeks(retentionDays: number = RETENTION_DAYS): Pro
     weeksDeleted: [],
     weeksKept: 0,
     bytesFreed: 0,
+    debugFilesDeleted: 0,
     errors: [],
   };
 
@@ -107,6 +141,19 @@ export async function sweepOldWeeks(retentionDays: number = RETENTION_DAYS): Pro
       timestamp: new Date().toISOString(),
     }));
     return result;
+  }
+
+  const debug = await pruneDebugArtifacts(cutoff.getTime());
+  result.debugFilesDeleted = debug.count;
+  result.bytesFreed += debug.bytes;
+  if (debug.count > 0) {
+    console.log(JSON.stringify({
+      event: 'retention_debug_pruned',
+      files: debug.count,
+      bytesFreed: debug.bytes,
+      cutoffDate: result.cutoffDate,
+      timestamp: new Date().toISOString(),
+    }));
   }
 
   const mediaDir = path.join(env.DATA_DIR, 'media');
@@ -177,7 +224,8 @@ async function runSweepWithNotify(): Promise<void> {
     }));
 
     // Only notify when we actually did something (or hit errors). A daily
-    // "0 weeks deleted" message would be noise.
+    // "0 weeks deleted" message would be noise; routine debug pruning is
+    // logged above but not worth a ping on its own.
     if (result.weeksDeleted.length === 0 && result.errors.length === 0) return;
 
     await sendDiscordNotification({
