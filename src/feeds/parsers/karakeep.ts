@@ -32,7 +32,7 @@ function isVideoPrimaryHost(url: string): boolean {
 /**
  * Karakeep API bookmark structure
  */
-interface KarakeepBookmark {
+export interface KarakeepBookmark {
   id: string;
   createdAt: string;
   modifiedAt?: string;
@@ -72,7 +72,7 @@ export type GuidSeenChecker = (guid: string) => Promise<boolean>;
  * isn't something we capture. Shared by feed pagination and by the direct
  * by-id lookup used for videos still waiting on an asset.
  */
-function buildKarakeepItem(bookmark: KarakeepBookmark, baseUrl: string): BookmarkItem | null {
+export function buildKarakeepItem(bookmark: KarakeepBookmark, baseUrl: string): BookmarkItem | null {
   // Handle different bookmark content types
   const contentType = bookmark.content?.type;
 

@@ -167,6 +167,13 @@ Every Nitter tweet capture ALSO harvests structured data (plain HTTP fetch of Ni
 - **Scripts run on the HOST** (`npx tsx --env-file=.env`, with `KARAKEEP_API_BASE=http://localhost:3001 NITTER_HOST=http://localhost:8080`): the bind-mounted repo's `better-sqlite3` is host-glibc and fails inside the bookworm container.
 - Viewer at `/twitter.html`; read-only API under `/api/twitter/*`. The viewer's "Export DB" button hits `GET /api/twitter/export.zip`: an on-demand streamed zip with a full **consistent** twitter.db snapshot (SQLite online backup — never serve the raw `.db`, WAL contents would be missing) plus imagestore files from the last 48h, in the nightly zip's layout. One export at a time (in-flight guard returns 429). Nightly captures zip ships `twitter/twitter.db` (full snapshot via SQLite online backup) + window's imagestore files (`CAPTURES_INCLUDE_TWITTER`); the schema is documented for the consuming side in `public/doex-enrichment-details.md` — **update it in the same commit as any schema/semantics change**.
 
+### Nightly Coverage Reconciliation
+`src/maintenance/coverage-reconciler.ts` starts from **Karakeep bookmarks**, including those with no file — the existing capture audit starts from files and could never catch the 45 video waits stranded after the 385-bookmark evening. Runs at local 23:00, after the capture audit and before the midnight bundle. `COVERAGE_AUDIT_ENABLED=false` disables; `COVERAGE_AUDIT_HOUR` defaults to 23 and `COVERAGE_AUDIT_DAYS` to 3 (1–14). Missing `KARAKEEP_API_BASE` or `KARAKEEP_API_TOKEN` also disables it.
+
+Uses the poller's item builder and set-based URL matching against PDF Subject, MP4 `source_url` + `also_bookmarked_as`, and MP3 `SOURCE_URL`. Redis caches metadata by path + mtime; files must still exist. All required roles present → `archived` (or `manual` for Chrome captures); missing roles without covering work → `partial`; missing manual capture → `manual_missing`. Work in flight → `pending`, or `stale_pending` beyond 3h from bookmark creation for video waits / 6h from job creation for queues. With no files, newest failed job → `failed`; proven media re-bookmarks / unsupported content → `skipped`; unexplained absence → `unaccounted`. Shared files are counted separately, never errors. Patreon video is optional; YouTube/Vimeo still expect MP4 before their fallback enclosure arrives.
+
+The audit never visits bookmarked sites: dedup candidates use static rules and the poller's in-memory canonical caches only. An unknown Substack custom-domain mapping cannot be guessed from a slug; after a restart it needs the poller to resolve that publication again. Query stripping never merges distinct YouTube videos or Apple podcast episodes. Reports expose match reasons and input errors; incomplete scans never notify “clean”. Latest JSON lives at `coverage:last-report` and `data/audit/coverage-YYYY-MM-DD.json` (keep 14), with one Discord summary. Token-protected `POST /api/audit/coverage?days=N` runs now; `GET /api/audit/coverage/latest` reads the persisted report. No capture, repair, or Karakeep writes occur.
+
 ### Nightly Static Bundles (`/api/file/...`)
 Two nightly ZIPs are published as stable static URLs (served by the generic `serve.ts` `/file/*` route straight from DATA_DIR — no dedicated route, no cache):
 - **`/api/file/captures/captures-latest.zip`** — every capture (PDF/MP3/MP4/transcript) with mtime in the last 24h, structured `{ISO-week}/{type}/{file}` with a self-describing `MANIFEST.txt`. Built in-process by `src/maintenance/captures-zipper.ts` (`setTimeout` to next midnight, then `setInterval` 24h), registered in `index.ts` alongside the other maintenance timers. Keeps 7 dated bundles (`captures-YYYY-MM-DD.zip`); `-latest` is never pruned. Tunables: `CAPTURES_ZIP_ENABLED`, `CAPTURES_ZIP_HOUR` (default 0), `CAPTURES_WINDOW_HOURS` (24), `CAPTURES_ZIP_RETENTION_DAYS` (7).
@@ -261,6 +268,11 @@ curl -X POST http://localhost:3002/api/jobs \
 | `FIX_ENABLED` | false | Enable AI self-healing |
 | `CLAUDE_CLI_PATH` | `claude` | Path to Claude CLI |
 | `DISCORD_WEBHOOK_URL` | — | Job event notifications |
+| `COVERAGE_AUDIT_ENABLED` | true | Nightly bookmark-to-artifact reconciliation; `false` disables |
+| `COVERAGE_AUDIT_HOUR` | 23 | Local hour, after the 22:00 capture audit |
+| `COVERAGE_AUDIT_DAYS` | 3 | Bookmark lookback in days (1–14); at most 40 Karakeep pages |
+| `KARAKEEP_API_BASE` | — | Karakeep base URL; coverage audit requires this and the token |
+| `KARAKEEP_API_TOKEN` | — | Bearer token for read-only Karakeep bookmark enumeration |
 
 ## Known Gotchas
 

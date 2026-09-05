@@ -55,6 +55,8 @@ import { startCaptureAuditor, stopCaptureAuditor } from './maintenance/capture-a
 import { startEnrichmentRepair, stopEnrichmentRepair } from './maintenance/enrichment-repair.js';
 // Ollama / Parakeet / Nitter / Karakeep probes → Discord on sustained outage
 import { startDependencyMonitor, stopDependencyMonitor } from './maintenance/dependency-monitor.js';
+// Nightly bookmark→artifact reconciliation (what did we bookmark that produced no file?)
+import { startCoverageReconciler, stopCoverageReconciler } from './maintenance/coverage-reconciler.js';
 import { closeTwitterDb } from './twitter/db.js';
 import type { Server } from 'node:http';
 
@@ -115,6 +117,7 @@ async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
     stopCaptureAuditor();
     stopEnrichmentRepair();
     stopDependencyMonitor();
+    stopCoverageReconciler();
 
     console.log('Closing HTTP server...');
     await closeHttpServer();
@@ -192,6 +195,9 @@ async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
 
   // Start nightly capture auditor (re-check last 24h of saved captures → Discord)
   startCaptureAuditor();
+
+  // Start nightly coverage reconciliation (23:00: every Karakeep bookmark → file / pending / failed / unaccounted)
+  startCoverageReconciler();
 
   // Start the 2-hourly enrichment repair sweep (re-enrich PDFs saved bare)
   startEnrichmentRepair();

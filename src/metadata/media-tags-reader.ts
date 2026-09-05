@@ -19,6 +19,7 @@ export interface MediaMetadata {
   summary?: string;        // from TXXX SUMMARY or MP4 comment
   tags?: string[];         // from TXXX TAGS or MP4 keywords
   sourceUrl?: string;      // from TXXX SOURCE_URL or MP4 custom field
+  alsoBookmarkedAs?: string[]; // MP4 dedup aliases, stored as `; `-separated URLs
   durationMs?: number;
 }
 
@@ -129,7 +130,8 @@ export async function readVideoMetadata(mp4Path: string): Promise<MediaMetadata 
       }
     }
 
-    const hasAnyMeta = !!(title || summary || tagsCsv || sourceUrl);
+    const alsoBookmarkedAs = pick('also_bookmarked_as')?.split('; ').map(url => url.trim()).filter(Boolean);
+    const hasAnyMeta = !!(title || summary || tagsCsv || sourceUrl || alsoBookmarkedAs?.length);
     if (!hasAnyMeta) return undefined;
 
     const resolvedSummary = summary;
@@ -146,6 +148,7 @@ export async function readVideoMetadata(mp4Path: string): Promise<MediaMetadata 
       tags: tagsCsv ? tagsCsv.split(/,\s*/).filter(Boolean) : undefined,
       sourceUrl,
       durationMs,
+      alsoBookmarkedAs,
     };
   } catch {
     return undefined;

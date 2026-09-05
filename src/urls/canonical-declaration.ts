@@ -154,10 +154,14 @@ const declarationCache = new Map<string, string[] | null>();
  */
 export async function declaredCanonicalCandidates(
   url: string,
-  fetcher: PageFetcher = fetchPage
+  fetcher: PageFetcher = fetchPage,
+  allowNetwork = true
 ): Promise<string[] | null> {
   if (!isDeclarationEligible(url)) return null;
   if (declarationCache.has(url)) return declarationCache.get(url) ?? null;
+  // Audits may reuse the poller's knowledge, but must never visit source sites
+  // or poison the live cache with a synthetic failed fetch.
+  if (!allowNetwork) return null;
 
   const page = await fetcher(url);
   let result: string[] | null = null;

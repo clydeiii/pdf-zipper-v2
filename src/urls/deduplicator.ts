@@ -39,12 +39,15 @@ export class BookmarkDeduplicator {
    * else gets the normalized URL plus, for the long tail, whatever the page
    * itself declares via rel=canonical / og:url (canonical-declaration.ts) —
    * dedup keys only, guarded, and a failed fetch just means no extra key.
+   * `allowNetwork: false` reuses static rules and existing canonical caches
+   * for coverage audits without visiting any bookmarked site.
    */
-  private async dedupCandidates(url: string): Promise<string[]> {
-    const substack = await substackDedupCandidates(url).catch(() => null);
+  public async dedupCandidates(url: string, options: { allowNetwork?: boolean } = {}): Promise<string[]> {
+    const allowNetwork = options.allowNetwork !== false;
+    const substack = await substackDedupCandidates(url, allowNetwork ? undefined : async () => null).catch(() => null);
     if (substack) return substack;
     const candidates = new Set([normalizeBookmarkUrl(url)]);
-    const declared = await declaredCanonicalCandidates(url).catch(() => null);
+    const declared = await declaredCanonicalCandidates(url, undefined, allowNetwork).catch(() => null);
     for (const c of declared ?? []) candidates.add(c);
     return [...candidates];
   }
