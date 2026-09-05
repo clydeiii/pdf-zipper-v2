@@ -422,6 +422,8 @@ const MAX_CHARS_FOR_SUBSTACK_PREVIEW = 5000;
  * Options for `analyzePdfContent`.
  */
 export interface AnalyzePdfContentOptions {
+  /** Preserve line wraps for anchor matching; metrics and save-time gates are unchanged. */
+  preserveTextLayout?: boolean;
   /**
    * Skip body-length / truncation checks. Hostile-page checks (firewall,
    * 404, hard paywall) still run. Used for content where short body is
@@ -541,7 +543,7 @@ export async function analyzePdfContent(
       charCount,
       pdfSize,
       charsPerKb: Math.round(charsPerKb * 10) / 10,
-      extractedText: normalizedText,
+      extractedText: options.preserveTextLayout ? textResult.text : normalizedText,
     };
 
     // Non-article capture: a landing page, a section index, or a Patreon

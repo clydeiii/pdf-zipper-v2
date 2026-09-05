@@ -7,7 +7,7 @@ these files — can reconstruct sources, timelines, and relationships without
 guessing. Everything needed is shipped inside the bundle; there is no external
 state to fetch.
 
-Last updated: 2026-09-04.
+Last updated: 2026-09-05.
 
 ## Bundle layout
 
@@ -51,8 +51,31 @@ Read with any PDF metadata reader (`pdfinfo`, pypdf, pdf-lib). Custom fields:
 | `EnrichmentStatus` | `ok` — enrichment embedded; `unusable_reply` — the model was reached but returned nothing usable and the file was queued for automatic repair. **Absent** means enrichment never ran (the model host was unreachable at capture time). A repaired file is re-shipped in a later bundle under the same filename and supersedes this one |
 | `QualityCheck` | Which save-time quality gates actually judged this file. Playwright captures: `vision+content` — the vision model scored the rendered page AND the text analysis passed; `vision-overridden+content` — the vision model objected but the text analysis overrode it (tweet layouts, dark hero pages); `content-only:vision-unavailable` — the vision host was unreachable, so only text analysis ran; `content-only:no-screenshot` — the screenshot itself failed. Rescue tiers: `content-only:smry-reader`, `content-only:archive-snapshot` (text gates only, no vision). No gate at all: `none:passthrough` (direct/arXiv/embedded PDF, taken as published), `none:karakeep-asset` (uploaded file), `none:scroll-harvest` (ChatGPT share, rendered by us from harvested text), `external:chrome-extension` (printed by the user's own browser, saved unconditionally). Absent on files captured before 2026-09-04. A `content-only`/`none`/`external` value does not mean a worse file — it means a less-verified one |
 | `QualityScore` | The vision model's 0–100 score, when it ran. Informational — the gate was 50 |
+| `SourceTextChars` | Whitespace-normalized visible text length of the first `<article>`, otherwise first `<main>`, otherwise `body`, as rendered at capture time after lazy loading settles and before privacy/print mutations. Decimal integer string; includes the container's text outside eligible anchor blocks |
+| `SourceWordCount` | Publisher-declared positive integer `wordCount` from Article/NewsArticle (including article subtypes) JSON-LD present on the page at capture time. Optional; this is the publisher's declaration, not a count of rendered or printed words |
+| `ContentAnchors` | JSON array string of three distinctive sentences from the rendered container's first 10%, middle, and last 10%, in that order. Chosen only from visible `p`/`li`/`blockquote`/`h2`/`h3` prose, excluding navigation/sidebar/footer blocks and configured privacy terms. Whitespace/typography normalized and lowercased; at most 600 characters including JSON encoding. Absent when three suitable unique sentences cannot be found |
 | `CaptureScope` | Manual captures: `page`, `reader`, or `selection` |
 | `Markdown` / `MarkdownLength` / `MarkdownExtractedBy` | Manual captures: a clean Readability/Turndown markdown extraction of the article, embedded alongside the rendered PDF |
+
+The three source fields describe the page at capture time, not its current
+online version. They are best-effort, only on primary Playwright article
+captures: absent on tweets/Nitter, archive snapshots, pass-through PDFs,
+manual captures, and rescues (including injected JSON-LD bodies). Absence
+means unmeasured. They do not prove the publisher rendered its entire article.
+
+The KB can check `ContentAnchors` just as the nightly auditor does: extract
+the PDF text with line breaks preserved, then normalize both anchors and text
+by removing soft hyphens, joining letter-hyphen-linebreak-letter wraps,
+unifying curly quotes to straight quotes and dashes to `-`, collapsing
+whitespace, trimming, and lowercasing. Check each anchor as a substring.
+Missing index 2 produces `truncation_suspect: last anchor missing`; any missing
+anchors also produce `truncation_suspect: N of 3 anchors missing`. When at least
+one anchor is missing **and** normalized PDF text length / `SourceTextChars`
+is below 0.6, add `length_mismatch: PDF text is X% of SourceTextChars` (rounded
+whole percent). A ratio alone produces no finding: extraction, ligatures,
+hyphenation, and repeated headers/footers make length noisy. Malformed or
+partial anchor arrays are unmeasured. These checks are **report-only**;
+they never reject a save or automatically re-capture a file.
 
 AI-detection caveats — these fields are evidence, not verdicts:
 - **Absence means "not measured", never "human-written".** Only Substack posts

@@ -38,6 +38,8 @@ import * as path from 'node:path';
 import { PDFDocument } from 'pdf-lib';
 import { env } from '../config/env.js';
 import { analyzePdfContent } from '../quality/pdf-content.js';
+import { buildAnchorFlags } from '../quality/content-anchors.js';
+import { readInfoDictField } from '../utils/pdf-info-dict.js';
 import { classifyEnrichmentState } from '../metadata/backfill.js';
 import { sendDiscordNotification } from '../notifications/discord.js';
 
@@ -98,8 +100,10 @@ async function auditPdf(fullPath: string): Promise<string[]> {
   // Tweet captures legitimately have very little text — same lenient rule the
   // conversion worker uses for Nitter posts.
   const lenient = path.basename(fullPath).includes('-post-');
+  let extractedText: string | undefined;
   try {
-    const content = await analyzePdfContent(buffer, { lenient });
+    const content = await analyzePdfContent(buffer, { lenient, preserveTextLayout: true });
+    extractedText = content.extractedText;
     if (!content.passed) {
       const patternBased = /paywall detected|site-template marker/i.test(content.reason || '');
       if (!patternBased || content.charCount < PATTERN_FLAG_MAX_CHARS) {
@@ -113,6 +117,14 @@ async function auditPdf(fullPath: string): Promise<string[]> {
 
   try {
     const doc = await PDFDocument.load(buffer, { updateMetadata: false });
+    // Reuse this audit's extraction: a missing distinctive tail is stronger
+    // evidence than a noisy length ratio, but still only warrants a report.
+    if (extractedText !== undefined) {
+      flags.push(...buildAnchorFlags(
+        readInfoDictField(doc, 'ContentAnchors'), extractedText,
+        readInfoDictField(doc, 'SourceTextChars'),
+      ));
+    }
     const subject = doc.getSubject();
     if (!subject || !/^https?:\/\//.test(subject.trim())) {
       flags.push('no_source_url: Subject missing — Rerun and KB provenance broken');

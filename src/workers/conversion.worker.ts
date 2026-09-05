@@ -662,6 +662,11 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
   // timestamp overrides the LLM's PublishDate guess (extras are applied
   // after enrichment fields in embedPdfMetadata, so last write wins).
   const infoDictExtras: Record<string, string> = {};
+  // Only this main Playwright save describes the DOM that supplied anchors.
+  // Rescue/pass-through branches return earlier and must not inherit them.
+  if (result.sourceTextChars !== undefined) infoDictExtras.SourceTextChars = String(result.sourceTextChars);
+  if (result.sourceWordCount !== undefined) infoDictExtras.SourceWordCount = String(result.sourceWordCount);
+  if (result.contentAnchors) infoDictExtras.ContentAnchors = result.contentAnchors;
   // Provenance of the quality verdict (see visionStatus above). Content
   // analysis always ran by this point, so the check is "vision+content" when
   // the vision model scored the page, or "content-only:<why>" when it didn't.
