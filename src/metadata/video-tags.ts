@@ -63,7 +63,7 @@ export async function writeVideoMetadata(filePath: string, meta: VideoMetadataOp
     await execFileAsync('ffmpeg', args, { timeout: 60000 });
     await rename(tmpPath, filePath);
 
-    console.log(`Video metadata written to ${filePath}: "${meta.title}"`);
+    console.log(`Video metadata written to ${filePath}${meta.title ? `: "${meta.title}"` : ' (provenance)'}`);
     return true;
   } catch (error) {
     // Clean up temp file on failure

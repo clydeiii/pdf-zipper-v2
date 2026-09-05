@@ -112,3 +112,16 @@ test('whichever side finishes last completes the link (media first, then PDF; an
   const doc2 = await PDFDocument.load(await readFile(pdf), { updateMetadata: false });
   assert.equal(readInfoDictField(doc2, 'LinkedMedia'), 'x.com-a-post-9-2.mp4; x.com-a-post-9.mp4; x.com-other-post-5.mp4');
 });
+
+test('"No video formats found" on a harvested tweet with no video attachment is no_media; unharvested stays unknown', async () => {
+  const mk = () => fakeDownload([{ ok: false, outcome: 'unknown' }]);
+  // Make the fake carry yt-dlp's wording.
+  const withMsg = (d) => ({ fn: async (u, f, o) => { const r = await d.fn(u, f, o); return r.ok ? r : { ...r, error: 'ERROR: [twitter] 1: No video formats found!; please report this issue' }; }, calls: d.calls });
+  const a = withMsg(mk());
+  const settled = await downloadTweetVideos('https://x.com/a/status/1', '/x/b.mp4', { download: a.fn, harvested: async () => [], evidence: async () => ({ harvested: true, hasVideo: false }), xCookies: () => '/jar' });
+  assert.equal(settled.outcome, 'no_media');
+  assert.equal(a.calls.length, 1, 'no cookie tier for a text tweet');
+  const b = withMsg(mk());
+  const pending = await downloadTweetVideos('https://x.com/a/status/2', '/x/c.mp4', { download: b.fn, harvested: async () => [], evidence: async () => ({ harvested: false, hasVideo: false }), xCookies: () => undefined });
+  assert.equal(pending.outcome, 'unknown', 'retry until the harvest can testify');
+});

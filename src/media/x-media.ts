@@ -66,9 +66,30 @@ export async function harvestedVideoUrls(tweetUrl: string): Promise<string[]> {
   }
 }
 
+/**
+ * What the Nitter harvest knows about the tweet's attachments: `harvested`
+ * false = not in twitter.db (PDF capture hasn't run yet, or DB disabled);
+ * `hasVideo` = at least one video/gif attachment recorded.
+ */
+export async function harvestedMediaEvidence(tweetUrl: string): Promise<{ harvested: boolean; hasVideo: boolean }> {
+  if (!env.TWITTER_DB_ENABLED) return { harvested: false, hasVideo: false };
+  const id = tweetIdOf(tweetUrl);
+  if (!id) return { harvested: false, hasVideo: false };
+  try {
+    const { getTwitterDb, getTweetById, getTweetMedia } = await import('../twitter/db.js');
+    const db = getTwitterDb();
+    if (!getTweetById(db, id)) return { harvested: false, hasVideo: false };
+    const media = getTweetMedia(db, id);
+    return { harvested: true, hasVideo: media.some((r) => r.kind === 'video' || r.kind === 'gif') };
+  } catch {
+    return { harvested: false, hasVideo: false };
+  }
+}
+
 export interface TweetDownloadDeps {
   download?: typeof downloadWithYtDlp;
   harvested?: typeof harvestedVideoUrls;
+  evidence?: typeof harvestedMediaEvidence;
   xCookies?: () => string | undefined;
 }
 
@@ -80,6 +101,7 @@ export async function downloadTweetVideos(url: string, finalPath: string, deps: 
   const download = deps.download ?? downloadWithYtDlp;
   const harvested = deps.harvested ?? harvestedVideoUrls;
   const xCookies = deps.xCookies ?? getXScopedCookiesFile;
+  const evidence = deps.evidence ?? harvestedMediaEvidence;
   const base = { ...runOptions, timeoutMs: TWEET_DOWNLOAD_TIMEOUT_MS, allowMultiple: true };
   const tier = (name: string, extra: Record<string, unknown> = {}) =>
     console.log(JSON.stringify({ event: 'x_video_tier', url, tier: name, ...extra, timestamp: new Date().toISOString() }));
@@ -93,6 +115,18 @@ export async function downloadTweetVideos(url: string, finalPath: string, deps: 
   if (anon.outcome === 'no_media' || anon.outcome === 'unsupported' || anon.outcome === 'policy_exceeded') {
     tier('anonymous', { ok: false, outcome: anon.outcome, final: true });
     return anon;
+  }
+  // yt-dlp reports a photo/text-only tweet as "No video formats found!" —
+  // the same words it uses for a real extraction failure, so on its own that
+  // is `unknown` (retry). The Nitter harvest is the independent witness: a
+  // harvested tweet with NO video/gif attachment settles it as no_media, and
+  // saves the cookie tier for tweets that might actually be gated.
+  if (anon.outcome === 'unknown' && /No video formats found/i.test(anon.error)) {
+    const ev = await evidence(url);
+    if (ev.harvested && !ev.hasVideo) {
+      tier('anonymous', { ok: false, outcome: 'no_media', via: 'harvest_evidence', final: true });
+      return { ok: false, outcome: 'no_media', error: 'No video formats found; Nitter harvest recorded no video/gif attachment' };
+    }
   }
 
   // Tier 2: harvested CDN URLs (no account, bytes already located). For
