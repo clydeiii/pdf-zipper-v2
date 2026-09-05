@@ -5,6 +5,8 @@ import { fetchKarakeepBookmarkItem } from './parsers/karakeep.js';
 import { BookmarkDeduplicator } from '../urls/deduplicator.js';
 import { FEED_QUEUE_NAME, metadataQueue, mediaCollectionQueue } from './monitor.js';
 import { mediaJobId, needsMediaRecheck } from './media-recheck.js';
+import { applyMediaRouting, acquisitionSourceOf } from '../media/routing.js';
+import { env } from '../config/env.js';
 import type { FeedPollJobData, MetadataJobData } from './monitor.js';
 import type { BookmarkItem, FeedCacheState } from './types.js';
 import type { MediaItem } from '../media/types.js';
@@ -173,6 +175,19 @@ function createFeedPollWorker(): Worker<FeedPollJobData> {
       // Process items with deduplication
       let newItems = 0;
       const metadataJobs: { name: string; data: MetadataJobData }[] = [];
+
+      // Acquisition routing (owner decision 2026-09-05: pdf-zipper downloads
+      // every video itself). In native mode YouTube/Vimeo get a yt-dlp
+      // enclosure right here, so the asset wait below never engages and the
+      // metadata worker queues the download on this very poll.
+      const routing = { youtube: env.MEDIA_SOURCE_YOUTUBE };
+      result.items = result.items.map((item) => {
+        const routed = applyMediaRouting(item, routing);
+        if (routed !== item) {
+          console.log(JSON.stringify({ event: 'media_routed', url: item.url, source: acquisitionSourceOf(routed), timestamp: new Date().toISOString() }));
+        }
+        return routed;
+      });
 
       for (const item of result.items) {
         // Skip if GUID already seen in this feed

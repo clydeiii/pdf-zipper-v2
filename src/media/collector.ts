@@ -12,7 +12,7 @@ import { getWeeklyBinPath, ensureWeeklyBinExists, getMediaFilename } from './org
 import { env } from '../config/env.js';
 import type { MediaItem, MediaCollectionResult } from './types.js';
 import { downloadPatreonVideo, isPatreonPostUrl } from './patreon.js';
-import { downloadVideoViaYtDlp } from './ytdlp-video.js';
+import { downloadVideoViaYtDlp, TERMINAL_YTDLP_OUTCOMES } from './ytdlp-video.js';
 import { judgeProbe, probeVideo } from './video-provenance.js';
 
 /**
@@ -99,15 +99,15 @@ export async function downloadMedia(item: MediaItem): Promise<MediaCollectionRes
           downloadDuration: Date.now() - startTime,
         };
       }
+      // Terminal outcomes keep their name so the worker and the coverage
+      // audit can tell "no video exists" from "deleted" from "we were
+      // blocked"; transient/unknown become a retryable download_failed.
+      const reason = TERMINAL_YTDLP_OUTCOMES.has(outcome.outcome) ? outcome.outcome : 'download_failed';
       return {
         success: false,
         item,
-        error: outcome.reason === 'no_video'
-          ? 'Post carries no downloadable video'
-          : outcome.error,
-        // no_video is a fact about the post, not a transient fault — surface it
-        // as skipped so the worker doesn't burn five BullMQ retries on it.
-        reason: outcome.reason === 'no_video' ? 'no_media' : 'download_failed',
+        error: `${outcome.outcome}: ${outcome.error}`,
+        reason: reason as Extract<MediaCollectionResult, { success: false }>['reason'],
       };
     }
 

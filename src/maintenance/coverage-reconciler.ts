@@ -38,6 +38,9 @@ export interface CoverageJob {
   state: 'waiting' | 'active' | 'delayed' | 'failed' | 'completed';
   timestamp: number;
   failedReason?: string;
+  /** Completed media jobs record a terminal non-success outcome (no_media, unavailable, …) in their return value. */
+  outcome?: string;
+  outcomeDetail?: string;
 }
 export interface CoverageBookmark {
   bookmarkId: string;
@@ -198,6 +201,16 @@ export function classifyBookmark(bookmark: CoverageBookmark, lookups: CoverageLo
   }
   const stale = waits.filter(wait => wait.stale);
   if (stale.length) return finish('stale_pending', stale.map(wait => wait.detail).join('; '));
+  // Terminal media outcomes: "no video exists" satisfies coverage with the
+  // PDF (or alone, for a video-only URL) and is a documented skip; every
+  // other terminal outcome is an unmet requirement with a named cause.
+  const mediaNewest = [...jobs].filter(job => job.outcome && job.roles.some(role => missing.includes(role))).sort((a, b) => b.timestamp - a.timestamp)[0];
+  if (mediaNewest?.outcome === 'no_media') {
+    return finish(result.artifacts.length ? (manual ? 'manual' : 'archived') : 'skipped', `no_media: source has no video (${(mediaNewest.outcomeDetail || '').slice(0, 160)}); found ${result.foundRoles.join(', ') || 'nothing'}`);
+  }
+  if (mediaNewest?.outcome) {
+    return finish(result.artifacts.length ? 'partial' : 'failed', `media ${mediaNewest.outcome}: ${(mediaNewest.outcomeDetail || 'no detail').slice(0, 240)}; found ${result.foundRoles.join(', ') || 'nothing'}`);
+  }
   const uncovered = missing.filter(role => !waits.some(wait => wait.roles.includes(role)));
   if (result.artifacts.length && uncovered.length) {
     return finish('partial', `${manual ? 'Manual capture; ' : ''}missing ${uncovered.join(', ')}; found ${result.foundRoles.join(', ')}`);
@@ -381,7 +394,13 @@ async function readQueueJobs(keysFor: KeyResolver, errors: string[]): Promise<Co
           const roles: ArtifactRole[] = queue.name === 'url-conversion' ? ['pdf'] : queue.name === 'podcast-transcription' ? ['mp3', 'transcript'] :
             data.item?.mediaType === 'pdf' ? ['pdf'] : data.item?.mediaType === 'transcript' ? ['transcript'] :
               data.item?.mediaType === 'podcast' ? ['mp3'] : ['mp4', 'transcript'];
-          return { keys: (await Promise.all(urls.map(keysFor))).flat(), queue: queue.name, roles, state, timestamp: job.timestamp, failedReason: job.failedReason };
+          // A completed media job whose download ended in a terminal outcome
+          // (no video / deleted / gated / unsupported / over the cap) is a
+          // fact the audit must show — it was invisible before and read as
+          // "unaccounted" or, worse, an mp4-less "archived".
+          const rv = job.returnvalue as { success?: boolean; reason?: string; error?: string } | undefined;
+          const outcome = state === 'completed' && rv && rv.success === false && typeof rv.reason === 'string' ? rv.reason : undefined;
+          return { keys: (await Promise.all(urls.map(keysFor))).flat(), queue: queue.name, roles, state, timestamp: job.timestamp, failedReason: job.failedReason, outcome, outcomeDetail: outcome ? rv?.error : undefined };
         }));
       } catch (error) { logError(errors, `${queue.name}/${state}`, error); return []; }
     })

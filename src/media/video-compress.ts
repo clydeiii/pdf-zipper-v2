@@ -173,7 +173,20 @@ export interface CompressResult {
  * resolution-scaled threshold. Keeps the original when the re-encode isn't
  * meaningfully smaller. Never throws — a failure keeps the original file.
  */
+/**
+ * Only ONE re-encode runs at a time process-wide. The media worker's
+ * concurrency (2) covers download + compress + ASR + enrichment together, so
+ * without this two fat X grabs arriving together meant two x264 encoders plus
+ * two Playwright renderers on four cores.
+ */
+let compressChain: Promise<unknown> = Promise.resolve();
 export async function maybeCompressVideo(filePath: string): Promise<CompressResult> {
+  const run = compressChain.then(() => compressVideoUnserialized(filePath));
+  compressChain = run.catch(() => undefined);
+  return run;
+}
+
+async function compressVideoUnserialized(filePath: string): Promise<CompressResult> {
   const probe = await probeVideo(filePath);
   const decision = shouldCompressVideo(probe, {
     enabled: env.VIDEO_COMPRESS_ENABLED,
@@ -212,6 +225,9 @@ export async function maybeCompressVideo(filePath: string): Promise<CompressResu
     '-c:v', 'libx264',
     '-crf', String(env.VIDEO_COMPRESS_CRF),
     '-preset', 'veryfast',
+    // Two encoder threads: an unbounded x264 on this 4-core host starves the
+    // two Playwright renderers sharing it (design review 2026-09-05).
+    '-threads', '2',
     '-pix_fmt', 'yuv420p',
   ];
   const filters: string[] = [];

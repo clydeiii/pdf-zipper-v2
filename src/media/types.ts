@@ -51,9 +51,16 @@ export type MediaCollectionResult =
       item: MediaItem;
       error: string;          // Error message
       /**
-       * 'no_media' means the source genuinely has nothing to download (a
-       * text-only Patreon post). It is terminal, not transient — the worker
-       * must not retry it.
+       * Terminal reasons (the worker completes the job without retrying):
+       *   'no_media'        — the source genuinely has no video (text-only post)
+       *   'unavailable'     — deleted / private / removed
+       *   'auth_required'   — a gate our cookies could not open
+       *   'unsupported'     — DRM / geo-restriction / unsupported extractor
+       *   'policy_exceeded' — over the download size cap
+       * Everything else is retried with the queue's backoff. "Terminal" must
+       * never be inferred from a vague downloader message — see
+       * classifyYtDlpFailure in ytdlp-video.ts.
        */
-      reason: 'download_failed' | 'timeout' | 'file_missing' | 'no_media';
+      reason: 'download_failed' | 'timeout' | 'file_missing' | 'no_media'
+        | 'unavailable' | 'auth_required' | 'unsupported' | 'policy_exceeded';
     };

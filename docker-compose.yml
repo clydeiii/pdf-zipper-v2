@@ -129,6 +129,12 @@ services:
       # only needs watchable quality, so cap at 480p short-side / 30fps.
       - VIDEO_COMPRESS_MAX_HEIGHT=480
       - VIDEO_COMPRESS_MAX_FPS=30
+      # Video acquisition: pdf-zipper downloads YouTube/Vimeo itself with
+      # yt-dlp the moment a bookmark appears (no Karakeep asset, no 2h wait).
+      # Karakeep is the bookmarking service only (owner decision 2026-09-05);
+      # x.com follows in PR2, then Karakeep's CRAWLER_VIDEO_DOWNLOAD goes off.
+      - MEDIA_SOURCE_YOUTUBE=native
+      - MEDIA_DOWNLOAD_MAX_MB=5000
       - HOME=/home/clyde
 
     ports:

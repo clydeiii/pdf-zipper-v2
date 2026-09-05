@@ -1,117 +1,223 @@
 /**
- * Self-download of public-platform video (YouTube/Vimeo) via our own yt-dlp.
+ * Native video acquisition via yt-dlp — the downloader behind every video
+ * pdf-zipper fetches itself (YouTube/Vimeo since PR1, Patreon with the
+ * personal cookies, x.com in PR2).
  *
- * Normally these arrive as Karakeep video assets, but Karakeep's bundled
- * yt-dlp goes stale between image releases and YouTube's countermeasures move
- * fast — observed 2026-08-18..20: every Karakeep YouTube download failing
- * with "HTTP Error 403: Forbidden" for days, silently dropping bookmarked
- * videos. When the feed poller's asset-wait window expires it now points the
- * enclosure at the watch URL itself with `downloadVia: 'yt-dlp'` (the Patreon
- * pattern) and the collector lands here.
- *
- * Differences from the Patreon downloader:
- * - `--js-runtimes node`: YouTube requires JS-based signature solving as of
- *   2026-08; without a runtime yt-dlp only sees a crippled format list and
- *   the height-capped selector matches nothing. Node is in the container.
- * - Anonymous first, work-account cookies (`YT_DLP_COOKIES_FILE`) only as a
- *   retry when the failure smells like an age/bot gate — never the personal
- *   COOKIES_FILE, and never cookies on the first attempt (the account should
- *   not be associated with routine grabs).
+ * Hardening that came out of the 2026-09-05 design review, each rule with
+ * the failure it prevents:
+ *  - ONE format policy: `-S res:<cap>,+size` — the largest rendition whose
+ *    SHORTER side is ≤ VIDEO_COMPRESS_MAX_HEIGHT (the compressor's own rule,
+ *    so portrait phone video isn't crushed), preferring smaller files. The
+ *    old selector's trailing `/best` silently escaped the cap.
+ *  - Staging directory per attempt on the destination filesystem; the file
+ *    is probed (readable, has video, has duration) and only then renamed into
+ *    place. Every leftover (.part, component streams) dies with the directory,
+ *    on success and on failure alike.
+ *  - `--abort-on-unavailable-fragments`: yt-dlp's default is to SKIP a missing
+ *    fragment and still produce a readable-but-incomplete file that passes
+ *    every probe.
+ *  - `--max-filesize` plus a staging-size check for HLS where size is unknown.
+ *  - The subprocess runs in its own process group and the whole group is
+ *    killed on timeout — a Node timeout alone orphaned ffmpeg children.
+ *  - Structured outcomes instead of `no_video | download_failed`. "Terminal"
+ *    must never mean "there was no video": yt-dlp's "Video unavailable" and
+ *    "Unsupported URL" were both classified as no_video and completed the job
+ *    without retry, silently. Only an explicit no-media message is no_media.
  */
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { spawn } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
-import { unlink } from 'node:fs/promises';
+import { mkdir, readdir, rename, rm, stat } from 'node:fs/promises';
+import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { env } from '../config/env.js';
-
-const execFileAsync = promisify(execFile);
+import { judgeProbe, probeVideo } from './video-provenance.js';
 
 const YT_DLP_PATH = process.env.YT_DLP_PATH || 'yt-dlp';
 
-/** Integer by construction — execFile rejects non-integer timeouts. */
-const DOWNLOAD_TIMEOUT_MS = 45 * 60_000;
+/** Default acquisition deadline — long YouTube videos on a slow link. */
+export const DEFAULT_DOWNLOAD_TIMEOUT_MS = 45 * 60_000;
+
+export type YtDlpOutcome =
+  | 'no_media'          // explicit "this post/page has no video" — terminal, PDF alone satisfies coverage
+  | 'unavailable'       // deleted / private / removed — terminal, an unmet requirement
+  | 'auth_required'     // login/age/membership gate we could not satisfy — terminal for now
+  | 'unsupported'       // DRM, geo-restriction, unsupported extractor — terminal
+  | 'policy_exceeded'   // size cap — terminal by policy, visible
+  | 'transient'         // network / 429 / 5xx / timeout — retry with backoff
+  | 'unknown';          // no formats, malformed output, missing file — retry a bounded number of times
+
+/** Outcomes the collection worker completes without retrying. */
+export const TERMINAL_YTDLP_OUTCOMES: ReadonlySet<YtDlpOutcome> =
+  new Set<YtDlpOutcome>(['no_media', 'unavailable', 'auth_required', 'unsupported', 'policy_exceeded']);
 
 export type YtDlpDownloadOutcome =
-  | { ok: true; filePath: string; sizeBytes: number }
-  /** The page exists but has nothing downloadable — terminal, not transient. */
-  | { ok: false; reason: 'no_video' }
-  | { ok: false; reason: 'download_failed'; error: string };
+  | { ok: true; filePath: string; sizeBytes: number; width?: number; height?: number }
+  | { ok: false; outcome: YtDlpOutcome; error: string };
 
-function meansNoVideo(output: string): boolean {
-  return /No video formats found|Unsupported URL|no media found|There.s no video|Video unavailable/i.test(output);
+/**
+ * Map yt-dlp's stderr/stdout to an outcome. Pure and tested against real
+ * messages. Order matters: the specific classes come before the catch-alls.
+ */
+export function classifyYtDlpFailure(output: string): YtDlpOutcome {
+  const o = output;
+  if (/File is larger than max-filesize|larger than the maximum file size|exceeds the size cap/i.test(o)) return 'policy_exceeded';
+  if (/There.s no video in this tweet|no media found|does not contain any (video|media)|has no video|no video formats? (were )?found for this (post|tweet)/i.test(o)) return 'no_media';
+  if (/Sign in to confirm|confirm your age|age.restricted|not a bot|login required|Log in for access|members?-only|Join this channel|This video is available to this channel's members|Private video|requires? (a )?(login|authentication|subscription)|NSFW tweet requires authentication/i.test(o)) return 'auth_required';
+  if (/Video unavailable|has been removed|This video is no longer available|(?<!format )is not available\b(?! in your)|does not exist|account has been terminated|HTTP Error 404|HTTP Error 410|This video is private|removed by the uploader|Tweet .*deleted|Sorry, that page does not exist/i.test(o)) return 'unavailable';
+  if (/Unsupported URL|DRM|not available in your (country|location|region)|not made this video available|available in your country|geo.?(restricted|blocked)|blocked it in your country|is not supported/i.test(o)) return 'unsupported';
+  if (/HTTP Error 429|HTTP Error 5\d\d|Too Many Requests|timed out|Timed out|Connection reset|ECONNRESET|ECONNREFUSED|EAI_AGAIN|Temporary failure|Unable to download webpage|Read timed out|Remote end closed|fragment .* not found|unavailable fragments?|Network is unreachable|Killed by timeout/i.test(o)) return 'transient';
+  return 'unknown';
 }
 
-/** Failures where a signed-in retry has a real chance of succeeding. */
+/** Did the failure look like a gate that the platform's cookies could open? */
 export function looksLikeGatedFailure(output: string): boolean {
-  return /Sign in to confirm|confirm your age|age.restricted|not a bot|HTTP Error 403/i.test(output);
+  return /Sign in to confirm|confirm your age|age.restricted|not a bot|HTTP Error 403|login required|NSFW tweet requires authentication/i.test(output);
 }
 
-async function runYtDlp(url: string, filePath: string, withCookies: boolean): Promise<{ ok: true } | { ok: false; output: string }> {
-  const maxHeight = env.VIDEO_COMPRESS_MAX_HEIGHT;
+export interface YtDlpRunOptions {
+  /** Cookies to present on the first attempt (Patreon uses the personal jar). */
+  cookiesFile?: string;
+  /** Cookies to retry with only after a gated failure (YouTube's work jar). */
+  gatedRetryCookiesFile?: string;
+  timeoutMs?: number;
+  /** Shorter-side cap in px; defaults to VIDEO_COMPRESS_MAX_HEIGHT. */
+  maxShortSide?: number;
+  /** Size cap in MB; defaults to MEDIA_DOWNLOAD_MAX_MB. */
+  maxFileMb?: number;
+  /** Injected for tests. */
+  runner?: ProcessRunner;
+}
+
+export interface ProcessResult { code: number | null; signal: NodeJS.Signals | null; output: string; timedOut: boolean }
+export type ProcessRunner = (cmd: string, args: string[], timeoutMs: number) => Promise<ProcessResult>;
+
+/**
+ * Spawn in its own process group and kill the GROUP on timeout so yt-dlp's
+ * ffmpeg child can't outlive it and keep writing into the staging dir.
+ */
+export const spawnProcessGroup: ProcessRunner = (cmd, args, timeoutMs) => new Promise((resolve) => {
+  const child = spawn(cmd, args, { detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '';
+  const cap = 2 * 1024 * 1024;
+  const collect = (chunk: Buffer) => { if (output.length < cap) output += chunk.toString('utf8'); };
+  child.stdout?.on('data', collect);
+  child.stderr?.on('data', collect);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    try { process.kill(-child.pid!, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* gone */ } }
+  }, timeoutMs);
+  child.on('error', (err) => { clearTimeout(timer); resolve({ code: null, signal: null, output: `${output}\n${err.message}`, timedOut }); });
+  child.on('close', (code, signal) => { clearTimeout(timer); resolve({ code, signal, output, timedOut }); });
+});
+
+/** yt-dlp arguments for one attempt. Exported for tests. */
+export function buildYtDlpArgs(url: string, stageDir: string, opts: { maxShortSide: number; maxFileMb: number; cookiesFile?: string }): string[] {
   const args = [
     '--no-playlist',
     '--no-warnings',
     '--no-progress',
     '--js-runtimes', 'node',
-    '-f', `bestvideo[height<=${maxHeight}]+bestaudio/best[height<=${maxHeight}]/best`,
+    // Largest rendition whose SHORTER side ≤ cap, smaller file preferred.
+    // `res` in yt-dlp's sort is the smaller dimension, i.e. the compressor's rule.
+    '-f', 'bv*+ba/b',
+    '-S', `res:${opts.maxShortSide},+size`,
     '--merge-output-format', 'mp4',
-    '-o', filePath,
+    '--remux-video', 'mp4',
+    '--abort-on-unavailable-fragments',
+    '--concurrent-fragments', '1',
+    '--socket-timeout', '30',
+    '--retries', '2',
+    '--fragment-retries', '2',
+    '--max-filesize', `${opts.maxFileMb}M`,
+    '-P', stageDir,
+    '-o', 'video.%(ext)s',
   ];
-  if (withCookies && env.YT_DLP_COOKIES_FILE && existsSync(env.YT_DLP_COOKIES_FILE)) {
-    args.push('--cookies', env.YT_DLP_COOKIES_FILE);
-  }
+  if (opts.cookiesFile && existsSync(opts.cookiesFile)) args.push('--cookies', opts.cookiesFile);
   args.push(url);
+  return args;
+}
+
+async function dirSize(dir: string): Promise<number> {
+  let total = 0;
+  for (const entry of await readdir(dir).catch(() => [] as string[])) {
+    try { total += (await stat(path.join(dir, entry))).size; } catch { /* vanished */ }
+  }
+  return total;
+}
+
+/**
+ * Download `url` to `finalPath` (an .mp4 path in the weekly bin). Staging,
+ * validation and atomic publish are handled here; callers get an outcome.
+ */
+export async function downloadWithYtDlp(url: string, finalPath: string, options: YtDlpRunOptions = {}): Promise<YtDlpDownloadOutcome> {
+  const runner = options.runner ?? spawnProcessGroup;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_DOWNLOAD_TIMEOUT_MS;
+  const maxShortSide = options.maxShortSide ?? env.VIDEO_COMPRESS_MAX_HEIGHT;
+  const maxFileMb = options.maxFileMb ?? env.MEDIA_DOWNLOAD_MAX_MB;
+  const stageDir = path.join(path.dirname(finalPath), `.stage-${path.basename(finalPath, '.mp4')}-${randomUUID().slice(0, 8)}`);
+  await mkdir(stageDir, { recursive: true });
+  const cleanup = () => rm(stageDir, { recursive: true, force: true }).catch(() => { /* best-effort */ });
 
   try {
-    await execFileAsync(YT_DLP_PATH, args, {
-      timeout: DOWNLOAD_TIMEOUT_MS,
-      maxBuffer: 10 * 1024 * 1024,
-    });
-    return { ok: true };
+    let result = await runner(YT_DLP_PATH, buildYtDlpArgs(url, stageDir, { maxShortSide, maxFileMb, cookiesFile: options.cookiesFile }), timeoutMs);
+    if (result.timedOut) return { ok: false, outcome: 'transient', error: `yt-dlp exceeded ${Math.round(timeoutMs / 60000)} min (killed)` };
+
+    if (result.code !== 0 && options.gatedRetryCookiesFile && existsSync(options.gatedRetryCookiesFile)
+        && options.gatedRetryCookiesFile !== options.cookiesFile && looksLikeGatedFailure(result.output)) {
+      console.log(JSON.stringify({ event: 'ytdlp_cookie_retry', url, timestamp: new Date().toISOString() }));
+      await rm(stageDir, { recursive: true, force: true }).catch(() => {});
+      await mkdir(stageDir, { recursive: true });
+      result = await runner(YT_DLP_PATH, buildYtDlpArgs(url, stageDir, { maxShortSide, maxFileMb, cookiesFile: options.gatedRetryCookiesFile }), timeoutMs);
+      if (result.timedOut) return { ok: false, outcome: 'transient', error: `yt-dlp exceeded ${Math.round(timeoutMs / 60000)} min (killed)` };
+    }
+
+    if (result.code !== 0) {
+      const outcome = classifyYtDlpFailure(result.output);
+      return { ok: false, outcome, error: result.output.trim().slice(-600) };
+    }
+
+    // yt-dlp exits 0 with `--max-filesize` exceeded (it just skips the download).
+    if (/File is larger than max-filesize/i.test(result.output)) {
+      return { ok: false, outcome: 'policy_exceeded', error: `exceeds MEDIA_DOWNLOAD_MAX_MB=${maxFileMb}` };
+    }
+    if (await dirSize(stageDir) > maxFileMb * 1024 * 1024) {
+      return { ok: false, outcome: 'policy_exceeded', error: `staged output exceeds MEDIA_DOWNLOAD_MAX_MB=${maxFileMb}` };
+    }
+
+    const produced = (await readdir(stageDir)).filter((f) => /^video\.[a-z0-9]+$/i.test(f) && !f.endsWith('.part'));
+    if (produced.length === 0) {
+      return { ok: false, outcome: 'unknown', error: `yt-dlp exited 0 but produced no file: ${result.output.trim().slice(-300)}` };
+    }
+    const staged = path.join(stageDir, produced[0]);
+    const probe = await probeVideo(staged);
+    const verdict = judgeProbe(probe);
+    if (!verdict.ok) {
+      return { ok: false, outcome: 'unknown', error: `downloaded file failed probe (${verdict.reason})` };
+    }
+    const dims = probe?.streams?.find((s) => s.codec_type === 'video') as { width?: number; height?: number } | undefined;
+    if (dims?.width && dims?.height && Math.min(dims.width, dims.height) > maxShortSide) {
+      // No compliant rendition existed; the compressor will bring it down.
+      console.log(JSON.stringify({ event: 'ytdlp_format_fallback', url, width: dims.width, height: dims.height, cap: maxShortSide, timestamp: new Date().toISOString() }));
+    }
+    await rename(staged, finalPath);
+    return { ok: true, filePath: finalPath, sizeBytes: statSync(finalPath).size, width: dims?.width, height: dims?.height };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const stderr = (error as { stderr?: string }).stderr || '';
-    return { ok: false, output: `${message}\n${stderr}` };
+    return { ok: false, outcome: 'unknown', error: error instanceof Error ? error.message : String(error) };
+  } finally {
+    await cleanup();
   }
 }
 
 /**
- * Download a public video page's media to an exact path, height-capped like
- * every other grab so the compressor's bitrate floor leaves it untouched.
+ * Public-platform download (YouTube/Vimeo, and until PR2 the self-download
+ * fallback for anything the poller routes to yt-dlp): anonymous first, the
+ * work-account cookie jar only after a gated failure.
  */
-export async function downloadVideoViaYtDlp(
-  url: string,
-  filePath: string
-): Promise<YtDlpDownloadOutcome> {
-  let attempt = await runYtDlp(url, filePath, false);
-
-  if (!attempt.ok && looksLikeGatedFailure(attempt.output)
-      && env.YT_DLP_COOKIES_FILE && existsSync(env.YT_DLP_COOKIES_FILE)) {
-    console.log(JSON.stringify({
-      event: 'ytdlp_cookie_retry',
-      url,
-      timestamp: new Date().toISOString(),
-    }));
-    try { if (existsSync(filePath)) await unlink(filePath); } catch { /* ignore */ }
-    attempt = await runYtDlp(url, filePath, true);
-  }
-
-  if (!attempt.ok) {
-    try { if (existsSync(filePath)) await unlink(filePath); } catch { /* ignore */ }
-    if (meansNoVideo(attempt.output)) {
-      return { ok: false, reason: 'no_video' };
-    }
-    return { ok: false, reason: 'download_failed', error: attempt.output.trim().slice(0, 500) };
-  }
-
-  if (!existsSync(filePath)) {
-    return { ok: false, reason: 'no_video' };
-  }
-  const sizeBytes = statSync(filePath).size;
-  if (sizeBytes === 0) {
-    try { await unlink(filePath); } catch { /* ignore */ }
-    return { ok: false, reason: 'download_failed', error: 'yt-dlp produced an empty file' };
-  }
-  return { ok: true, filePath, sizeBytes };
+export async function downloadVideoViaYtDlp(url: string, filePath: string, options: Pick<YtDlpRunOptions, 'runner' | 'timeoutMs'> = {}): Promise<YtDlpDownloadOutcome> {
+  return downloadWithYtDlp(url, filePath, {
+    ...options,
+    gatedRetryCookiesFile: env.YT_DLP_COOKIES_FILE,
+  });
 }

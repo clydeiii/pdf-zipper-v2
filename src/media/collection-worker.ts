@@ -6,6 +6,9 @@
 import { Worker, Job } from 'bullmq';
 import { readFile, writeFile, rename, access, unlink } from 'node:fs/promises';
 import { finalizeVideoDownload, hasSourceUrl } from './video-provenance.js';
+
+/** Failure reasons that complete the job instead of retrying (see MediaCollectionResult). */
+const TERMINAL_MEDIA_REASONS = new Set(['no_media', 'unavailable', 'auth_required', 'unsupported', 'policy_exceeded']);
 import * as path from 'node:path';
 import { PDFDocument } from 'pdf-lib';
 import { workerConnection } from '../config/redis.js';
@@ -264,14 +267,18 @@ export async function startMediaWorker(): Promise<void> {
         throw new Error(`Transcript not yet available: ${item.url}`);
       }
 
-      // A source with nothing to download (text-only Patreon post) is settled,
-      // not transient. Retrying re-runs an expensive extraction five times to
-      // reach the same answer, so record it and finish cleanly.
-      if (result.reason === 'no_media') {
+      // Terminal outcomes are settled facts about the source — no video,
+      // deleted, gated, unsupported, over the size cap. Retrying re-runs an
+      // expensive extraction five times to reach the same answer, so record
+      // the outcome (the coverage audit reads it from the job's return value)
+      // and finish cleanly. Anything else is retried with the queue's backoff.
+      if (TERMINAL_MEDIA_REASONS.has(result.reason)) {
         console.log(JSON.stringify({
-          event: 'media_no_content',
+          event: 'media_outcome',
+          outcome: result.reason,
           url: item.url,
           mediaType: item.mediaType,
+          error: result.error.slice(0, 300),
           timestamp: new Date().toISOString(),
         }));
         return result;

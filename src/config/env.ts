@@ -121,6 +121,10 @@ interface EnvConfig {
   VIDEO_COMPRESS_CRF: number;
   /** Downscale videos whose SHORTER side exceeds this (default: 720; compose pins 480). Karakeep's yt-dlp grabs YouTube at 360p for reference. */
   VIDEO_COMPRESS_MAX_HEIGHT: number;
+  /** Who acquires YouTube/Vimeo video: 'native' (our yt-dlp, immediately) or 'karakeep' (legacy asset path). */
+  MEDIA_SOURCE_YOUTUBE: 'native' | 'karakeep';
+  /** Download size cap for native video acquisition, in MB. */
+  MEDIA_DOWNLOAD_MAX_MB: number;
   /** Resample videos whose frame rate exceeds this (default: 30). 29.97 NTSC never triggers. */
   VIDEO_COMPRESS_MAX_FPS: number;
   /** Optional llama.cpp OpenAI-compatible server for round-robin/failover on text-only LLM calls */
@@ -250,6 +254,8 @@ export const env: EnvConfig = {
   VIDEO_COMPRESS_KBPS_PER_MEGAPIXEL: parseIntegerEnv('VIDEO_COMPRESS_KBPS_PER_MEGAPIXEL', 2000, { min: 100 }),
   VIDEO_COMPRESS_CRF: parseIntegerEnv('VIDEO_COMPRESS_CRF', 26, { min: 0, max: 51 }),
   VIDEO_COMPRESS_MAX_HEIGHT: parseIntegerEnv('VIDEO_COMPRESS_MAX_HEIGHT', 720, { min: 144 }),
+  MEDIA_SOURCE_YOUTUBE: process.env.MEDIA_SOURCE_YOUTUBE === 'native' ? 'native' : 'karakeep',
+  MEDIA_DOWNLOAD_MAX_MB: parseIntegerEnv('MEDIA_DOWNLOAD_MAX_MB', 5000, { min: 10 }),
   VIDEO_COMPRESS_MAX_FPS: parseIntegerEnv('VIDEO_COMPRESS_MAX_FPS', 30, { min: 10 }),
   // Optional llama.cpp failover/round-robin endpoint for text-only LLM calls
   OLLAMA_FALLBACK_HOST: process.env.OLLAMA_FALLBACK_HOST || undefined,

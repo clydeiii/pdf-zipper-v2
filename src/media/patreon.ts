@@ -16,23 +16,14 @@
  * how an x.com video bookmark yields both a tweet PDF and an mp4.
  */
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { existsSync, statSync } from 'node:fs';
-import { unlink } from 'node:fs/promises';
 import { env } from '../config/env.js';
-
-const execFileAsync = promisify(execFile);
-
-const YT_DLP_PATH = process.env.YT_DLP_PATH || 'yt-dlp';
+import { downloadWithYtDlp, type YtDlpDownloadOutcome } from './ytdlp-video.js';
 
 /**
  * HLS is muxed segment-by-segment, so a long post can take a while. Integer by
  * construction — execFile REJECTS a non-integer timeout, which is how every
  * long video compression silently failed once already.
  */
-const DOWNLOAD_TIMEOUT_MS = 45 * 60_000;
-
 /**
  * True for a Patreon post URL — `patreon.com/<creator>/posts/<slug>-<id>` or
  * the shorter `patreon.com/posts/<slug>-<id>`. Creator pages, the home feed and
@@ -49,66 +40,19 @@ export function isPatreonPostUrl(url: string): boolean {
   }
 }
 
-export type PatreonDownloadOutcome =
-  | { ok: true; filePath: string; sizeBytes: number }
-  /** The post exists but carries no video (text/image-only) — not an error. */
-  | { ok: false; reason: 'no_video' }
-  | { ok: false; reason: 'download_failed'; error: string };
-
-/** yt-dlp's way of saying "this page has nothing downloadable on it". */
-function meansNoVideo(output: string): boolean {
-  return /No video formats found|Unsupported URL|no media found|There.s no video/i.test(output);
-}
+export type PatreonDownloadOutcome = YtDlpDownloadOutcome;
 
 /**
- * Download a Patreon post's video to an exact path.
- *
- * Format selection caps the frame height at VIDEO_COMPRESS_MAX_HEIGHT (compose
- * pins 480), so we pull the 480p rendition rather than 1080p and land below the
- * compressor's bitrate floor — no re-encode, and a fraction of the bandwidth.
- * The trailing `/best` keeps an unusual source (e.g. a portrait clip whose only
- * rendition is taller) downloadable rather than failing the cap.
+ * Download a Patreon post's video to an exact path through the shared,
+ * hardened yt-dlp runner (staging dir, probe, structured outcomes). Patreon
+ * needs the PERSONAL cookie jar on the first attempt — member-only HLS is
+ * behind the user's own session — which is the one difference from the
+ * public-platform path. The shorter-side cap pulls the 480p rendition
+ * directly, so the compressor rarely has anything to do.
  */
 export async function downloadPatreonVideo(
   postUrl: string,
   filePath: string
 ): Promise<PatreonDownloadOutcome> {
-  const maxHeight = env.VIDEO_COMPRESS_MAX_HEIGHT;
-  const args = [
-    '--no-playlist',
-    '--no-warnings',
-    '--no-progress',
-    '-f', `bestvideo[height<=${maxHeight}]+bestaudio/best[height<=${maxHeight}]/best`,
-    '--merge-output-format', 'mp4',
-    '-o', filePath,
-  ];
-  if (env.COOKIES_FILE && existsSync(env.COOKIES_FILE)) {
-    args.push('--cookies', env.COOKIES_FILE);
-  }
-  args.push(postUrl);
-
-  try {
-    await execFileAsync(YT_DLP_PATH, args, {
-      timeout: DOWNLOAD_TIMEOUT_MS,
-      maxBuffer: 10 * 1024 * 1024,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const stderr = (error as { stderr?: string }).stderr || '';
-    try { if (existsSync(filePath)) await unlink(filePath); } catch { /* ignore */ }
-    if (meansNoVideo(`${message}\n${stderr}`)) {
-      return { ok: false, reason: 'no_video' };
-    }
-    return { ok: false, reason: 'download_failed', error: stderr.trim() || message };
-  }
-
-  if (!existsSync(filePath)) {
-    return { ok: false, reason: 'no_video' };
-  }
-  const sizeBytes = statSync(filePath).size;
-  if (sizeBytes === 0) {
-    try { await unlink(filePath); } catch { /* ignore */ }
-    return { ok: false, reason: 'download_failed', error: 'yt-dlp produced an empty file' };
-  }
-  return { ok: true, filePath, sizeBytes };
+  return downloadWithYtDlp(postUrl, filePath, { cookiesFile: env.COOKIES_FILE });
 }

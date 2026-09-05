@@ -9,6 +9,7 @@
  * 5. Persist batch history + ledger outcomes
  */
 
+import { runFidelityGate } from '../quality/fidelity-harness.js';
 import { Worker, Job, QueueEvents } from 'bullmq';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -174,15 +175,32 @@ async function buildGate(): Promise<{ passed: boolean; error?: string }> {
     timeoutMs: 10 * 60 * 1000,
   });
 
-  if (result.success) {
-    return { passed: true };
+  if (!result.success) {
+    const tail = (result.stderr || result.stdout).slice(-1200);
+    return {
+      passed: false,
+      error: `build_failed: ${tail}`.trim(),
+    };
   }
 
-  const tail = (result.stderr || result.stdout).slice(-1200);
-  return {
-    passed: false,
-    error: `build_failed: ${tail}`.trim(),
-  };
+  // Held-out fidelity corpus: a batch that makes a REVIEWED known-bad capture
+  // pass the quality gate (a falseAccept) is rejected here, before a human
+  // ever sees it. This is the structural answer to the observed pattern of
+  // batches converging on loosening pdf-content.ts. The harness and the
+  // corpus are outside the fix write boundary (src/fix/boundary.ts).
+  try {
+    const gate = await runFidelityGate();
+    if (!gate.ok) {
+      return {
+        passed: false,
+        error: `fidelity_gate_failed: ${gate.summary.issues.slice(0, 8).join('; ')}`.slice(0, 1500),
+      };
+    }
+  } catch (err) {
+    // A harness crash is a gate failure, not a pass: silence must not equal safety.
+    return { passed: false, error: `fidelity_gate_error: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  return { passed: true };
 }
 
 async function preparePatchBranch(params: {

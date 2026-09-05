@@ -29,7 +29,7 @@ import type { MediaItem } from './types.js';
 const execFileAsync = promisify(execFile);
 
 export interface ProbeSummary {
-  streams?: Array<{ codec_type?: string }>;
+  streams?: Array<{ codec_type?: string; width?: number; height?: number }>;
   format?: { duration?: string | number; tags?: Record<string, string> };
 }
 
@@ -51,7 +51,7 @@ export async function probeVideo(filePath: string): Promise<ProbeSummary | null>
   try {
     const { stdout } = await execFileAsync('ffprobe', [
       '-v', 'error',
-      '-show_entries', 'stream=codec_type:format=duration:format_tags=source_url',
+      '-show_entries', 'stream=codec_type,width,height:format=duration:format_tags=source_url',
       '-of', 'json',
       filePath,
     ], { timeout: 30000, maxBuffer: 4 * 1024 * 1024 });
