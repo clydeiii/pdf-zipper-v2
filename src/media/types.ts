@@ -45,6 +45,8 @@ export type MediaCollectionResult =
       filePath: string;       // Local file path where media was saved
       fileSize: number;       // Actual file size in bytes
       downloadDuration: number; // Milliseconds
+      /** Further videos of the same post, published as `<base>-N.mp4` (multi-video tweets). */
+      extraFiles?: string[];
     }
   | {
       success: false;

@@ -20,11 +20,14 @@
  */
 
 import type { BookmarkItem } from '../feeds/types.js';
+import { isTweetStatusUrl } from './x-media.js';
 
 export type MediaSourceMode = 'native' | 'karakeep';
 
 export interface MediaRoutingSettings {
   youtube: MediaSourceMode;
+  /** x.com / twitter.com status URLs (PR2): native = our tiered yt-dlp path (src/media/x-media.ts). */
+  x: MediaSourceMode;
 }
 
 const NATIVE_VIDEO_HOSTS = new Set([
@@ -56,12 +59,24 @@ export function parseMediaSourceMode(value: string | undefined, fallback: MediaS
  */
 export function applyMediaRouting(item: BookmarkItem, settings: MediaRoutingSettings): BookmarkItem {
   if (item.mediaType === 'pdf') return item;
-  if (settings.youtube !== 'native' || !isNativeVideoHost(item.url)) return item;
+  const native = (settings.youtube === 'native' && isNativeVideoHost(item.url)) ||
+    (settings.x === 'native' && isTweetStatusUrl(item.url));
+  if (!native) return item;
+  // For a tweet this is SPECULATIVE: most tweets have no video, and the
+  // downloader's explicit `no_media` outcome settles that cheaply (one
+  // anonymous extraction). Discovery is therefore independent of the PDF
+  // capture and of Karakeep — a failed PDF or a late Karakeep asset can no
+  // longer hide a video.
   return {
     ...item,
     mediaType: 'video',
     enclosure: { url: item.url, type: 'video/mp4', length: undefined, downloadVia: 'yt-dlp' },
   };
+}
+
+/** Routing settings from the environment — one place, used by the poller and the coverage audit. */
+export function mediaRoutingFromEnv(e: { MEDIA_SOURCE_YOUTUBE: MediaSourceMode; MEDIA_SOURCE_X: MediaSourceMode }): MediaRoutingSettings {
+  return { youtube: e.MEDIA_SOURCE_YOUTUBE, x: e.MEDIA_SOURCE_X };
 }
 
 /** Which acquisition path an item is on, for logs and the coverage audit. */

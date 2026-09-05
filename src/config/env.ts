@@ -123,6 +123,8 @@ interface EnvConfig {
   VIDEO_COMPRESS_MAX_HEIGHT: number;
   /** Who acquires YouTube/Vimeo video: 'native' (our yt-dlp, immediately) or 'karakeep' (legacy asset path). */
   MEDIA_SOURCE_YOUTUBE: 'native' | 'karakeep';
+  /** Who acquires x.com video: 'native' (tiered yt-dlp: anon → harvested CDN → X cookies) or 'karakeep' (legacy asset path + late re-check). */
+  MEDIA_SOURCE_X: 'native' | 'karakeep';
   /** Download size cap for native video acquisition, in MB. */
   MEDIA_DOWNLOAD_MAX_MB: number;
   /** Resample videos whose frame rate exceeds this (default: 30). 29.97 NTSC never triggers. */
@@ -255,6 +257,7 @@ export const env: EnvConfig = {
   VIDEO_COMPRESS_CRF: parseIntegerEnv('VIDEO_COMPRESS_CRF', 26, { min: 0, max: 51 }),
   VIDEO_COMPRESS_MAX_HEIGHT: parseIntegerEnv('VIDEO_COMPRESS_MAX_HEIGHT', 720, { min: 144 }),
   MEDIA_SOURCE_YOUTUBE: process.env.MEDIA_SOURCE_YOUTUBE === 'native' ? 'native' : 'karakeep',
+  MEDIA_SOURCE_X: process.env.MEDIA_SOURCE_X === 'native' ? 'native' : 'karakeep',
   MEDIA_DOWNLOAD_MAX_MB: parseIntegerEnv('MEDIA_DOWNLOAD_MAX_MB', 5000, { min: 10 }),
   VIDEO_COMPRESS_MAX_FPS: parseIntegerEnv('VIDEO_COMPRESS_MAX_FPS', 30, { min: 10 }),
   // Optional llama.cpp failover/round-robin endpoint for text-only LLM calls

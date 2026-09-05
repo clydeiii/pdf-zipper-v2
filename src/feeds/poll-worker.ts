@@ -5,7 +5,7 @@ import { fetchKarakeepBookmarkItem } from './parsers/karakeep.js';
 import { BookmarkDeduplicator } from '../urls/deduplicator.js';
 import { FEED_QUEUE_NAME, metadataQueue, mediaCollectionQueue } from './monitor.js';
 import { mediaJobId, needsMediaRecheck } from './media-recheck.js';
-import { applyMediaRouting, acquisitionSourceOf } from '../media/routing.js';
+import { applyMediaRouting, acquisitionSourceOf, mediaRoutingFromEnv } from '../media/routing.js';
 import { env } from '../config/env.js';
 import type { FeedPollJobData, MetadataJobData } from './monitor.js';
 import type { BookmarkItem, FeedCacheState } from './types.js';
@@ -180,7 +180,7 @@ function createFeedPollWorker(): Worker<FeedPollJobData> {
       // every video itself). In native mode YouTube/Vimeo get a yt-dlp
       // enclosure right here, so the asset wait below never engages and the
       // metadata worker queues the download on this very poll.
-      const routing = { youtube: env.MEDIA_SOURCE_YOUTUBE };
+      const routing = mediaRoutingFromEnv(env);
       result.items = result.items.map((item) => {
         const routed = applyMediaRouting(item, routing);
         if (routed !== item) {
@@ -241,6 +241,8 @@ function createFeedPollWorker(): Worker<FeedPollJobData> {
 
         // Tweet with no video asset (yet): park it for the late-video re-check
         // while the PDF capture proceeds normally below.
+        // (Legacy path only: in native X mode every tweet already carries a
+        // yt-dlp enclosure, so needsMediaRecheck is false by construction.)
         if (source === 'karakeep' && needsMediaRecheck(item)) {
           const entry: MediaRecheckEntry = { url: item.url, attempts: 0, since: new Date().toISOString() };
           await redis.hset(`${MEDIA_RECHECK_PREFIX}${source}`, item.guid, JSON.stringify(entry));

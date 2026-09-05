@@ -73,7 +73,7 @@ test('one format policy: shorter-side cap via -S res, no /best escape, fragments
   assert.ok(!/\/best(\s|$)/.test(joined.replace('bv*+ba/b', '')), 'no unbounded /best fallback');
   assert.match(joined, /--abort-on-unavailable-fragments/);
   assert.match(joined, /--max-filesize 5000M/);
-  assert.match(joined, /-P \/tmp\/stage -o video\.%\(ext\)s/);
+  assert.match(joined, /-P \/tmp\/stage -o video-%\(playlist_index\|1\)s\.%\(ext\)s/);
   assert.ok(!joined.includes('--cookies'), 'anonymous by default');
   const withCookies = buildYtDlpArgs('https://youtu.be/x', '/tmp/stage', { maxShortSide: 480, maxFileMb: 5000, cookiesFile: '/etc/hostname' });
   assert.ok(withCookies.includes('--cookies'));

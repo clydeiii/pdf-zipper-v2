@@ -52,7 +52,19 @@ export const TERMINAL_YTDLP_OUTCOMES: ReadonlySet<YtDlpOutcome> =
   new Set<YtDlpOutcome>(['no_media', 'unavailable', 'auth_required', 'unsupported', 'policy_exceeded']);
 
 export type YtDlpDownloadOutcome =
-  | { ok: true; filePath: string; sizeBytes: number; width?: number; height?: number }
+  | {
+      ok: true;
+      filePath: string;
+      sizeBytes: number;
+      width?: number;
+      height?: number;
+      /**
+       * Further videos from the same post (a tweet can carry up to four),
+       * published beside `filePath` as `<base>-2.mp4`, `<base>-3.mp4`, …
+       * Only populated when the caller allowed multiple outputs.
+       */
+      extraFiles: string[];
+    }
   | { ok: false; outcome: YtDlpOutcome; error: string };
 
 /**
@@ -85,6 +97,12 @@ export interface YtDlpRunOptions {
   maxShortSide?: number;
   /** Size cap in MB; defaults to MEDIA_DOWNLOAD_MAX_MB. */
   maxFileMb?: number;
+  /**
+   * Accept every video the extractor yields for the URL (multi-video tweets;
+   * yt-dlp returns them as entries even with --no-playlist). Extras are
+   * published as `<base>-N.mp4`. Off for YouTube/Vimeo: one URL, one video.
+   */
+  allowMultiple?: boolean;
   /** Injected for tests. */
   runner?: ProcessRunner;
 }
@@ -132,7 +150,9 @@ export function buildYtDlpArgs(url: string, stageDir: string, opts: { maxShortSi
     '--fragment-retries', '2',
     '--max-filesize', `${opts.maxFileMb}M`,
     '-P', stageDir,
-    '-o', 'video.%(ext)s',
+    // playlist_index is NA for a single video → `|1`. Multi-video tweets
+    // number their entries; the publisher maps N=1 to <base>.mp4, N>1 to <base>-N.mp4.
+    '-o', 'video-%(playlist_index|1)s.%(ext)s',
   ];
   if (opts.cookiesFile && existsSync(opts.cookiesFile)) args.push('--cookies', opts.cookiesFile);
   args.push(url);
@@ -186,23 +206,38 @@ export async function downloadWithYtDlp(url: string, finalPath: string, options:
       return { ok: false, outcome: 'policy_exceeded', error: `staged output exceeds MEDIA_DOWNLOAD_MAX_MB=${maxFileMb}` };
     }
 
-    const produced = (await readdir(stageDir)).filter((f) => /^video\.[a-z0-9]+$/i.test(f) && !f.endsWith('.part'));
+    const produced = (await readdir(stageDir))
+      .map((f) => ({ f, m: /^video-(\d+|NA)\.[a-z0-9]+$/i.exec(f) }))
+      .filter((x): x is { f: string; m: RegExpExecArray } => !!x.m && !x.f.endsWith('.part'))
+      .map((x) => ({ file: x.f, index: x.m[1] === 'NA' ? 1 : Number(x.m[1]) }))
+      .sort((a, b) => a.index - b.index);
     if (produced.length === 0) {
       return { ok: false, outcome: 'unknown', error: `yt-dlp exited 0 but produced no file: ${result.output.trim().slice(-300)}` };
     }
-    const staged = path.join(stageDir, produced[0]);
-    const probe = await probeVideo(staged);
-    const verdict = judgeProbe(probe);
-    if (!verdict.ok) {
-      return { ok: false, outcome: 'unknown', error: `downloaded file failed probe (${verdict.reason})` };
+    const selected = options.allowMultiple ? produced : produced.slice(0, 1);
+    const published: string[] = [];
+    let dims: { width?: number; height?: number } | undefined;
+    for (let i = 0; i < selected.length; i++) {
+      const staged = path.join(stageDir, selected[i].file);
+      const probe = await probeVideo(staged);
+      const verdict = judgeProbe(probe);
+      if (!verdict.ok) {
+        // One bad entry poisons the whole attempt: a partially-published
+        // multi-video tweet would look complete to every later check.
+        for (const done of published) await rm(done, { force: true }).catch(() => {});
+        return { ok: false, outcome: 'unknown', error: `downloaded file ${selected[i].file} failed probe (${verdict.reason})` };
+      }
+      const d = probe?.streams?.find((s) => s.codec_type === 'video') as { width?: number; height?: number } | undefined;
+      if (i === 0) dims = d;
+      if (d?.width && d?.height && Math.min(d.width, d.height) > maxShortSide) {
+        // No compliant rendition existed; the compressor will bring it down.
+        console.log(JSON.stringify({ event: 'ytdlp_format_fallback', url, width: d.width, height: d.height, cap: maxShortSide, timestamp: new Date().toISOString() }));
+      }
+      const target = i === 0 ? finalPath : finalPath.replace(/\.mp4$/i, `-${i + 1}.mp4`);
+      await rename(staged, target);
+      published.push(target);
     }
-    const dims = probe?.streams?.find((s) => s.codec_type === 'video') as { width?: number; height?: number } | undefined;
-    if (dims?.width && dims?.height && Math.min(dims.width, dims.height) > maxShortSide) {
-      // No compliant rendition existed; the compressor will bring it down.
-      console.log(JSON.stringify({ event: 'ytdlp_format_fallback', url, width: dims.width, height: dims.height, cap: maxShortSide, timestamp: new Date().toISOString() }));
-    }
-    await rename(staged, finalPath);
-    return { ok: true, filePath: finalPath, sizeBytes: statSync(finalPath).size, width: dims?.width, height: dims?.height };
+    return { ok: true, filePath: published[0], sizeBytes: statSync(published[0]).size, width: dims?.width, height: dims?.height, extraFiles: published.slice(1) };
   } catch (error) {
     return { ok: false, outcome: 'unknown', error: error instanceof Error ? error.message : String(error) };
   } finally {

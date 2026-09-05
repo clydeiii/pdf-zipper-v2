@@ -88,7 +88,9 @@ export const mediaCollectionQueue = new Queue<MediaCollectionJobData>(MEDIA_COLL
       type: 'exponential',
       delay: 60000,  // Start with 1 minute, grows to ~16 min
     },
-    removeOnComplete: { count: 500 },
+    // 2000, not 500: with native X every tweet has a media job (~110/day) and
+    // the coverage audit reads completed jobs' outcomes over a 3-day window.
+    removeOnComplete: { count: 2000 },
     removeOnFail: false,
   },
 });

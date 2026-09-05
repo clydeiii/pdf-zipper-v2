@@ -9,6 +9,7 @@ import { PDFDocument } from 'pdf-lib';
 import type { Redis } from 'ioredis';
 import { env } from '../config/env.js';
 import { buildKarakeepItem, type KarakeepBookmark } from '../feeds/parsers/karakeep.js';
+import { applyMediaRouting, mediaRoutingFromEnv } from '../media/routing.js';
 import type { BookmarkItem } from '../feeds/types.js';
 import { normalizeBookmarkUrl, canonicalizeYouTubeUrl } from '../urls/normalizer.js';
 import { BookmarkDeduplicator } from '../urls/deduplicator.js';
@@ -524,7 +525,11 @@ export async function runCoverageAudit(windowDays = configuredNumber('COVERAGE_A
       const input: CoverageBookmark = { bookmarkId: bookmark.id, createdAt: bookmark.createdAt,
         url: bookmark.content?.url || '', title: bookmark.content?.title || bookmark.title || '', item: null };
       try {
-        input.item = buildKarakeepItem(bookmark, base);
+        // Same routing the poller applies, so what the audit EXPECTS is what
+        // the pipeline would have produced (native X: every tweet expects an
+        // mp4 until its media job says no_media).
+        const built = buildKarakeepItem(bookmark, base);
+        input.item = built ? applyMediaRouting(built, mediaRoutingFromEnv(env)) : built;
         input.url = input.item?.url || input.url;
         input.title = input.item?.title || input.title;
         if (!input.item) {

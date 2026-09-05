@@ -12,6 +12,7 @@ import { getWeeklyBinPath, ensureWeeklyBinExists, getMediaFilename } from './org
 import { env } from '../config/env.js';
 import type { MediaItem, MediaCollectionResult } from './types.js';
 import { downloadPatreonVideo, isPatreonPostUrl } from './patreon.js';
+import { downloadTweetVideos, isTweetStatusUrl } from './x-media.js';
 import { downloadVideoViaYtDlp, TERMINAL_YTDLP_OUTCOMES } from './ytdlp-video.js';
 import { judgeProbe, probeVideo } from './video-provenance.js';
 
@@ -89,14 +90,17 @@ export async function downloadMedia(item: MediaItem): Promise<MediaCollectionRes
     if (item.enclosure.downloadVia === 'yt-dlp') {
       const outcome = isPatreonPostUrl(item.enclosure.url)
         ? await downloadPatreonVideo(item.enclosure.url, filePath)
-        : await downloadVideoViaYtDlp(item.enclosure.url, filePath);
+        : isTweetStatusUrl(item.enclosure.url)
+          ? await downloadTweetVideos(item.enclosure.url, filePath)
+          : await downloadVideoViaYtDlp(item.enclosure.url, filePath);
       if (outcome.ok) {
         return {
           success: true,
           item,
           filePath: outcome.filePath,
-          fileSize: outcome.sizeBytes,
+          fileSize: outcome.sizeBytes || (existsSync(outcome.filePath) ? statSync(outcome.filePath).size : 0),
           downloadDuration: Date.now() - startTime,
+          extraFiles: outcome.extraFiles,
         };
       }
       // Terminal outcomes keep their name so the worker and the coverage

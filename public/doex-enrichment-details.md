@@ -54,6 +54,7 @@ Read with any PDF metadata reader (`pdfinfo`, pypdf, pdf-lib). Custom fields:
 | `SourceTextChars` | Whitespace-normalized visible text length of the first `<article>`, otherwise first `<main>`, otherwise `body`, as rendered at capture time after lazy loading settles and before privacy/print mutations. Decimal integer string; includes the container's text outside eligible anchor blocks |
 | `SourceWordCount` | Publisher-declared positive integer `wordCount` from Article/NewsArticle (including article subtypes) JSON-LD present on the page at capture time. Optional; this is the publisher's declaration, not a count of rendered or printed words |
 | `ContentAnchors` | JSON array string of three distinctive sentences from the rendered container's first 10%, middle, and last 10%, in that order. Chosen only from visible `p`/`li`/`blockquote`/`h2`/`h3` prose, excluding navigation/sidebar/footer blocks and configured privacy terms. Whitespace/typography normalized and lowercased; at most 600 characters including JSON encoding. Absent when three suitable unique sentences cannot be found |
+| `LinkedMedia` | Posts that carry video (x.com, Patreon): `; `-separated **basenames of every MP4 acquired for this post**, wherever the bytes live. Usually the post's own basename (`x.com-user-post-123.mp4`, plus `x.com-user-post-123-2.mp4`, `-3` … for a multi-video post, in attachment order); when the capture system recognised the video as a byte-identical copy of one already in the library, the entry is the OTHER post's file (that file's `also_bookmarked_as` names this post). Written by whichever of the PDF and the video finished last, so it may arrive on a re-shipped copy of the PDF. Absent on posts with no video and on files captured before 2026-09-05 |
 | `CaptureScope` | Manual captures: `page`, `reader`, or `selection` |
 | `Markdown` | Manual captures and eligible automated Playwright articles: clean reader-view Markdown embedded alongside the rendered PDF. Deterministic Readability/Turndown extraction, with no LLM rewriting. Headings, quotes, code blocks and tables are retained (GFM tables, or HTML for tables without a heading row) |
 | `MarkdownLength` | Character count of the **full extraction before any cap**, measured as JavaScript UTF-16 code units. May exceed the embedded Markdown length |
@@ -110,7 +111,12 @@ AI-detection caveats — these fields are evidence, not verdicts:
 A capture's PDF and its MP4 share one base name, and that shared name is how
 you link them: `x.com-jeffladish-post-123.pdf` ↔ `x.com-jeffladish-post-123.mp4`
 (plus `…​.transcript.pdf` beside the video). Same for Patreon posts,
-`patreon.com-{creator}-posts-{slug}`.
+`patreon.com-{creator}-posts-{slug}`. **A post with several videos** (X allows
+four) publishes the first as `<base>.mp4` and the rest as `<base>-2.mp4`,
+`<base>-3.mp4`, … in attachment order, each with its own `.transcript.pdf`.
+Since 2026-09-05 the PDF's `LinkedMedia` field lists the exact basenames —
+prefer it over the naming convention, because it also covers the dedup case
+where the video lives under another post's name.
 
 **Filenames are lowercase as of 2026-08-12.** Before that the PDF path kept the
 author's capitalisation from the URL (`x.com-JeffLadish-…`) while the MP4 was

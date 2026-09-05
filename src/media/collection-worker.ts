@@ -6,6 +6,9 @@
 import { Worker, Job } from 'bullmq';
 import { readFile, writeFile, rename, access, unlink } from 'node:fs/promises';
 import { finalizeVideoDownload, hasSourceUrl } from './video-provenance.js';
+import { recordLinkedMedia } from './pdf-media-link.js';
+import { isTweetStatusUrl } from './x-media.js';
+import { isPatreonPostUrl } from './patreon.js';
 
 /** Failure reasons that complete the job instead of retrying (see MediaCollectionResult). */
 const TERMINAL_MEDIA_REASONS = new Set(['no_media', 'unavailable', 'auth_required', 'unsupported', 'policy_exceeded']);
@@ -116,6 +119,9 @@ export async function startMediaWorker(): Promise<void> {
                 timestamp: new Date().toISOString(),
               }));
               result.filePath = dup.existingPath;
+              if (isTweetStatusUrl(item.url) || isPatreonPostUrl(item.url)) {
+                await recordLinkedMedia(workerConnection, item.url, [dup.existingPath, ...(result.extraFiles ?? [])]).catch(() => {});
+              }
               return result;
             }
           }
@@ -144,6 +150,41 @@ export async function startMediaWorker(): Promise<void> {
           } catch (err) {
             // Non-fatal: video was still downloaded successfully
             console.warn('Video enrichment failed (non-fatal):', err instanceof Error ? err.message : err);
+          }
+
+          // Further videos of a multi-video tweet (`<base>-2.mp4`, …): same
+          // gate → dedup → compress → enrich pipeline, each on its own file.
+          const linked: string[] = [result.filePath];
+          for (const extra of result.extraFiles ?? []) {
+            try {
+              const gate = await finalizeVideoDownload(extra, item);
+              if (!gate.ok || !gate.stamped) { await unlink(extra).catch(() => {}); continue; }
+              const dup = await findDuplicateVideo(extra);
+              if (dup) {
+                await appendVideoCrossRef(dup.existingPath, item.url);
+                await removeDuplicateDownload(extra);
+                console.log(JSON.stringify({ event: 'video_dedup', duplicateOf: dup.existingPath, droppedDownload: extra, bookmarkUrl: item.url, timestamp: new Date().toISOString() }));
+                linked.push(dup.existingPath);
+                continue;
+              }
+              await maybeCompressVideo(extra);
+              let finalExtra = extra;
+              try {
+                const enriched = await enrichVideo(extra, item);
+                if (enriched.filePath) finalExtra = enriched.filePath;
+              } catch (err) {
+                console.warn('Extra video enrichment failed (non-fatal):', err instanceof Error ? err.message : err);
+              }
+              linked.push(finalExtra);
+            } catch (err) {
+              console.warn(`Extra video ${extra} failed (non-fatal):`, err instanceof Error ? err.message : err);
+            }
+          }
+          // PDF ↔ MP4 link (owner request 2026-09-05): the post's PDF lists
+          // every MP4 acquired for it, wherever dedup put the bytes.
+          if (isTweetStatusUrl(item.url) || isPatreonPostUrl(item.url)) {
+            await recordLinkedMedia(workerConnection, item.url, linked).catch((err) =>
+              console.warn('LinkedMedia record failed (non-fatal):', err instanceof Error ? err.message : err));
           }
         }
 

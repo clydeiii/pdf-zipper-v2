@@ -134,6 +134,7 @@ services:
       # Karakeep is the bookmarking service only (owner decision 2026-09-05);
       # x.com follows in PR2, then Karakeep's CRAWLER_VIDEO_DOWNLOAD goes off.
       - MEDIA_SOURCE_YOUTUBE=native
+      - MEDIA_SOURCE_X=native
       - MEDIA_DOWNLOAD_MAX_MB=5000
       - HOME=/home/clyde
 

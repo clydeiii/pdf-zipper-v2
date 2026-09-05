@@ -18,6 +18,9 @@ import type { ConversionJobData, ConversionJobResult } from '../jobs/types.js';
 import { initBrowser, closeBrowser } from '../browsers/manager.js';
 import { convertUrlToPDF, isPdfUrl, downloadPdfDirect, rewriteToPdfUrl } from '../converters/pdf.js';
 import { markdownInfoDictFields } from '../converters/markdown-extract.js';
+import { applyLinkedMediaToPdf } from '../media/pdf-media-link.js';
+import { isTweetStatusUrl } from '../media/x-media.js';
+import { isPatreonPostUrl } from '../media/patreon.js';
 
 /**
  * A vision "blank_page" verdict is overridden when the PDF extracts at least
@@ -746,6 +749,13 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
     pdfPath,
     articleContent: result.articleContent,
   });
+
+  // PDF ↔ MP4 link: if the post's video(s) were acquired before this PDF
+  // existed, the media worker left their basenames in Redis — embed them now
+  // (LinkedMedia). The media worker does the same in the other order.
+  if (isTweetStatusUrl(originalUrl || url) || isPatreonPostUrl(originalUrl || url)) {
+    await applyLinkedMediaToPdf(workerConnection, originalUrl || url, pdfPath).catch(() => { /* non-fatal */ });
+  }
 
   if (oldFilePath) await deleteOldFileIfDifferent(oldFilePath, pdfPath);
 
