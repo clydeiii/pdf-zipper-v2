@@ -50,6 +50,16 @@ const TEMP_DIR = process.env.TEMP_DIR || '/tmp/podcast-transcriber';
  * @param extension - File extension (mp3, m4a)
  * @returns Path to downloaded file
  */
+/**
+ * User agents tried in order for the audio fetch. A desktop browser first
+ * (what the iTunes/Apple Podcasts metadata fetch already presents), then a
+ * podcast-client identity for hosts that only whitelist players.
+ */
+export const AUDIO_USER_AGENTS: readonly string[] = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'AppleCoreMedia/1.0.0.22F76 (iPhone; U; CPU OS 18_5 like Mac OS X; en_us)',
+];
+
 export async function downloadAudio(
   audioUrl: string,
   extension: string
@@ -69,12 +79,40 @@ export async function downloadAudio(
 
   const startTime = Date.now();
 
-  const response = await fetch(audioUrl, {
-    signal: AbortSignal.timeout(env.PODCAST_DOWNLOAD_TIMEOUT_MS),
-  });
+  // Node's fetch sends no browser-like User-Agent, and Cloudflare-fronted
+  // podcast hosts (Buzzsprout: LessWrong Curated, Mystery AI Hype Theater 3000,
+  // The Data Exchange…) answer that with 403 — a third of every podcast failure
+  // on record (21 of 63, verified 2026-09-04: same URL, browser UA → 302 → audio).
+  // Present a browser UA first; on 403 retry once as a podcast app, which is
+  // what these CDNs are actually built to serve.
+  let response: Response | undefined;
+  for (const userAgent of AUDIO_USER_AGENTS) {
+    response = await fetch(audioUrl, {
+      headers: { 'User-Agent': userAgent, Accept: 'audio/*,*/*;q=0.8' },
+      signal: AbortSignal.timeout(env.PODCAST_DOWNLOAD_TIMEOUT_MS),
+    });
+    if (response.status !== 403) break;
+    console.warn(JSON.stringify({
+      event: 'audio_download_forbidden',
+      url: audioUrl.substring(0, 100),
+      userAgent: userAgent.slice(0, 40),
+      timestamp: new Date().toISOString(),
+    }));
+  }
+  if (!response) {
+    throw new Error('Audio download failed: no request made');
+  }
 
   if (!response.ok) {
     throw new Error(`Audio download failed: ${response.status} ${response.statusText}`);
+  }
+
+  // A 200 is not proof of audio: a bot-challenge or "episode removed" page
+  // also answers 200, and sending an HTML file to the transcriber produces a
+  // confusing ASR error instead of a clear download failure.
+  const contentType = (response.headers.get('content-type') || '').toLowerCase();
+  if (/^text\/(html|plain)|application\/(json|xhtml)/.test(contentType)) {
+    throw new Error(`Audio download failed: server returned ${contentType.split(';')[0]} instead of audio`);
   }
 
   const contentLength = response.headers.get('content-length');

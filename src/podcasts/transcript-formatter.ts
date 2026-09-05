@@ -5,7 +5,7 @@
  * into readable, semantically-structured paragraphs using Ollama.
  */
 
-import { chatText } from '../utils/llm-chat.js';
+import { chatText, LLM_NUM_CTX } from '../utils/llm-chat.js';
 import { normalizeTranscript } from './s1-normalizer.js';
 import { env } from '../config/env.js';
 import type { PodcastMetadata } from './types.js';
@@ -163,7 +163,11 @@ export async function formatTranscriptWithLLM(
 
   // Process in chunks if transcript is very long (LLM context limits)
   // Most podcasts are 10-60 min = 5,000-30,000 chars, which should fit
-  const maxChunkSize = 15000; // ~15k chars per chunk
+  // ~10k chars per chunk: ≈2.5–3.3k tokens in and the same out, plus the
+  // prompt and hint list, stays under the shared 8K context (LLM_NUM_CTX)
+  // even for token-dense speech. 15k chars needed a 16K context, and that
+  // mismatch was what thrashed the Ollama model cache.
+  const maxChunkSize = 10000;
 
   if (cleanedTranscript.length > maxChunkSize) {
     return await formatLongTranscript(cleanedTranscript, maxChunkSize, context);
@@ -318,7 +322,12 @@ ${text}`;
       think: false,       // Disable internal reasoning (saves ~3000 tokens per call)
       temperature: 0.2,   // Low temperature — this is proofreading, not creative
       numPredict: -1,     // No limit on output tokens
-      numCtx: 16384,      // 16K — prompt is much shorter now (just proper-noun fix)
+      // Same context size as every other pdf-zipper call (see LLM_NUM_CTX):
+      // asking for 16K here while enrichment/vision ask for 8K made Ollama
+      // evict and reload the 9GB model on every transcript↔article switch
+      // (~100 reloads/day on mac.mini, 2026-08-30..09-04). The chunk size in
+      // formatTranscriptWithLLM is sized so input + output fit in 8K.
+      numCtx: LLM_NUM_CTX,
     });
 
     // The LLM sometimes reflows text with lone newlines despite the prompt —

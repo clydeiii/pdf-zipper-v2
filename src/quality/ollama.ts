@@ -5,6 +5,7 @@
 
 import { Ollama } from 'ollama';
 import { env } from '../config/env.js';
+import { LLM_NUM_CTX, LLM_KEEP_ALIVE } from '../utils/llm-chat.js';
 import type { OllamaHealthResult } from './types.js';
 
 /**
@@ -70,7 +71,10 @@ export async function analyzeImageWithOllama(
         images: [imageBase64],
       },
     ],
-    options: { num_ctx: 8192 },
+    // Shared context size — a different num_ctx here would evict the model
+    // between the vision call and the enrichment call of the same job.
+    options: { num_ctx: LLM_NUM_CTX },
+    keep_alive: LLM_KEEP_ALIVE,
   });
 
   return response.message.content;

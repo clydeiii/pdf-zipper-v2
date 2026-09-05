@@ -34,6 +34,20 @@ const ollamaClient = new Ollama({
   }) as typeof fetch,
 });
 
+/**
+ * The ONE context size every pdf-zipper call to the shared Ollama host must
+ * use — vision scoring, metadata enrichment, translation, and transcript
+ * formatting alike. Ollama sizes the runner's KV cache from the request's
+ * num_ctx (× OLLAMA_NUM_PARALLEL slots); a request for a different size
+ * evicts the loaded model and reloads it. With enrichment at 8K and the
+ * transcript formatter at 16K, mac.mini's server.log showed ~100 reloads of
+ * the 9GB model per day and 30–60 "predicted to exceed available memory"
+ * evictions (2026-08-30..09-04) — every article↔transcript switch paid a
+ * reload and lost the prompt cache. Callers that need more room chunk their
+ * input instead of raising this.
+ */
+export const LLM_NUM_CTX = 8192;
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
@@ -53,7 +67,24 @@ export interface ChatTextOptions {
    * thinking server-side via chat_template_kwargs, so this is a no-op there.
    */
   think?: boolean;
+  /**
+   * Constrain the reply to a JSON object (Ollama `format: "json"`; llama.cpp
+   * `response_format: json_object`). Use for every call that will be
+   * JSON.parse'd — free-text replies wrapped in prose or code fences were the
+   * cause of silently empty enrichment.
+   */
+  format?: 'json' | Record<string, unknown>;
 }
+
+/**
+ * How long the shared model stays resident after a call. Ollama's default is
+ * 5 minutes; at ~200 captures/day the gaps between jobs routinely exceed
+ * that, so roughly half of mac.mini's ~100 daily model loads were idle
+ * expiry rather than eviction. gemma4:e4b is meant to be resident (CLAUDE.md:
+ * e4b + s1-mini + parakeet ≈ 13GB of 24GB is the intended steady state).
+ * Same value the s1-normalizer already uses for its model.
+ */
+export const LLM_KEEP_ALIVE = '2h';
 
 interface Provider {
   name: string;
@@ -64,17 +95,22 @@ interface Provider {
 const ollamaProvider: Provider = {
   name: 'ollama',
   enabled: () => true,
-  async chat({ model, messages, temperature, numCtx, numPredict, think }) {
+  async chat({ model, messages, temperature, numCtx, numPredict, think, format }) {
     const options: Record<string, number> = {};
     if (temperature !== undefined) options.temperature = temperature;
-    if (numCtx !== undefined) options.num_ctx = numCtx;
+    // Default to the shared size rather than Ollama's server default
+    // (OLLAMA_CONTEXT_LENGTH=65536 on mac.mini) — an unsized request would
+    // allocate a 64K KV cache and evict everything else.
+    options.num_ctx = numCtx ?? LLM_NUM_CTX;
     if (numPredict !== undefined) options.num_predict = numPredict;
 
     const r = await ollamaClient.chat({
       model,
       messages,
       options,
+      keep_alive: LLM_KEEP_ALIVE,
       ...(think !== undefined ? { think } : {}),
+      ...(format ? { format } : {}),
     });
     return r.message.content;
   },
@@ -83,7 +119,7 @@ const ollamaProvider: Provider = {
 const llamacppProvider: Provider = {
   name: 'llamacpp',
   enabled: () => !!env.LLAMACPP_HOST && !!env.LLAMACPP_API_KEY,
-  async chat({ messages, temperature, numPredict }) {
+  async chat({ messages, temperature, numPredict, format }) {
     const url = `${env.LLAMACPP_HOST!.replace(/\/$/, '')}/v1/chat/completions`;
     const body: Record<string, unknown> = {
       model: env.LLAMACPP_MODEL,
@@ -94,6 +130,10 @@ const llamacppProvider: Provider = {
     };
     if (temperature !== undefined) body.temperature = temperature;
     if (numPredict !== undefined && numPredict > 0) body.max_tokens = numPredict;
+    if (format === 'json') body.response_format = { type: 'json_object' };
+    else if (format && typeof format === 'object') {
+      body.response_format = { type: 'json_schema', json_schema: { name: 'reply', schema: format } };
+    }
 
     const res = await fetch(url, {
       method: 'POST',
