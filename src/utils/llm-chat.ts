@@ -27,13 +27,6 @@ const longTimeoutAgent = new Agent({
   connectTimeout: 30 * 1000,
 });
 
-const ollamaClient = new Ollama({
-  host: env.OLLAMA_HOST,
-  fetch: ((url: string | URL | Request, init?: RequestInit) => {
-    return fetch(url, { ...init, dispatcher: longTimeoutAgent } as RequestInit);
-  }) as typeof fetch,
-});
-
 /**
  * The ONE context size every pdf-zipper call to the shared Ollama host must
  * use — vision scoring, metadata enrichment, translation, and transcript
@@ -86,35 +79,133 @@ export interface ChatTextOptions {
  */
 export const LLM_KEEP_ALIVE = '2h';
 
+/**
+ * Rough token estimate without a tokenizer: CJK / other non-Latin scripts
+ * tokenize at roughly one token per character, Latin text at ~3.6 chars per
+ * token (gemma vocab, measured on English prose). Deliberately pessimistic —
+ * it's used to size chunks so input + output fit LLM_NUM_CTX, and the cost of
+ * overestimating is one more chunk, while underestimating silently truncates.
+ */
+export function estimateTokens(text: string): number {
+  let dense = 0;
+  let latin = 0;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0)!;
+    if (cp > 0x2e7f) dense++;  // CJK, Hangul, kana, emoji, most symbol blocks
+    else latin++;
+  }
+  return dense + Math.ceil(latin / 3.6);
+}
+
+/**
+ * Chars of `text` that fit an estimated `tokens` budget, so callers can chunk
+ * by tokens while still slicing by characters. For pure Latin text this is
+ * ~3.6 × tokens; for CJK-heavy text it approaches `tokens` itself.
+ */
+export function charBudgetForTokens(text: string, tokens: number): number {
+  const total = estimateTokens(text);
+  if (total <= tokens) return text.length;
+  return Math.max(500, Math.floor(text.length * (tokens / total)));
+}
+
+/**
+ * Tokens a chunk's INPUT may use when the call's output is expected to be
+ * about as long as the input (formatting, translation): half the context
+ * minus room for the prompt/hints and a safety margin.
+ */
+export const SAME_LENGTH_OUTPUT_INPUT_TOKENS = Math.floor((LLM_NUM_CTX - 1024) / 2); // 3584
+
+/**
+ * Server-side timing for one call, when the provider reports it (Ollama
+ * does). Lets the log separate "the model was slow" from "we waited in the
+ * queue / reloaded the model": client wall time − total_duration is queueing
+ * and transport; load_duration > ~1s means the model was (re)loaded for this
+ * call. All nanoseconds from Ollama, converted to ms here.
+ */
+export interface ChatCallStats {
+  loadMs?: number;
+  promptTokens?: number;
+  promptEvalMs?: number;
+  outputTokens?: number;
+  evalMs?: number;
+  totalMs?: number;
+  /** `stop` = finished naturally; `length` = hit the output/context limit (reply is truncated). */
+  doneReason?: string;
+}
+
 interface Provider {
   name: string;
   enabled(): boolean;
-  chat(opts: ChatTextOptions): Promise<string>;
+  chat(opts: ChatTextOptions): Promise<{ content: string; stats?: ChatCallStats }>;
 }
 
-const ollamaProvider: Provider = {
-  name: 'ollama',
-  enabled: () => true,
-  async chat({ model, messages, temperature, numCtx, numPredict, think, format }) {
-    const options: Record<string, number> = {};
-    if (temperature !== undefined) options.temperature = temperature;
-    // Default to the shared size rather than Ollama's server default
-    // (OLLAMA_CONTEXT_LENGTH=65536 on mac.mini) — an unsized request would
-    // allocate a 64K KV cache and evict everything else.
-    options.num_ctx = numCtx ?? LLM_NUM_CTX;
-    if (numPredict !== undefined) options.num_predict = numPredict;
+export function ollamaStats(r: {
+  total_duration?: number; load_duration?: number; prompt_eval_count?: number;
+  prompt_eval_duration?: number; eval_count?: number; eval_duration?: number;
+  done_reason?: string;
+}): ChatCallStats {
+  const ms = (ns?: number) => (typeof ns === 'number' ? Math.round(ns / 1e6) : undefined);
+  return {
+    loadMs: ms(r.load_duration),
+    promptTokens: r.prompt_eval_count,
+    promptEvalMs: ms(r.prompt_eval_duration),
+    outputTokens: r.eval_count,
+    evalMs: ms(r.eval_duration),
+    totalMs: ms(r.total_duration),
+    doneReason: r.done_reason,
+  };
+}
 
-    const r = await ollamaClient.chat({
-      model,
-      messages,
-      options,
-      keep_alive: LLM_KEEP_ALIVE,
-      ...(think !== undefined ? { think } : {}),
-      ...(format ? { format } : {}),
-    });
-    return r.message.content;
-  },
-};
+/** Last call's server stats, for callers that need `doneReason` (chatText returns only text). */
+let lastCallStats: ChatCallStats | undefined;
+export function getLastChatStats(): ChatCallStats | undefined {
+  return lastCallStats;
+}
+
+function makeOllamaProvider(name: string, host: string, modelOverride?: string): Provider {
+  const client = new Ollama({
+    host,
+    fetch: ((url: string | URL | Request, init?: RequestInit) => {
+      return fetch(url, { ...init, dispatcher: longTimeoutAgent } as RequestInit);
+    }) as typeof fetch,
+  });
+  return {
+    name,
+    enabled: () => true,
+    async chat({ model, messages, temperature, numCtx, numPredict, think, format }) {
+      const options: Record<string, number> = {};
+      if (temperature !== undefined) options.temperature = temperature;
+      // Default to the shared size rather than Ollama's server default
+      // (OLLAMA_CONTEXT_LENGTH=65536 on mac.mini) — an unsized request would
+      // allocate a 64K KV cache and evict everything else.
+      options.num_ctx = numCtx ?? LLM_NUM_CTX;
+      if (numPredict !== undefined) options.num_predict = numPredict;
+
+      const r = await client.chat({
+        model: modelOverride ?? model,
+        messages,
+        options,
+        keep_alive: LLM_KEEP_ALIVE,
+        ...(think !== undefined ? { think } : {}),
+        ...(format ? { format } : {}),
+      });
+      return { content: r.message.content, stats: ollamaStats(r) };
+    },
+  };
+}
+
+const ollamaProvider: Provider = makeOllamaProvider('ollama', env.OLLAMA_HOST);
+
+/**
+ * Second Ollama host (the m1pro box) as a NATIVE Ollama provider: same
+ * num_ctx / keep_alive / think / format handling as the primary. Before
+ * 2026-09-04 it was reached through the llama.cpp adapter below, which drops
+ * num_ctx and think and sends llama.cpp-only template kwargs — wrong for an
+ * Ollama endpoint. Failover-only (≈10 tok/s vs 58 on mac.mini).
+ */
+const ollamaFallbackProvider: Provider | null = env.OLLAMA_FALLBACK_HOST
+  ? { ...makeOllamaProvider('ollama-fallback', env.OLLAMA_FALLBACK_HOST, env.OLLAMA_FALLBACK_MODEL), enabled: () => true }
+  : null;
 
 const llamacppProvider: Provider = {
   name: 'llamacpp',
@@ -162,12 +253,13 @@ const llamacppProvider: Provider = {
     if (content.length === 0 && typeof message?.reasoning_content === 'string' && message.reasoning_content.length > 0) {
       throw new Error('llamacpp: empty content with non-empty reasoning_content (thinking-mode leak)');
     }
-    return content;
+    return { content };
   },
 };
 
-// Failover order: Ollama is tried first (faster on 8B), llama.cpp is the backup.
-const allProviders = [ollamaProvider, llamacppProvider];
+// Failover order: primary Ollama, then the fallback Ollama host, then a real
+// llama.cpp server if one is configured.
+const allProviders: Provider[] = [ollamaProvider, ...(ollamaFallbackProvider ? [ollamaFallbackProvider] : []), llamacppProvider];
 
 /**
  * Run a text chat with failover across configured providers.
@@ -186,14 +278,33 @@ export async function chatText(opts: ChatTextOptions): Promise<string> {
     const provider = providers[i];
     const t0 = Date.now();
     try {
-      const result = await provider.chat(opts);
+      const { content, stats } = await provider.chat(opts);
+      const elapsedMs = Date.now() - t0;
+      lastCallStats = stats;
+      if (stats?.doneReason === 'length') {
+        // The reply hit the output/context limit — whatever the caller does
+        // with it, it is incomplete. Callers that need fidelity (transcript
+        // formatting, translation) check getLastChatStats() and fall back.
+        console.warn(JSON.stringify({
+          event: 'llm_output_truncated',
+          provider: provider.name,
+          promptTokens: stats.promptTokens,
+          outputTokens: stats.outputTokens,
+          numCtx: opts.numCtx ?? LLM_NUM_CTX,
+          timestamp: new Date().toISOString(),
+        }));
+      }
       console.log(JSON.stringify({
         event: 'llm_chat_ok',
         provider: provider.name,
         attempt: i + 1,
-        elapsedMs: Date.now() - t0,
+        elapsedMs,
+        // Server-side breakdown (Ollama): what the model spent vs what we
+        // waited. queueMs is the residual — time the request sat behind
+        // other work (or in transport) before the model touched it.
+        ...(stats ? { ...stats, queueMs: stats.totalMs !== undefined ? Math.max(0, elapsedMs - stats.totalMs) : undefined } : {}),
       }));
-      return result;
+      return content;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.warn(JSON.stringify({

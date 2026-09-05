@@ -31,6 +31,17 @@ export function setInfoDictFields(pdfDoc: PDFDocument, fields: Record<string, st
 }
 
 /**
+ * Remove a custom field from the PDF Info Dict (no-op if absent).
+ * `setInfoDictFields` skips falsy values, so "unset" needs an explicit call —
+ * passing `undefined` leaves a stale value in place.
+ */
+export function deleteInfoDictField(pdfDoc: PDFDocument, key: string): void {
+  try {
+    (pdfDoc as any).getInfoDict().delete(PDFName.of(key));
+  } catch { /* nothing to delete */ }
+}
+
+/**
  * Read a custom field from the PDF Info Dict.
  * Returns undefined if the field doesn't exist or parsing fails.
  */

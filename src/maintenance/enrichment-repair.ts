@@ -45,6 +45,10 @@ const STARTUP_DELAY_MS = 10 * 60 * 1000;
 const MAX_PER_TICK = Number(process.env.ENRICHMENT_REPAIR_MAX_PER_TICK) || 40;
 /** Redis set of absolute PDF paths saved without usable enrichment. */
 export const PENDING_KEY = 'enrichment:pending-pdfs';
+/** Redis hash path → failed repair attempts (cleared when the file leaves the set). */
+export const ATTEMPTS_KEY = 'enrichment:pending-attempts';
+/** Failed repair attempts before a pending file is abandoned. */
+const MAX_ATTEMPTS = Number(process.env.ENRICHMENT_REPAIR_MAX_ATTEMPTS) || 5;
 
 let timer: NodeJS.Timeout | null = null;
 let startupTimer: NodeJS.Timeout | null = null;
@@ -76,7 +80,32 @@ async function clearPending(paths: string[]): Promise<void> {
   if (paths.length === 0) return;
   try {
     await queueConnection.srem(PENDING_KEY, ...paths);
+    await queueConnection.hdel(ATTEMPTS_KEY, ...paths);
   } catch { /* best-effort */ }
+}
+
+/**
+ * Count a failed attempt per file; after MAX_ATTEMPTS the file is dropped
+ * from the set with a log line (the window scan won't pick it up either once
+ * it ages out, so this is where a permanently unrepairable file stops costing
+ * an LLM call every tick).
+ */
+async function bumpAttemptsAndExpire(paths: string[]): Promise<void> {
+  for (const p of paths) {
+    try {
+      const n = await queueConnection.hincrby(ATTEMPTS_KEY, p, 1);
+      if (n >= MAX_ATTEMPTS) {
+        await queueConnection.srem(PENDING_KEY, p);
+        await queueConnection.hdel(ATTEMPTS_KEY, p);
+        console.warn(JSON.stringify({
+          event: 'enrichment_repair_abandoned',
+          file: p,
+          attempts: n,
+          timestamp: new Date().toISOString(),
+        }));
+      }
+    } catch { /* best-effort */ }
+  }
 }
 
 /**
@@ -84,7 +113,7 @@ async function clearPending(paths: string[]): Promise<void> {
  * never throws for per-file problems and never overlaps itself.
  */
 export async function runEnrichmentRepair(windowHours: number = WINDOW_HOURS, dryRun = false): Promise<RepairRunResult> {
-  const empty: BackfillResult = { scanned: 0, bare: 0, enriched: 0, skippedNoText: 0, failed: 0, details: [] };
+  const empty: BackfillResult = { scanned: 0, bare: 0, attempted: 0, enriched: 0, skippedNoText: 0, failed: 0, details: [], outcomes: [] };
   if (running) return { ...empty, windowHours, skippedReason: 'already_running', pendingBefore: 0, pendingAfter: 0 };
   running = true;
   try {
@@ -108,26 +137,25 @@ export async function runEnrichmentRepair(windowHours: number = WINDOW_HOURS, dr
     const fromSet = pending.length > 0
       ? await backfillBarePdfs({ files: pending, includeEmptySummary: true, limit: MAX_PER_TICK, dryRun })
       : empty;
-    const repairedPaths = fromSet.details.filter((d) => !d.gone).map((d) => d.file);
-    const gonePaths = fromSet.details.filter((d) => d.gone).map((d) => d.file);
-    // Entries the sweep skipped because they're now fine (someone else
-    // re-enriched them, e.g. a rerun) also leave the set: anything scanned
-    // that wasn't bare/failed is done.
+    // Pending-set maintenance is driven by per-file outcomes, never by
+    // inference from counts: a file leaves the set when it is enriched, was
+    // already fine (a rerun re-enriched it), is a transcript, is gone, or has
+    // no text to enrich from (nothing will ever change that). `failed` stays
+    // for the next tick, bounded by MAX_ATTEMPTS so one corrupt file can't be
+    // retried every two hours forever.
     if (!dryRun) {
-      await clearPending([...repairedPaths, ...gonePaths]);
-      const stillBare = new Set(pending.filter((p) => !repairedPaths.includes(p) && !gonePaths.includes(p)));
-      const budgetLeft = Math.max(0, MAX_PER_TICK - fromSet.enriched);
-      // Whatever remains was either failed this tick or not reached (limit).
-      if (fromSet.failed === 0 && budgetLeft > 0) {
-        // Everything in the set was examined and none failed → the leftovers
-        // are files that are no longer bare (transcripts, or already ok).
-        await clearPending([...stillBare]);
-      }
+      const terminal = new Set(['enriched', 'ok', 'transcript', 'gone', 'no_text', 'no_source_url']);
+      const done = fromSet.outcomes.filter((o) => terminal.has(o.outcome)).map((o) => o.file);
+      const failed = fromSet.outcomes.filter((o) => o.outcome === 'failed').map((o) => o.file);
+      await clearPending(done);
+      await bumpAttemptsAndExpire(failed);
     }
 
-    // 2. Window scan backstop, with whatever budget is left.
-    const budget = Math.max(0, MAX_PER_TICK - fromSet.enriched);
-    const fromWindow = budget > 0
+    // 2. Window scan backstop, with whatever ATTEMPT budget is left. Skipped
+    //    entirely when the set pass tripped the breaker — the model is not
+    //    answering usefully right now.
+    const budget = Math.max(0, MAX_PER_TICK - fromSet.attempted);
+    const fromWindow = budget > 0 && fromSet.stoppedEarly !== 'breaker'
       ? await backfillBarePdfs({
           sinceMs: Date.now() - windowHours * ONE_HOUR_MS,
           includeEmptySummary: true,
@@ -135,14 +163,25 @@ export async function runEnrichmentRepair(windowHours: number = WINDOW_HOURS, dr
           dryRun,
         })
       : empty;
+    // A bare file the window scan found but could not repair joins the
+    // durable set, so it can't age out of the window before the next chance.
+    if (!dryRun) {
+      const windowFailed = fromWindow.outcomes.filter((o) => o.outcome === 'failed').map((o) => o.file);
+      if (windowFailed.length > 0) {
+        try { await queueConnection.sadd(PENDING_KEY, ...windowFailed); } catch { /* best-effort */ }
+      }
+    }
 
     const merged: BackfillResult = {
       scanned: fromSet.scanned + fromWindow.scanned,
       bare: fromSet.bare + fromWindow.bare,
+      attempted: fromSet.attempted + fromWindow.attempted,
       enriched: fromSet.enriched + fromWindow.enriched,
       skippedNoText: fromSet.skippedNoText + fromWindow.skippedNoText,
       failed: fromSet.failed + fromWindow.failed,
-      details: [...fromSet.details.filter((d) => !d.gone), ...fromWindow.details],
+      stoppedEarly: fromSet.stoppedEarly === 'breaker' ? 'breaker' : fromWindow.stoppedEarly,
+      details: [...fromSet.details, ...fromWindow.details],
+      outcomes: [...fromSet.outcomes, ...fromWindow.outcomes],
     };
     const pendingAfter = dryRun ? pending.length : (await readPending()).length;
     console.log(JSON.stringify({
@@ -153,6 +192,8 @@ export async function runEnrichmentRepair(windowHours: number = WINDOW_HOURS, dr
       pendingAfter,
       scanned: merged.scanned,
       bare: merged.bare,
+      attempted: merged.attempted,
+      stoppedEarly: merged.stoppedEarly,
       enriched: merged.enriched,
       skippedNoText: merged.skippedNoText,
       failed: merged.failed,

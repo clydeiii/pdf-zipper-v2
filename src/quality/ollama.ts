@@ -5,7 +5,7 @@
 
 import { Ollama } from 'ollama';
 import { env } from '../config/env.js';
-import { LLM_NUM_CTX, LLM_KEEP_ALIVE } from '../utils/llm-chat.js';
+import { LLM_NUM_CTX, LLM_KEEP_ALIVE, ollamaStats } from '../utils/llm-chat.js';
 import type { OllamaHealthResult } from './types.js';
 
 /**
@@ -62,6 +62,7 @@ export async function analyzeImageWithOllama(
   imageBase64: string,
   prompt: string
 ): Promise<string> {
+  const t0 = Date.now();
   const response = await ollama.chat({
     model: env.OLLAMA_MODEL,
     messages: [
@@ -76,6 +77,14 @@ export async function analyzeImageWithOllama(
     options: { num_ctx: LLM_NUM_CTX },
     keep_alive: LLM_KEEP_ALIVE,
   });
+  const stats = ollamaStats(response);
+  const elapsedMs = Date.now() - t0;
+  console.log(JSON.stringify({
+    event: 'llm_vision_ok',
+    elapsedMs,
+    ...stats,
+    queueMs: stats.totalMs !== undefined ? Math.max(0, elapsedMs - stats.totalMs) : undefined,
+  }));
 
   return response.message.content;
 }

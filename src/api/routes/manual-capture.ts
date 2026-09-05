@@ -293,6 +293,10 @@ manualCaptureRouter.post(
       const validScopes = ['page', 'reader', 'selection'] as const;
       const captureScope = validScopes.includes(body.captureScope as any) ? body.captureScope! : 'page';
       extraFields.CaptureScope = captureScope;
+      // Printed by the user's own browser: saved unconditionally (no gate), so
+      // the KB consumer knows this was never machine-verified beyond the
+      // near-zero-text warning below.
+      extraFields.QualityCheck = 'external:chrome-extension';
       if (archiveWrapperUrl) extraFields.ViaArchive = archiveWrapperUrl;
       if (body.markdown && typeof body.markdown === 'string' && body.markdown.length > 0) {
         extraFields.Markdown = body.markdown;

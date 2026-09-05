@@ -5,7 +5,7 @@
  * into readable, semantically-structured paragraphs using Ollama.
  */
 
-import { chatText, LLM_NUM_CTX } from '../utils/llm-chat.js';
+import { chatText, getLastChatStats, LLM_NUM_CTX, charBudgetForTokens, SAME_LENGTH_OUTPUT_INPUT_TOKENS } from '../utils/llm-chat.js';
 import { normalizeTranscript } from './s1-normalizer.js';
 import { env } from '../config/env.js';
 import type { PodcastMetadata } from './types.js';
@@ -163,11 +163,12 @@ export async function formatTranscriptWithLLM(
 
   // Process in chunks if transcript is very long (LLM context limits)
   // Most podcasts are 10-60 min = 5,000-30,000 chars, which should fit
-  // ~10k chars per chunk: ≈2.5–3.3k tokens in and the same out, plus the
-  // prompt and hint list, stays under the shared 8K context (LLM_NUM_CTX)
-  // even for token-dense speech. 15k chars needed a 16K context, and that
-  // mismatch was what thrashed the Ollama model cache.
-  const maxChunkSize = 10000;
+  // Chunk by ESTIMATED TOKENS, not characters: the reply is about as long as
+  // the input, so input must stay under ~half the shared 8K context after the
+  // prompt and hint list. ~10k chars for English; far fewer for CJK-dense
+  // text, where a character is a token. (15k-char chunks needed a 16K
+  // context, and that mismatch was what thrashed the Ollama model cache.)
+  const maxChunkSize = Math.min(10000, charBudgetForTokens(cleanedTranscript, SAME_LENGTH_OUTPUT_INPUT_TOKENS) || 10000);
 
   if (cleanedTranscript.length > maxChunkSize) {
     return await formatLongTranscript(cleanedTranscript, maxChunkSize, context);
@@ -330,9 +331,28 @@ ${text}`;
       numCtx: LLM_NUM_CTX,
     });
 
+    // Fidelity guard: this is a proofreading pass, so the output must be
+    // about as long as the input. A reply that hit the context limit
+    // (done_reason=length) or came back much shorter/longer is not a
+    // formatted transcript — it's a truncated or rewritten one — and the
+    // raw chunk is the safer record. Same posture as the S1 stage's ratio check.
+    const formatted = normalizeTranscriptWhitespace(response.trim());
+    const ratio = formatted.length / Math.max(1, text.length);
+    const truncated = getLastChatStats()?.doneReason === 'length';
+    if (truncated || ratio < 0.7 || ratio > 1.4) {
+      console.warn(JSON.stringify({
+        event: 'transcript_format_chunk_rejected',
+        reason: truncated ? 'output_truncated' : 'length_ratio',
+        inputLength: text.length,
+        outputLength: formatted.length,
+        ratio: Number(ratio.toFixed(2)),
+        timestamp: new Date().toISOString(),
+      }));
+      return text;
+    }
     // The LLM sometimes reflows text with lone newlines despite the prompt —
     // normalize so its artifacts never reach the PDF generators.
-    return normalizeTranscriptWhitespace(response.trim());
+    return formatted;
   } catch (error) {
     console.error(JSON.stringify({
       event: 'transcript_format_error',

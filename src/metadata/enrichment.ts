@@ -10,7 +10,7 @@
  */
 
 import { env } from '../config/env.js';
-import { chatText, LLM_NUM_CTX } from '../utils/llm-chat.js';
+import { chatText, getLastChatStats, LLM_NUM_CTX, charBudgetForTokens, SAME_LENGTH_OUTPUT_INPUT_TOKENS } from '../utils/llm-chat.js';
 
 /**
  * Enriched metadata extracted from document content
@@ -363,9 +363,12 @@ function parseMetadataResponse(
  * Handles long documents by chunking
  */
 async function translateToEnglish(text: string, sourceLanguage: string): Promise<string> {
-  // For very long documents, chunk the translation
-  if (text.length > MAX_TRANSLATE_CHARS) {
-    return translateLongDocument(text, sourceLanguage);
+  // Chunk by estimated TOKENS: a 10k-char Chinese document is ~10k tokens,
+  // not ~2.5k, and English output can run longer than the source. The chunk
+  // must fit input + output in the shared 8K context.
+  const chunkChars = Math.min(MAX_TRANSLATE_CHARS, charBudgetForTokens(text, SAME_LENGTH_OUTPUT_INPUT_TOKENS));
+  if (text.length > chunkChars) {
+    return translateLongDocument(text, sourceLanguage, chunkChars);
   }
 
   const prompt = `Translate the following ${sourceLanguage} text to English. Output ONLY the English translation, preserving paragraph structure. Do not add any commentary or notes.
@@ -382,31 +385,36 @@ ${text}`;
     numCtx: LLM_NUM_CTX,
   });
 
+  if (getLastChatStats()?.doneReason === 'length') {
+    // A translation cut off mid-document is worse than none: the KB would
+    // read a partial translation as the whole text.
+    throw new Error(`translation truncated at the context limit (${text.length} chars in)`);
+  }
   return content.trim();
 }
 
 /**
  * Translate a long document by splitting into chunks at paragraph boundaries
  */
-async function translateLongDocument(text: string, sourceLanguage: string): Promise<string> {
+async function translateLongDocument(text: string, sourceLanguage: string, chunkChars: number = MAX_TRANSLATE_CHARS): Promise<string> {
   const chunks: string[] = [];
   let remaining = text;
 
   while (remaining.length > 0) {
-    if (remaining.length <= MAX_TRANSLATE_CHARS) {
+    if (remaining.length <= chunkChars) {
       chunks.push(remaining);
       break;
     }
 
     // Find a paragraph break near the limit
-    let splitAt = remaining.lastIndexOf('\n\n', MAX_TRANSLATE_CHARS);
-    if (splitAt < MAX_TRANSLATE_CHARS * 0.5) {
+    let splitAt = remaining.lastIndexOf('\n\n', chunkChars);
+    if (splitAt < chunkChars * 0.5) {
       // No good paragraph break, try sentence end
-      splitAt = remaining.lastIndexOf('. ', MAX_TRANSLATE_CHARS);
+      splitAt = remaining.lastIndexOf('. ', chunkChars);
     }
-    if (splitAt < MAX_TRANSLATE_CHARS * 0.3) {
+    if (splitAt < chunkChars * 0.3) {
       // Force split at limit
-      splitAt = MAX_TRANSLATE_CHARS;
+      splitAt = chunkChars;
     }
 
     chunks.push(remaining.slice(0, splitAt + 1));

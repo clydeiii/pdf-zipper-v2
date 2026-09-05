@@ -50,10 +50,13 @@ services:
       # Replaces the old llama.cpp+SYCL server on :8080 (never used in 3 months;
       # not rebuilt after the wipe). Benchmarked 2026-08-23: ~10 tok/s gen vs
       # mac.mini 58 tok/s — failover only, do NOT round-robin.
-      # (used by metadata enrichment only; vision + transcript formatting stay on Ollama)
-      - LLAMACPP_HOST=http://10.0.0.81:11434
-      - LLAMACPP_API_KEY=${LLAMACPP_API_KEY:-}
-      - LLAMACPP_MODEL=gemma4:e4b
+      # Text-only calls (enrichment, translation, transcript formatting) fail
+      # over here via the NATIVE Ollama API — same num_ctx/keep_alive/format as
+      # the primary. Vision stays on mac.mini (no failover). The old llama.cpp
+      # adapter (LLAMACPP_*) is kept for a real llama.cpp server; it sends
+      # llama.cpp-only fields and is wrong for an Ollama endpoint.
+      - OLLAMA_FALLBACK_HOST=http://10.0.0.81:11434
+      - OLLAMA_FALLBACK_MODEL=gemma4:e4b
 
       # Parakeet-TDT 0.6B MLX on Mac mini (was: Whisper ASR on 10.0.0.81:9002)
       - WHISPER_HOST=http://mac.mini:9003

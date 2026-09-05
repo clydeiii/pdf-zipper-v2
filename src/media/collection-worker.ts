@@ -154,7 +154,12 @@ export async function startMediaWorker(): Promise<void> {
                 Tags: metadata.tags.length > 0 ? metadata.tags.join(', ') : undefined,
                 Translation: metadata.translation,
                 DocType: 'research',
-                EnrichedAt: new Date().toISOString(),
+                // Same validity rule as save-pdf.ts: EnrichedAt only for a
+                // real summary; the sweep repairs the rest.
+                EnrichedAt: metadata.summary && metadata.summary.trim() ? new Date().toISOString() : undefined,
+                EnrichmentStatus: metadata.summary && metadata.summary.trim() ? 'ok' : 'unusable_reply',
+                // Uploaded file: no capture happened, so no capture gate ran.
+                QualityCheck: 'none:karakeep-asset',
               });
 
               const enrichedPdf = await pdfDoc.save();

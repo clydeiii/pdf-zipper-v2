@@ -60,6 +60,33 @@ export const AUDIO_USER_AGENTS: readonly string[] = [
   'AppleCoreMedia/1.0.0.22F76 (iPhone; U; CPU OS 18_5 like Mac OS X; en_us)',
 ];
 
+/**
+ * Classify the first bytes of a download: a known audio container, plainly
+ * textual content (HTML/JSON/XML — a challenge page or an error body), or
+ * unknown (left alone; ffmpeg/the ASR host will judge it).
+ */
+export function sniffAudioContainer(head: Buffer): 'audio' | 'text' | 'unknown' {
+  if (head.length < 4) return 'unknown';
+  const ascii = head.subarray(0, 4).toString('latin1');
+  if (ascii.startsWith('ID3') || ascii === 'OggS' || ascii === 'RIFF' || ascii === 'fLaC') return 'audio';
+  if (head.length >= 12 && head.subarray(4, 8).toString('latin1') === 'ftyp') return 'audio'; // m4a/mp4
+  if ((head[0] === 0xff && (head[1] & 0xe6) === 0xe2)) return 'audio'; // raw MPEG audio frame sync
+  const text = head.toString('utf8').replace(/^﻿/, '').trimStart().toLowerCase();
+  if (/^(<!doctype|<html|<\?xml|\{|\[)/.test(text)) return 'text';
+  return 'unknown';
+}
+
+async function readFileHead(filePath: string, bytes: number): Promise<Buffer> {
+  const handle = await fs.promises.open(filePath, 'r');
+  try {
+    const buf = Buffer.alloc(bytes);
+    const { bytesRead } = await handle.read(buf, 0, bytes, 0);
+    return buf.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
+}
+
 export async function downloadAudio(
   audioUrl: string,
   extension: string
@@ -92,6 +119,8 @@ export async function downloadAudio(
       signal: AbortSignal.timeout(env.PODCAST_DOWNLOAD_TIMEOUT_MS),
     });
     if (response.status !== 403) break;
+    // Release the discarded body before retrying with the next identity.
+    await response.body?.cancel().catch(() => { /* already closed */ });
     console.warn(JSON.stringify({
       event: 'audio_download_forbidden',
       url: audioUrl.substring(0, 100),
@@ -104,14 +133,18 @@ export async function downloadAudio(
   }
 
   if (!response.ok) {
+    await response.body?.cancel().catch(() => { /* already closed */ });
     throw new Error(`Audio download failed: ${response.status} ${response.statusText}`);
   }
 
   // A 200 is not proof of audio: a bot-challenge or "episode removed" page
   // also answers 200, and sending an HTML file to the transcriber produces a
-  // confusing ASR error instead of a clear download failure.
+  // confusing ASR error instead of a clear download failure. The MIME type
+  // is only a hint (hosts mislabel audio as text/plain and HTML as
+  // octet-stream), so the real check is on the bytes after download.
   const contentType = (response.headers.get('content-type') || '').toLowerCase();
-  if (/^text\/(html|plain)|application\/(json|xhtml)/.test(contentType)) {
+  if (/^text\/html|application\/xhtml/.test(contentType)) {
+    await response.body?.cancel().catch(() => { /* already closed */ });
     throw new Error(`Audio download failed: server returned ${contentType.split(';')[0]} instead of audio`);
   }
 
@@ -133,6 +166,12 @@ export async function downloadAudio(
   if (stats.size > env.MAX_PODCAST_AUDIO_BYTES) {
     await unlink(filePath).catch(() => {});
     throw new Error(`Audio download too large: ${stats.size} bytes exceeds ${env.MAX_PODCAST_AUDIO_BYTES}`);
+  }
+
+  const sniff = sniffAudioContainer(await readFileHead(filePath, 64));
+  if (sniff === 'text') {
+    await unlink(filePath).catch(() => {});
+    throw new Error('Audio download failed: body is HTML/JSON/text, not audio (challenge or removed-episode page)');
   }
 
   const downloadTime = Date.now() - startTime;

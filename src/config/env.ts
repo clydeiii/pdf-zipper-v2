@@ -124,6 +124,10 @@ interface EnvConfig {
   /** Resample videos whose frame rate exceeds this (default: 30). 29.97 NTSC never triggers. */
   VIDEO_COMPRESS_MAX_FPS: number;
   /** Optional llama.cpp OpenAI-compatible server for round-robin/failover on text-only LLM calls */
+  /** Second Ollama host used only when the primary fails (native Ollama API). */
+  OLLAMA_FALLBACK_HOST?: string;
+  /** Model on the fallback host; defaults to the primary's model name. */
+  OLLAMA_FALLBACK_MODEL?: string;
   LLAMACPP_HOST?: string;
   /** Bearer token for the llama.cpp server */
   LLAMACPP_API_KEY?: string;
@@ -248,6 +252,8 @@ export const env: EnvConfig = {
   VIDEO_COMPRESS_MAX_HEIGHT: parseIntegerEnv('VIDEO_COMPRESS_MAX_HEIGHT', 720, { min: 144 }),
   VIDEO_COMPRESS_MAX_FPS: parseIntegerEnv('VIDEO_COMPRESS_MAX_FPS', 30, { min: 10 }),
   // Optional llama.cpp failover/round-robin endpoint for text-only LLM calls
+  OLLAMA_FALLBACK_HOST: process.env.OLLAMA_FALLBACK_HOST || undefined,
+  OLLAMA_FALLBACK_MODEL: process.env.OLLAMA_FALLBACK_MODEL || undefined,
   LLAMACPP_HOST: process.env.LLAMACPP_HOST,
   LLAMACPP_API_KEY: process.env.LLAMACPP_API_KEY,
   LLAMACPP_MODEL: process.env.LLAMACPP_MODEL || 'gemma4',

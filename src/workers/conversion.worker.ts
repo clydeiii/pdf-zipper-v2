@@ -233,7 +233,8 @@ async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Pro
             originalUrl: target,
             enrichedMetadata,
             creatorOverride: 'pdf-zipper-v2-smry',
-            extraInfoDictFields: { ViaSmry: smry.readerUrl },
+            // No vision pass here; the gates were smry's text checks + analyzePdfContent.
+            extraInfoDictFields: { ViaSmry: smry.readerUrl, QualityCheck: 'content-only:smry-reader' },
           });
           console.log(`[smry-rescue] PDF saved via smry: ${pdfPath}`);
           if (oldFilePath) await deleteOldFileIfDifferent(oldFilePath, pdfPath);
@@ -301,7 +302,7 @@ async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Pro
       originalUrl: target,
       enrichedMetadata,
       creatorOverride: 'pdf-zipper-v2-archive',
-      extraInfoDictFields: { ViaArchive: arch.snapshotUrl },
+      extraInfoDictFields: { ViaArchive: arch.snapshotUrl, QualityCheck: 'content-only:archive-snapshot' },
     });
     console.log(`[archive-fallback] PDF saved via archive: ${pdfPath}`);
     if (oldFilePath) await deleteOldFileIfDifferent(oldFilePath, pdfPath);
@@ -352,6 +353,8 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
         originalUrl,
         enrichedMetadata,
         creatorOverride: 'pdf-zipper-v2-chatgpt-share',
+        // Harvested markdown rendered by us — no vision/content gate applies.
+        extraInfoDictFields: { QualityCheck: 'none:scroll-harvest' },
       });
       await job.updateProgress(100);
       console.log(`ChatGPT share capture completed: ${filePath} (${shareResult.messageCount} messages)`);
@@ -408,6 +411,8 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
       bookmarkedAt,
       originalUrl,
       enrichedMetadata,
+      // Pass-through PDFs skip the quality gates by design (CLAUDE.md).
+      extraInfoDictFields: { QualityCheck: 'none:passthrough' },
     });
 
     await job.updateProgress(100);
@@ -616,6 +621,7 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
           bookmarkedAt,
           originalUrl,
           enrichedMetadata,
+          extraInfoDictFields: { QualityCheck: 'none:passthrough' },
         });
 
         await job.updateProgress(100);

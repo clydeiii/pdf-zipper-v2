@@ -67,18 +67,34 @@ export interface BackfillResult {
   scanned: number;
   /** Bare = no EnrichedAt field (enrichment never completed). */
   bare: number;
+  /** Candidates that reached the model (what `limit` bounds). */
+  attempted: number;
+  /** Set when the pass ended before the candidate list did. */
+  stoppedEarly?: 'limit' | 'breaker';
   /** Successfully backfilled (or would be, in dry-run). */
   enriched: number;
   /** Bare but too little extractable text to enrich (likely image-only / truncated). */
   skippedNoText: number;
   /** Bare but parse/enrich/write errored. */
   failed: number;
-  /** Per-file detail for the enriched set (plus `gone` entries for listed files that no longer exist). */
-  details: Array<{ file: string; title: string; language: string; gone?: boolean }>;
+  /** Per-file detail for the enriched set (absolute paths). */
+  details: Array<{ file: string; title: string; language: string }>;
+  /**
+   * What happened to every file the sweep looked at, by absolute path. The
+   * repair sweep uses this to maintain its pending set: `enriched`, `ok`,
+   * `transcript`, `gone` and `no_text` are terminal for that file (nothing
+   * more to do, or nothing possible); `failed` should be retried later.
+   */
+  outcomes: Array<{ file: string; outcome: BackfillOutcome }>;
 }
+
+export type BackfillOutcome =
+  | 'enriched' | 'would_enrich' | 'ok' | 'transcript' | 'gone' | 'no_text' | 'no_source_url' | 'failed';
 
 /** Min extractable chars to bother enriching — matches the capture-path gate. */
 const MIN_TEXT_CHARS = 100;
+/** Consecutive enrich/write failures that end a pass (see the breaker comment in the loop). */
+const MAX_CONSECUTIVE_FAILURES = 3;
 
 const WEEK_DIR_PATTERN = /^\d{4}-W\d{2}$/;
 
@@ -123,31 +139,54 @@ export async function backfillBarePdfs(options: BackfillOptions = {}): Promise<B
   const result: BackfillResult = {
     scanned: 0,
     bare: 0,
+    attempted: 0,
     enriched: 0,
     skippedNoText: 0,
     failed: 0,
     details: [],
+    outcomes: [],
   };
+  const record = (file: string, outcome: BackfillOutcome) => { result.outcomes.push({ file, outcome }); };
 
   const pdfPaths = files ?? await collectPdfPaths(week);
   log(`[backfill] Scanning ${pdfPaths.length} PDF(s)${week ? ` in ${week}` : ''}${dryRun ? ' (dry-run)' : ''}`);
 
+  // Consecutive LLM/write failures trip a breaker: a "healthy" /api/tags does
+  // not mean inference works, and a sweep that keeps firing failing calls at
+  // a half-up model monopolizes it during exactly the partial outage it is
+  // meant to recover from.
+  let consecutiveFailures = 0;
+
   for (const filePath of pdfPaths) {
-    if (limit !== undefined && result.enriched >= limit) {
-      log(`[backfill] Reached limit of ${limit}; stopping (more candidates may remain)`);
+    // The limit bounds ATTEMPTS (files that reached the model), not
+    // successes — otherwise a batch of failing files is attempted in full.
+    if (limit !== undefined && result.attempted >= limit) {
+      log(`[backfill] Reached limit of ${limit} attempts; stopping (more candidates may remain)`);
+      result.stoppedEarly = 'limit';
+      break;
+    }
+    if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+      log(`[backfill] ${consecutiveFailures} consecutive failures; stopping this pass`);
+      result.stoppedEarly = 'breaker';
       break;
     }
     const name = path.basename(filePath);
 
     // Window filter first — it's a stat, not a parse, so an all-weeks sweep
-    // with a 48h window costs almost nothing.
-    if (sinceMs !== undefined && !files) {
-      try {
-        if ((await stat(filePath)).mtimeMs < sinceMs) continue;
-      } catch {
-        continue;
+    // with a 48h window costs almost nothing. The mtime is also the
+    // lost-update guard for the in-place write below.
+    let mtimeMs: number;
+    try {
+      mtimeMs = (await stat(filePath)).mtimeMs;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        // A file from the explicit list that no longer exists (rerun renamed
+        // it, retention swept it) is simply not a candidate any more.
+        record(filePath, 'gone');
       }
+      continue;
     }
+    if (sinceMs !== undefined && !files && mtimeMs < sinceMs) continue;
     result.scanned++;
 
     let buffer: Buffer;
@@ -156,23 +195,23 @@ export async function backfillBarePdfs(options: BackfillOptions = {}): Promise<B
       buffer = await readFile(filePath);
       pdfDoc = await PDFDocument.load(buffer);
     } catch (error) {
-      // A file from the explicit list that no longer exists (rerun renamed it,
-      // retention swept it) is simply not a candidate any more.
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        result.details.push({ file: name, title: '', language: '', gone: true });
+        record(filePath, 'gone');
         continue;
       }
       result.failed++;
+      record(filePath, 'failed');
       log(`[backfill] FAILED to read/parse ${name}: ${error instanceof Error ? error.message : error}`);
       continue;
     }
 
-    // Already enriched? EnrichedAt is written on every successful enrichment.
+    // Already enriched? EnrichedAt is written on every validated enrichment.
     // Transcript PDFs are left alone — they're not articles and article-style
     // enrichment mislabels them (see the "Video Transcript" title issue).
     const state = classifyEnrichmentState(pdfDoc);
-    if (state === 'ok' || state === 'transcript') continue;
-    if (state === 'empty' && !includeEmptySummary) continue;
+    if (state === 'ok') { record(filePath, 'ok'); continue; }
+    if (state === 'transcript') { record(filePath, 'transcript'); continue; }
+    if (state === 'empty' && !includeEmptySummary) { record(filePath, 'ok'); continue; }
 
     result.bare++;
 
@@ -181,6 +220,7 @@ export async function backfillBarePdfs(options: BackfillOptions = {}): Promise<B
     const pageTitle = pdfDoc.getTitle() || undefined;
     if (!sourceUrl) {
       result.failed++;
+      record(filePath, 'no_source_url');
       log(`[backfill] SKIP ${name}: no source URL in Subject field`);
       continue;
     }
@@ -189,35 +229,59 @@ export async function backfillBarePdfs(options: BackfillOptions = {}): Promise<B
     try {
       const content = await analyzePdfContent(buffer);
       extractedText = content.extractedText;
-    } catch {
-      /* fall through to no-text handling */
+    } catch (error) {
+      // An extraction exception is not "no text": it may be transient (or
+      // the file may be corrupt, in which case the attempt cap ends it).
+      result.failed++;
+      record(filePath, 'failed');
+      log(`[backfill] FAILED to extract text from ${name}: ${error instanceof Error ? error.message : error}`);
+      continue;
     }
 
     if (!extractedText || extractedText.length <= MIN_TEXT_CHARS) {
       result.skippedNoText++;
+      record(filePath, 'no_text');
       log(`[backfill] SKIP ${name}: only ${extractedText?.length ?? 0} chars of text`);
       continue;
     }
 
+    result.attempted++;
     if (dryRun) {
       result.enriched++;
+      record(filePath, 'would_enrich');
       log(`[backfill] WOULD enrich ${name} (${extractedText.length} chars, url=${sourceUrl})`);
       continue;
     }
 
     try {
       const metadata = await enrichDocumentMetadata(extractedText, sourceUrl, pageTitle);
-      const ok = await reembedEnrichmentInPlace(filePath, metadata);
+      if (!isUsableEnrichment(metadata)) {
+        // The model answered but produced nothing usable (already retried
+        // once inside enrichDocumentMetadata). Leave the file as it is —
+        // writing an empty summary would only stamp it "attempted".
+        result.failed++;
+        consecutiveFailures++;
+        record(filePath, 'failed');
+        log(`[backfill] FAILED to enrich ${name}: unusable reply`);
+        continue;
+      }
+      const ok = await reembedEnrichmentInPlace(filePath, metadata, { expectedMtimeMs: mtimeMs });
       if (!ok) {
         result.failed++;
+        consecutiveFailures++;
+        record(filePath, 'failed');
         log(`[backfill] FAILED to write ${name}`);
         continue;
       }
       result.enriched++;
+      consecutiveFailures = 0;
+      record(filePath, 'enriched');
       result.details.push({ file: filePath, title: metadata.title, language: metadata.language });
       log(`[backfill] Enriched ${name}: "${metadata.title}" [${metadata.language}]`);
     } catch (error) {
       result.failed++;
+      consecutiveFailures++;
+      record(filePath, 'failed');
       log(`[backfill] FAILED to enrich ${name}: ${error instanceof Error ? error.message : error}`);
     }
   }

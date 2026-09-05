@@ -7,11 +7,11 @@
  * byte-compatible, Karpathy-aligned PDFs.
  */
 
-import { writeFile, mkdir, readFile, readdir, unlink } from 'node:fs/promises';
+import { writeFile, mkdir, readFile, readdir, unlink, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import { createRequire } from 'node:module';
 import { PDFDocument } from 'pdf-lib';
-import { setInfoDictFields } from './pdf-info-dict.js';
+import { setInfoDictFields, readInfoDictField, deleteInfoDictField } from './pdf-info-dict.js';
 import { env } from '../config/env.js';
 import { getISOWeekNumber } from '../media/organization.js';
 import { isUsableEnrichment, type EnrichedMetadata } from '../metadata/enrichment.js';
@@ -230,12 +230,21 @@ export function buildUrlBaseName(
  */
 function applyEnrichedMetadata(
   pdfDoc: PDFDocument,
-  metadata: EnrichedMetadata
+  metadata: EnrichedMetadata,
+  options: { preserveExisting?: boolean } = {}
 ): void {
+  // Repair mode: fields the original save may have set from a STRONGER
+  // source than the LLM — the tweet's exact DOM timestamp (PublishDate),
+  // smry's byline (Author) — must survive a re-enrichment. The capture path
+  // writes those AFTER enrichment (extras win), but an in-place repair
+  // calling this directly would have overwritten them with a guess.
+  const keep = (field: string) => options.preserveExisting && !!readInfoDictField(pdfDoc, field);
+  const keepAuthor = options.preserveExisting && !!pdfDoc.getAuthor();
+
   if (metadata.title) pdfDoc.setTitle(metadata.title);
-  if (metadata.author) pdfDoc.setAuthor(metadata.author);
+  if (metadata.author && !keepAuthor) pdfDoc.setAuthor(metadata.author);
   if (metadata.tags.length > 0) pdfDoc.setKeywords(metadata.tags);
-  if (metadata.publishDate) {
+  if (metadata.publishDate && !keep('PublishDate')) {
     const pubDate = new Date(metadata.publishDate);
     if (!isNaN(pubDate.getTime())) pdfDoc.setCreationDate(pubDate);
   }
@@ -251,12 +260,15 @@ function applyEnrichedMetadata(
     Summary: metadata.summary,
     Language: metadata.language,
     Publication: metadata.publication,
-    PublishDate: metadata.publishDate,
+    PublishDate: keep('PublishDate') ? undefined : metadata.publishDate,
     Tags: metadata.tags.length > 0 ? metadata.tags.join(', ') : undefined,
     Translation: metadata.translation,
     EnrichedAt: usable ? new Date().toISOString() : undefined,
     EnrichmentStatus: usable ? 'ok' : 'unusable_reply',
   });
+  // setInfoDictFields skips falsy values, so a stale stamp from a legacy
+  // file has to be removed explicitly.
+  if (!usable) deleteInfoDictField(pdfDoc, 'EnrichedAt');
 }
 
 export async function embedPdfMetadata(
@@ -320,18 +332,37 @@ export async function embedPdfMetadata(
  */
 export async function reembedEnrichmentInPlace(
   filePath: string,
-  metadata: EnrichedMetadata
+  metadata: EnrichedMetadata,
+  options: { expectedMtimeMs?: number } = {}
 ): Promise<boolean> {
   try {
     const existing = await readFile(filePath);
     const pdfDoc = await PDFDocument.load(existing);
-    applyEnrichedMetadata(pdfDoc, metadata);
+    applyEnrichedMetadata(pdfDoc, metadata, { preserveExisting: true });
     // Preserve whatever Creator the original save wrote (e.g. the Chrome-plugin
     // tag); only derive from publication when the field is genuinely empty.
     if (metadata.publication && !pdfDoc.getCreator()) {
       pdfDoc.setCreator(`${metadata.publication} via pdf-zipper v2`);
     }
     const out = await pdfDoc.save();
+    // Lost-update guard: the caller read this file, spent ~30s on an LLM
+    // call, and is about to write bytes derived from that read. If a rerun
+    // or re-bookmark replaced the file meanwhile, writing would resurrect the
+    // OLD capture with new metadata. Compare against the mtime the caller
+    // observed and refuse the write if it moved.
+    if (options.expectedMtimeMs !== undefined) {
+      const now = await stat(filePath);
+      if (Math.abs(now.mtimeMs - options.expectedMtimeMs) > 1) {
+        console.warn(JSON.stringify({
+          event: 'reembed_skipped_file_changed',
+          file: filePath,
+          expectedMtimeMs: options.expectedMtimeMs,
+          actualMtimeMs: now.mtimeMs,
+          timestamp: new Date().toISOString(),
+        }));
+        return false;
+      }
+    }
     await writeFile(filePath, Buffer.from(out));
     return true;
   } catch (error) {
