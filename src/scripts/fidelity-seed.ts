@@ -85,11 +85,17 @@ export async function seedFidelityCorpus({
     catch (error) { if (!isMissing(error)) throw error; manifest = { version: 1, entries: [], allowedFalseRejects: [] }; }
     const knownHashes = new Set(manifest.entries.map(entry => entry.sha256));
     const knownIds = new Set(manifest.entries.map(entry => entry.id));
+    // Retries of one failed job write byte-different debug PDFs with the same
+    // content; one (url, reason) pair is one case, not six.
+    const knownCases = new Set(manifest.entries.map(entry => `${entry.sourceUrl}|${entry.reason}`));
     const candidates: Candidate[] = [];
     const addedAt = new Date().toISOString();
     const propose = (buffer: Buffer, sourceFile: string, entry: Omit<FidelityEntry, 'id' | 'sha256' | 'file' | 'addedAt' | 'reviewed'>) => {
       const hash = sha256(buffer);
       if (knownHashes.has(hash)) return;
+      const caseKey = `${entry.sourceUrl}|${entry.reason}`;
+      if (knownCases.has(caseKey)) return;
+      knownCases.add(caseKey);
       const id = `${entry.expected}-${hash.slice(0, 20)}`;
       if (knownIds.has(id)) throw new Error(`Candidate ID collision: ${id}`);
       knownIds.add(id);
