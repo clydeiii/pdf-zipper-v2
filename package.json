@@ -8,6 +8,8 @@
     "dev": "tsx watch --env-file=.env src/index.ts",
     "build": "tsc",
     "start": "node --env-file=.env dist/index.js",
+    "fidelity": "node dist/scripts/fidelity-check.js --only-reviewed",
+    "fidelity-seed": "node dist/scripts/fidelity-seed.js",
     "pretest": "npm run build --silent",
     "test": "REDIS_HOST=localhost REDIS_PORT=6379 PORT=3002 node --test"
   },

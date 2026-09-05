@@ -15,7 +15,13 @@
 export function isAllowedFixPath(filePath: string): boolean {
   // The gate itself stays out of reach: a batch must not be able to weaken
   // the boundary/build/commit logic that judges it.
-  if (filePath === 'src/workers/fix.worker.ts') return false;
+  if (filePath === 'src/workers/fix.worker.ts' || filePath === 'src/fix/boundary.ts') return false;
+  // Reject aliases before prefix matching so traversal cannot reach a gate file.
+  if (filePath.includes('\\') || filePath.split('/').some(part => !part || part === '.' || part === '..')) return false;
+  // Held-out verdicts and their evaluator must stay independent of the fixes.
+  if (filePath.startsWith('src/quality/fidelity-') ||
+      filePath.split('/').includes('fidelity-corpus') ||
+      filePath === 'test/fidelity-harness.test.js' || filePath === 'test/fix-boundary.test.js') return false;
   return (
     filePath.startsWith('src/quality/') ||
     filePath.startsWith('src/converters/') ||
