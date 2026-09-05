@@ -17,6 +17,9 @@
  *       catches near-zero text, error pages, firewall/paywall interstitials
  *     - Info Dict Subject must carry the source URL (Karpathy KB contract;
  *       without it Rerun and the downstream wiki both lose provenance)
+ *     - enrichment must be present (EnrichedAt + a non-empty Summary) — a
+ *       capture made while Ollama was down passes content checks but is
+ *       opaque to the KB consumer
  *
  *   MP4s:
  *     - embedded `summary` metadata must be present — after the silent-video
@@ -35,6 +38,7 @@ import * as path from 'node:path';
 import { PDFDocument } from 'pdf-lib';
 import { env } from '../config/env.js';
 import { analyzePdfContent } from '../quality/pdf-content.js';
+import { classifyEnrichmentState } from '../metadata/backfill.js';
 import { sendDiscordNotification } from '../notifications/discord.js';
 
 const execFileAsync = promisify(execFile);
@@ -112,6 +116,17 @@ async function auditPdf(fullPath: string): Promise<string[]> {
     const subject = doc.getSubject();
     if (!subject || !/^https?:\/\//.test(subject.trim())) {
       flags.push('no_source_url: Subject missing — Rerun and KB provenance broken');
+    }
+    // Enrichment presence. A capture saved while Ollama was unreachable
+    // passes every content check yet carries no Summary/Tags — 34 PDFs on
+    // 2026-09-02 shipped that way and nothing flagged them. The 2-hourly
+    // repair sweep (enrichment-repair.ts) normally fixes these before the
+    // nightly audit; anything still bare here resisted repair and needs eyes.
+    const enrichment = classifyEnrichmentState(doc);
+    if (enrichment === 'bare') {
+      flags.push('no_enrichment: never enriched (no EnrichedAt) — no Summary/Tags for the KB');
+    } else if (enrichment === 'empty') {
+      flags.push('empty_summary: enriched but Summary is blank — LLM reply was unusable');
     }
   } catch {
     // pdf-lib being unable to load what pdf-parse could is rare; treat the

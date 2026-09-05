@@ -14,8 +14,21 @@ import { PDFDocument } from 'pdf-lib';
 import { setInfoDictFields } from './pdf-info-dict.js';
 import { env } from '../config/env.js';
 import { getISOWeekNumber } from '../media/organization.js';
-import type { EnrichedMetadata } from '../metadata/enrichment.js';
+import { isUsableEnrichment, type EnrichedMetadata } from '../metadata/enrichment.js';
 import { classifyArticle, type DocType } from '../metadata/doc-type.js';
+
+/**
+ * Hook invoked after a PDF is written without usable enrichment (no metadata
+ * at all, or an unusable reply). The enrichment-repair sweep registers itself
+ * here at startup to keep a durable pending set — so a multi-day outage
+ * can't age files out of a rolling window before repair gets to them.
+ * Kept as an injected listener so this module stays free of Redis.
+ */
+type BarePdfListener = (filePath: string) => void;
+let barePdfListener: BarePdfListener | null = null;
+export function setBarePdfListener(listener: BarePdfListener | null): void {
+  barePdfListener = listener;
+}
 
 const require = createRequire(import.meta.url);
 const sanitizeFilename = require('sanitize-filename') as (input: string) => string;
@@ -227,6 +240,13 @@ function applyEnrichedMetadata(
     if (!isNaN(pubDate.getTime())) pdfDoc.setCreationDate(pubDate);
   }
 
+  // EnrichedAt means "validated enrichment is embedded" — it is only written
+  // when there is a real summary. An attempt that produced nothing usable is
+  // recorded as EnrichmentStatus=unusable_reply instead, so the auditor, the
+  // repair sweep and the KB consumer can all tell "tried and failed" from
+  // "enriched" (before 2026-09-04 both wrote EnrichedAt, and 16 empty-summary
+  // tweet PDFs in one week looked enriched to every check).
+  const usable = isUsableEnrichment(metadata);
   setInfoDictFields(pdfDoc, {
     Summary: metadata.summary,
     Language: metadata.language,
@@ -234,7 +254,8 @@ function applyEnrichedMetadata(
     PublishDate: metadata.publishDate,
     Tags: metadata.tags.length > 0 ? metadata.tags.join(', ') : undefined,
     Translation: metadata.translation,
-    EnrichedAt: new Date().toISOString(),
+    EnrichedAt: usable ? new Date().toISOString() : undefined,
+    EnrichmentStatus: usable ? 'ok' : 'unusable_reply',
   });
 }
 
@@ -397,6 +418,12 @@ export async function savePdfToWeeklyBin(
 
   // Write PDF with all metadata embedded directly (writeFile overwrites)
   await writeFile(filePath, pdfWithMetadata);
+
+  // Transcript PDFs are not article-enriched; everything else that landed
+  // without a usable summary is queued for the repair sweep.
+  if (docType !== 'transcript' && (!enrichedMetadata || !isUsableEnrichment(enrichedMetadata))) {
+    try { barePdfListener?.(filePath); } catch { /* never fail a save over bookkeeping */ }
+  }
 
   // Re-capture freshness: the same URL captured in an earlier ISO week left a
   // same-basename copy in that week's bin. One canonical copy wins (this one);

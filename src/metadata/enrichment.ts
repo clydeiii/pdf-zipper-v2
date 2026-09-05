@@ -10,7 +10,7 @@
  */
 
 import { env } from '../config/env.js';
-import { chatText } from '../utils/llm-chat.js';
+import { chatText, LLM_NUM_CTX } from '../utils/llm-chat.js';
 
 /**
  * Enriched metadata extracted from document content
@@ -36,6 +36,27 @@ export interface EnrichedMetadata {
 
 /** Max chars to send for metadata extraction (keep prompt reasonable) */
 const MAX_EXTRACT_CHARS = 6000;
+
+/**
+ * JSON schema handed to Ollama as `format` (structured outputs): the model is
+ * grammar-constrained to exactly this shape, so a reply can no longer arrive
+ * wrapped in prose or a code fence, with a missing key, or with tags as a
+ * string. Application validation still runs on top (validateFactualFields,
+ * isUsableEnrichment) — the schema guarantees shape, not truth.
+ */
+export const METADATA_RESPONSE_SCHEMA = {
+  type: 'object',
+  properties: {
+    title: { type: 'string' },
+    author: { type: ['string', 'null'] },
+    publication: { type: ['string', 'null'] },
+    publishDate: { type: ['string', 'null'] },
+    language: { type: 'string' },
+    summary: { type: 'string' },
+    tags: { type: 'array', items: { type: 'string' }, maxItems: 10 },
+  },
+  required: ['title', 'author', 'publication', 'publishDate', 'language', 'summary', 'tags'],
+} as const;
 
 /** Max chars to send per translation chunk */
 const MAX_TRANSLATE_CHARS = 10000;
@@ -90,9 +111,30 @@ ${truncatedText}`;
       model: env.ENRICHMENT_MODEL,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.2,
-      numCtx: 8192,
+      numCtx: LLM_NUM_CTX,
+      // Structured output: the model can only emit an object matching the
+      // schema, so the prose/code-fence wrapping that made JSON.parse fail
+      // (and left 16 tweet PDFs in 2026-W36 with EnrichedAt set but an EMPTY
+      // Summary) is no longer possible.
+      format: METADATA_RESPONSE_SCHEMA as unknown as Record<string, unknown>,
     });
     result = parseMetadataResponse(content, url, pageTitle, truncatedText);
+    // A reply that parsed to nothing usable is the same failure as a parse
+    // error: the fallback carries no summary/tags. Retry once — it's LLM
+    // nondeterminism or a truncated reply, and one more call is far cheaper
+    // than shipping a bare file to the KB and repairing it later.
+    if (!isUsableEnrichment(result)) {
+      console.warn(JSON.stringify({
+        event: 'enrichment_unusable_reply',
+        url,
+        attempt,
+        action: attempt < 2 ? 'retry' : 'kept_bare',
+        replyPreview: content.slice(0, 200),
+        timestamp: new Date().toISOString(),
+      }));
+      if (attempt < 2) continue;
+      break;
+    }
     const ghost = unsupportedSummaryName(result.summary, supportHaystack);
     if (!ghost) break;
     console.log(JSON.stringify({
@@ -104,6 +146,16 @@ ${truncatedText}`;
     }));
   }
   return result!;
+}
+
+/**
+ * Did the model actually enrich, or did we fall back? A usable reply carries a
+ * summary; tags alone are not enough (an empty summary is what the KB consumer
+ * notices). Exported so the auditor/backfill can apply the same definition to
+ * files already on disk.
+ */
+export function isUsableEnrichment(meta: Pick<EnrichedMetadata, 'summary'>): boolean {
+  return typeof meta.summary === 'string' && meta.summary.trim().length > 0;
 }
 
 /**
@@ -325,7 +377,9 @@ ${text}`;
     messages: [{ role: 'user', content: prompt }],
     temperature: 0.3,
     numPredict: -1,
-    numCtx: 16384,
+    // MAX_TRANSLATE_CHARS (10k chars ≈ 2.5k tokens) in + the same out fits the
+    // shared 8K context; a 16K request here reloaded the model (see LLM_NUM_CTX).
+    numCtx: LLM_NUM_CTX,
   });
 
   return content.trim();
