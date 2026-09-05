@@ -41,6 +41,17 @@ export interface PDFSuccessResult {
     inReplyTo?: string;   // canonical x.com URL of the reply parent
     tweetDate?: string;   // exact publish time (ISO 8601) from Nitter's DOM
   };
+  /**
+   * What the main tweet visually contains (Nitter DOM). Drives the
+   * vision-fast-path shadow measurement: a text-only tweet is the candidate
+   * for skipping the vision score; anything with attachments/quote/card is not.
+   */
+  tweetVisual?: {
+    hasAttachments: boolean; // images / video / gif in .main-tweet
+    hasQuote: boolean;       // embedded quoted tweet
+    hasCard: boolean;        // link preview card
+    replyCount: number;      // rendered replies below the main tweet
+  };
   /** Best-effort structured body lifted before print mutations during direct X Article fallback. */
   articleContent?: {
     title?: string;

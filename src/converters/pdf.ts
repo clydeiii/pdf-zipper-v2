@@ -1703,6 +1703,7 @@ export async function convertUrlToPDF(
     // so the KB's timeline reconstruction gets real edges. Best-effort — a
     // missing relation must never fail a capture.
     let tweetRelations: { quotedTweet?: string; inReplyTo?: string; tweetDate?: string } | undefined;
+    let tweetVisual: { hasAttachments: boolean; hasQuote: boolean; hasCard: boolean; replyCount: number } | undefined;
     if (isTwitterUrl(url) && targetUrl !== url) {
       try {
         const raw = await page.evaluate(() => {
@@ -1718,8 +1719,15 @@ export async function convertUrlToPDF(
             quotedTweet: quoteLink ? toCanonical(quoteLink.getAttribute('href')) : undefined,
             inReplyTo: parentLink ? toCanonical(parentLink.getAttribute('href')) : undefined,
             dateTitle: dateLink ? dateLink.getAttribute('title') : undefined,
+            visual: {
+              hasAttachments: !!document.querySelector('.main-tweet .attachments'),
+              hasQuote: !!document.querySelector('.main-tweet .quote'),
+              hasCard: !!document.querySelector('.main-tweet .card'),
+              replyCount: document.querySelectorAll('.replies .timeline-item, .after-tweet .timeline-item').length,
+            },
           };
         });
+        tweetVisual = raw.visual;
         // Nitter renders "Jul 2, 2026 · 3:21 AM UTC" — parseable once the
         // separator dot is dropped.
         let tweetDate: string | undefined;
@@ -2205,6 +2213,7 @@ export async function convertUrlToPDF(
       isXArticle: isNitterCapture ? isNitterArticleCapture : undefined,
       expandedUrl: expandedUrl !== url ? expandedUrl : undefined,
       tweetRelations,
+      tweetVisual,
       embeddedPdfUrl,
     };
 

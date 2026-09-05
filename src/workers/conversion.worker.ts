@@ -575,6 +575,29 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
   let contentResult = await analyzePdfContent(result.pdfBuffer, { lenient, sourceUrl: originalUrl || url });
   console.log(`PDF content analysis for ${url}: ${contentResult.charCount} chars, ${contentResult.pageCount} pages, ${contentResult.charsPerKb} chars/KB${lenient ? ' [lenient: tweet]' : ''}`);
 
+  // Vision fast-path SHADOW measurement (no behaviour change). Tweets are 54%
+  // of captures and each pays a vision call on the shared model; in a 28h
+  // sample every one of 112 tweet verdicts passed. Before skipping anything,
+  // record what the candidate rule ("text-only tweet: no attachments, quote or
+  // card") would have decided next to what vision actually said and what the
+  // text gate says, so the decision can be made from data in a couple of weeks
+  // (`grep vision_fastpath_shadow`).
+  if (isXArticle === false && result.tweetVisual && visionStatus !== 'no_screenshot') {
+    const v = result.tweetVisual;
+    console.log(JSON.stringify({
+      event: 'vision_fastpath_shadow',
+      url: originalUrl || url,
+      textOnly: !v.hasAttachments && !v.hasQuote && !v.hasCard,
+      replyCount: v.replyCount,
+      visionStatus,
+      visionScore: qualityResult.score.score,
+      visionIssue: qualityResult.score.issue ?? null,
+      contentPassed: contentResult.passed,
+      contentChars: contentResult.charCount,
+      timestamp: new Date().toISOString(),
+    }));
+  }
+
   // A capture flagged as an X Article but with tweet-length content is almost
   // always a mis-flagged short tweet:
   // the stub heuristic false-fires on quote-tweets, and the X.com logged-out
