@@ -13,6 +13,7 @@ import { env } from '../config/env.js';
 import type { MediaItem, MediaCollectionResult } from './types.js';
 import { downloadPatreonVideo, isPatreonPostUrl } from './patreon.js';
 import { downloadVideoViaYtDlp } from './ytdlp-video.js';
+import { judgeProbe, probeVideo } from './video-provenance.js';
 
 /**
  * Get authorization header for Karakeep asset downloads
@@ -60,10 +61,13 @@ export async function downloadMedia(item: MediaItem): Promise<MediaCollectionRes
     const filename = getMediaFilename(item);
     const filePath = path.join(binPath, filename);
 
-    // Skip if file already exists and has content (idempotent)
+    // Skip if file already exists and is a readable video (idempotent). A
+    // leftover that ffprobe can't open is a truncated earlier attempt, not a
+    // download — replace it (see video-provenance.ts).
     if (existsSync(filePath)) {
       const stats = statSync(filePath);
-      if (stats.size > 0) {
+      const readable = filePath.endsWith('.mp4') ? judgeProbe(await probeVideo(filePath)).ok : stats.size > 0;
+      if (stats.size > 0 && readable) {
         const duration = Date.now() - startTime;
         return {
           success: true,

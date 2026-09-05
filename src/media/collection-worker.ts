@@ -4,7 +4,8 @@
  */
 
 import { Worker, Job } from 'bullmq';
-import { readFile, writeFile, rename, access } from 'node:fs/promises';
+import { readFile, writeFile, rename, access, unlink } from 'node:fs/promises';
+import { finalizeVideoDownload, hasSourceUrl } from './video-provenance.js';
 import * as path from 'node:path';
 import { PDFDocument } from 'pdf-lib';
 import { workerConnection } from '../config/redis.js';
@@ -75,6 +76,23 @@ export async function startMediaWorker(): Promise<void> {
 
         // Post-download enrichment for video files
         if (item.mediaType === 'video' && result.filePath.endsWith('.mp4')) {
+          // Gate + provenance stamp FIRST (fresh downloads only — a re-enrich
+          // of a library file is already validated and tagged). A truncated
+          // file (Karakeep still writing its asset when we fetched it — 21
+          // such junk files were in the library on 2026-09-05) is deleted
+          // and the job fails so BullMQ's backoff retries after the upstream
+          // finishes. A valid file gets source_url/bookmarked_at/doc_type
+          // before dedup/compress/enrich can fail and leave it tagless.
+          if (!existingFilePath) {
+            const gate = await finalizeVideoDownload(result.filePath, item);
+            if (!gate.ok) {
+              throw new Error(`Media download invalid (${gate.reason}): ${item.url}`);
+            }
+            if (!gate.stamped) {
+              await unlink(result.filePath).catch(() => { /* best-effort */ });
+              throw new Error(`Media provenance stamp failed: ${item.url}`);
+            }
+          }
           // Duplicate check BEFORE the expensive compress/transcribe steps.
           // Bookmarking both a tweet and a quote-tweet of it delivers the
           // SAME embedded video twice; keep the first copy as canonical,
@@ -123,6 +141,25 @@ export async function startMediaWorker(): Promise<void> {
           } catch (err) {
             // Non-fatal: video was still downloaded successfully
             console.warn('Video enrichment failed (non-fatal):', err instanceof Error ? err.message : err);
+          }
+        }
+
+        // Last line of defence: whatever happened above (rename, compress,
+        // enrichment failure), the file that stays in the library carries its
+        // source. Re-stamp if a step dropped it; never return a tagless file.
+        if (item.mediaType === 'video' && result.filePath.endsWith('.mp4')) {
+          const tagged = await hasSourceUrl(result.filePath);
+          if (tagged === false) {
+            const restamped = await finalizeVideoDownload(result.filePath, item);
+            console.warn(JSON.stringify({
+              event: 'video_source_url_restamped',
+              filePath: result.filePath,
+              ok: restamped.ok && restamped.stamped === true,
+              timestamp: new Date().toISOString(),
+            }));
+            if (!restamped.ok || !restamped.stamped) {
+              throw new Error(`Video left without source_url and could not be re-stamped: ${item.url}`);
+            }
           }
         }
 
