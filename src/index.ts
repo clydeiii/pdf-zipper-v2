@@ -51,6 +51,10 @@ import { startKarakeepCleaner, stopKarakeepCleaner } from './maintenance/karakee
 // Import nightly captures zipper (bundles the last 24h of captures into captures-latest.zip)
 import { startCapturesZipper, stopCapturesZipper } from './maintenance/captures-zipper.js';
 import { startCaptureAuditor, stopCaptureAuditor } from './maintenance/capture-auditor.js';
+// 2-hourly re-enrichment of PDFs saved bare while Ollama was down
+import { startEnrichmentRepair, stopEnrichmentRepair } from './maintenance/enrichment-repair.js';
+// Ollama / Parakeet / Nitter / Karakeep probes → Discord on sustained outage
+import { startDependencyMonitor, stopDependencyMonitor } from './maintenance/dependency-monitor.js';
 import { closeTwitterDb } from './twitter/db.js';
 import type { Server } from 'node:http';
 
@@ -109,6 +113,8 @@ async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
     stopRetentionSweeper();
     stopCapturesZipper();
     stopCaptureAuditor();
+    stopEnrichmentRepair();
+    stopDependencyMonitor();
 
     console.log('Closing HTTP server...');
     await closeHttpServer();
@@ -186,6 +192,12 @@ async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
 
   // Start nightly capture auditor (re-check last 24h of saved captures → Discord)
   startCaptureAuditor();
+
+  // Start the 2-hourly enrichment repair sweep (re-enrich PDFs saved bare)
+  startEnrichmentRepair();
+
+  // Start the dependency monitor (alerts on sustained Ollama/Parakeet/Nitter/Karakeep outages)
+  startDependencyMonitor();
 
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
   process.on('SIGINT', () => gracefulShutdown('SIGINT'));

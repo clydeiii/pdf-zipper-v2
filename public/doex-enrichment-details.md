@@ -7,7 +7,7 @@ these files — can reconstruct sources, timelines, and relationships without
 guessing. Everything needed is shipped inside the bundle; there is no external
 state to fetch.
 
-Last updated: 2026-07-29.
+Last updated: 2026-09-04.
 
 ## Bundle layout
 
@@ -47,6 +47,10 @@ Read with any PDF metadata reader (`pdfinfo`, pypdf, pdf-lib). Custom fields:
 | `AIDetectionAI` / `AIDetectionAIAssisted` / `AIDetectionHuman` | Share of the post's text in each class, as whole percentages (`67%`). They sum to ~100%. `AIDetectionAI: 0%` is a real measurement and means something different from the field being absent |
 | `AIDetectionSource` / `AIDetectionCheckedAt` | Always `Pangram via Substack`, and when the scan ran (ISO 8601). The verdict is computed against the post as it stood at capture time — an edited post would score differently, so treat this as a point-in-time reading, not a durable property |
 | `AIDisclosure` | The writer's own "How I make this" statement, when they published one. This is a self-report and is independent of the Pangram score; the two can disagree. Normalised whitespace, truncated past 1200 chars with `…` |
+| `EnrichedAt` | ISO timestamp of a **validated** enrichment: present only when `Summary` is non-empty. Since 2026-09-04 it is never written for an attempt that produced nothing usable (before that date, a handful of files carry `EnrichedAt` with an empty `Summary` — treat those as unenriched) |
+| `EnrichmentStatus` | `ok` — enrichment embedded; `unusable_reply` — the model was reached but returned nothing usable and the file was queued for automatic repair. **Absent** means enrichment never ran (the model host was unreachable at capture time). A repaired file is re-shipped in a later bundle under the same filename and supersedes this one |
+| `QualityCheck` | Which save-time quality gates actually judged this capture (Playwright path only): `vision+content` — the vision model scored the rendered page AND the text analysis passed; `vision-overridden+content` — the vision model objected but the text analysis overrode it (tweet layouts, dark hero pages); `content-only:vision-unavailable` — the vision host was unreachable, so only text analysis ran; `content-only:no-screenshot` — the screenshot itself failed. A `content-only` capture passed weaker checks: it is not a lower-quality file, but it is a less-verified one |
+| `QualityScore` | The vision model's 0–100 score, when it ran. Informational — the gate was 50 |
 | `CaptureScope` | Manual captures: `page`, `reader`, or `selection` |
 | `Markdown` / `MarkdownLength` / `MarkdownExtractedBy` | Manual captures: a clean Readability/Turndown markdown extraction of the article, embedded alongside the rendered PDF |
 

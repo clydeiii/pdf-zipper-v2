@@ -476,10 +476,16 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
   // Score quality using screenshot BEFORE saving PDF
   // Skip quality scoring if screenshot capture failed
   let qualityResult;
+  // What the vision gate actually did — recorded in the PDF (QualityCheck) so
+  // the KB consumer can tell a scored capture from one that passed only
+  // because Ollama was unreachable. "Passed" and "unverified" are different
+  // facts; before 2026-09-04 both looked identical in the file.
+  let visionStatus: 'scored' | 'unavailable' | 'no_screenshot' | 'overridden' = 'scored';
   try {
     if (screenshotFailed) {
       // No screenshot to score - assume quality passed
       qualityResult = { passed: true, score: { score: -1, reasoning: 'Screenshot capture failed, quality check skipped', issue: undefined } };
+      visionStatus = 'no_screenshot';
       console.log(`Quality check skipped for ${url} - screenshot capture failed`);
     } else {
       qualityResult = await scoreScreenshotQuality(result.screenshotBuffer);
@@ -496,6 +502,7 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
         if (isTweetCapture && softIssues.includes(qualityResult.score.issue)) {
           console.log(`Vision layout complaint on tweet capture for ${url} — deferring to PDF content analysis`);
           qualityResult = { ...qualityResult, passed: true };
+          visionStatus = 'overridden';
         } else if (qualityResult.score.issue === 'blank_page') {
           // The screenshot is viewport-only, so a dark hero reads as "solid
           // black" — openai.com's GPT-6 Astra launch page (black body
@@ -513,6 +520,7 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
               timestamp: new Date().toISOString(),
             }));
             qualityResult = { ...qualityResult, passed: true };
+            visionStatus = 'overridden';
           } else {
             await saveDebugPdf(job.id!, result.pdfBuffer);
             throw new Error(`blank_page: ${qualityResult.score.reasoning}`);
@@ -548,6 +556,7 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
       passed: true,
       score: { score: 50, issue: undefined as string | undefined, reasoning: `Quality scoring error: ${message}` },
     };
+    visionStatus = 'unavailable';
   }
 
   // Check PDF content for truncation (catches paywalls that screenshot check misses).
@@ -647,6 +656,17 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
   // timestamp overrides the LLM's PublishDate guess (extras are applied
   // after enrichment fields in embedPdfMetadata, so last write wins).
   const infoDictExtras: Record<string, string> = {};
+  // Provenance of the quality verdict (see visionStatus above). Content
+  // analysis always ran by this point, so the check is "vision+content" when
+  // the vision model scored the page, or "content-only:<why>" when it didn't.
+  infoDictExtras.QualityCheck = visionStatus === 'scored'
+    ? 'vision+content'
+    : visionStatus === 'overridden'
+      ? 'vision-overridden+content'
+      : `content-only:${visionStatus === 'unavailable' ? 'vision-unavailable' : 'no-screenshot'}`;
+  if (visionStatus === 'scored' || visionStatus === 'overridden') {
+    infoDictExtras.QualityScore = String(qualityResult.score.score);
+  }
   if (result.tweetRelations?.quotedTweet) infoDictExtras.QuotedTweet = result.tweetRelations.quotedTweet;
   if (result.tweetRelations?.inReplyTo) infoDictExtras.InReplyTo = result.tweetRelations.inReplyTo;
   if (result.tweetRelations?.tweetDate) infoDictExtras.PublishDate = result.tweetRelations.tweetDate;
