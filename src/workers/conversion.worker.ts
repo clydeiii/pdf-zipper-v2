@@ -17,6 +17,7 @@ import { env } from '../config/env.js';
 import type { ConversionJobData, ConversionJobResult } from '../jobs/types.js';
 import { initBrowser, closeBrowser } from '../browsers/manager.js';
 import { convertUrlToPDF, isPdfUrl, downloadPdfDirect, rewriteToPdfUrl } from '../converters/pdf.js';
+import { markdownInfoDictFields } from '../converters/markdown-extract.js';
 
 /**
  * A vision "blank_page" verdict is overridden when the PDF extracts at least
@@ -684,7 +685,7 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
   // Tweet graph edges from the Nitter DOM → Info Dict. The exact DOM
   // timestamp overrides the LLM's PublishDate guess (extras are applied
   // after enrichment fields in embedPdfMetadata, so last write wins).
-  const infoDictExtras: Record<string, string> = {};
+  const infoDictExtras: Record<string, string> = markdownInfoDictFields(result.markdownExtraction);
   // Provenance of the quality verdict (see visionStatus above). Content
   // analysis always ran by this point, so the check is "vision+content" when
   // the vision model scored the page, or "content-only:<why>" when it didn't.

@@ -2,6 +2,7 @@ import { ensureLiveBrowser } from '../utils/browser-health.js';
 import { loadCookies } from '../browsers/cookies.js';
 import { env } from '../config/env.js';
 import { extractJsonLdArticleBody } from './jsonld-body.js';
+import { extractMarkdown, isTwitterUrl } from './markdown-extract.js';
 import type { PDFOptions, PDFResult, PDFPassthroughResult } from './types.js';
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
@@ -350,21 +351,6 @@ function cleanSubstackUrl(url: string): string {
     return cleanedUrl;
   } catch {
     return url;
-  }
-}
-
-/**
- * Check if a URL is a Twitter/X URL
- */
-function isTwitterUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    const host = parsed.hostname.toLowerCase()
-      .replace(/^www\./, '')
-      .replace(/^(?:mobile|m)\./, '');
-    return host === 'x.com' || host === 'twitter.com';
-  } catch {
-    return false;
   }
 }
 
@@ -1138,6 +1124,10 @@ export async function convertUrlToPDF(
         }
       } catch { /* ignore */ }
     }
+
+    // Capture reader text before privacy/overlay/style mutations change the
+    // article DOM; extraction is optional and must never fail the PDF.
+    const markdownExtraction = await extractMarkdown(page, url, env.NITTER_HOST);
 
     // Embedded-PDF viewers print as blank sheets: Chromium's print path
     // rasterizes neither the native <embed>/<iframe> PDF plugin nor PDF.js
@@ -2215,6 +2205,7 @@ export async function convertUrlToPDF(
       tweetRelations,
       tweetVisual,
       embeddedPdfUrl,
+      markdownExtraction,
     };
 
   } finally {
