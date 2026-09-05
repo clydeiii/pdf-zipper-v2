@@ -1,9 +1,8 @@
 import { ensureLiveBrowser } from '../utils/browser-health.js';
 import { loadCookies } from '../browsers/cookies.js';
 import { env } from '../config/env.js';
-import { extractJsonLdArticleBody } from './jsonld-body.js';
-import { extractMarkdown, isTwitterUrl } from './markdown-extract.js';
 import { extractJsonLdArticleBody, extractJsonLdWordCount } from './jsonld-body.js';
+import { extractMarkdown, isTwitterUrl } from './markdown-extract.js';
 import { pickAnchors } from '../quality/content-anchors.js';
 import type { PDFOptions, PDFResult, PDFPassthroughResult } from './types.js';
 
