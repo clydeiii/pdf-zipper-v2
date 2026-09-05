@@ -51,6 +51,7 @@ import { startKarakeepCleaner, stopKarakeepCleaner } from './maintenance/karakee
 // Import nightly captures zipper (bundles the last 24h of captures into captures-latest.zip)
 import { startCapturesZipper, stopCapturesZipper } from './maintenance/captures-zipper.js';
 import { startCaptureAuditor, stopCaptureAuditor } from './maintenance/capture-auditor.js';
+import { startCoverageReconciler, stopCoverageReconciler } from './maintenance/coverage-reconciler.js';
 import { closeTwitterDb } from './twitter/db.js';
 import type { Server } from 'node:http';
 
@@ -109,6 +110,7 @@ async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
     stopRetentionSweeper();
     stopCapturesZipper();
     stopCaptureAuditor();
+    stopCoverageReconciler();
 
     console.log('Closing HTTP server...');
     await closeHttpServer();
@@ -186,6 +188,7 @@ async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
 
   // Start nightly capture auditor (re-check last 24h of saved captures → Discord)
   startCaptureAuditor();
+  startCoverageReconciler();
 
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
   process.on('SIGINT', () => gracefulShutdown('SIGINT'));

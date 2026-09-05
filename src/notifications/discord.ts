@@ -59,7 +59,7 @@ export function isDiscordEnabled(): boolean {
 /**
  * Send a message to the configured Discord webhook
  */
-async function sendToDiscord(payload: DiscordPayload): Promise<void> {
+async function sendToDiscord(payload: DiscordPayload, timeoutMs?: number): Promise<void> {
   if (!env.DISCORD_WEBHOOK_URL) {
     console.log('[Discord] Webhook URL not configured, skipping notification');
     return;
@@ -72,6 +72,7 @@ async function sendToDiscord(payload: DiscordPayload): Promise<void> {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(payload),
+      signal: timeoutMs === undefined ? undefined : AbortSignal.timeout(timeoutMs),
     });
 
     if (!response.ok) {
@@ -230,6 +231,8 @@ export async function sendDiscordNotification(data: {
   description?: string;
   url?: string;
   fields?: EmbedField[];
+  /** Scheduled audits have a bounded runtime even when the webhook stalls. */
+  timeoutMs?: number;
 }): Promise<void> {
   const fields: EmbedField[] = data.fields || [];
 
@@ -245,7 +248,7 @@ export async function sendDiscordNotification(data: {
       fields: fields.length > 0 ? fields : undefined,
       timestamp: new Date().toISOString(),
     }],
-  });
+  }, data.timeoutMs);
 }
 
 /**
