@@ -3,6 +3,8 @@ import { loadCookies } from '../browsers/cookies.js';
 import { env } from '../config/env.js';
 import { extractJsonLdArticleBody } from './jsonld-body.js';
 import { extractMarkdown, isTwitterUrl } from './markdown-extract.js';
+import { extractJsonLdArticleBody, extractJsonLdWordCount } from './jsonld-body.js';
+import { pickAnchors } from '../quality/content-anchors.js';
 import type { PDFOptions, PDFResult, PDFPassthroughResult } from './types.js';
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
@@ -1021,6 +1023,7 @@ export async function convertUrlToPDF(
       const main = document.querySelector('article') || document.querySelector('main');
       return (main ?? document.body)?.innerText.trim().length ?? 0;
     };
+    let usedJsonLdBodyRescue = false;
     try {
       const SHELL_THRESHOLD = 2500;
       const len0 = await page.evaluate(ARTICLE_LEN_FN);
@@ -1097,6 +1100,7 @@ export async function convertUrlToPDF(
               }
               main.appendChild(container);
             }, ldBody);
+            usedJsonLdBodyRescue = true;
             console.log(`[jsonld-rescue] Article body never hydrated (${lenFinal} chars rendered); injected ${ldBody.length}-char articleBody from JSON-LD`);
           }
         }
@@ -1128,6 +1132,58 @@ export async function convertUrlToPDF(
     // Capture reader text before privacy/overlay/style mutations change the
     // article DOM; extraction is optional and must never fail the PDF.
     const markdownExtraction = await extractMarkdown(page, url, env.NITTER_HOST);
+    // innerText can see the tail inside a clipped scroll pane even when
+    // page.pdf cannot print it. Record that evidence before print mutations.
+    let sourceTextChars: number | undefined;
+    let sourceWordCount: number | undefined;
+    let contentAnchors: string | undefined;
+    const anchorExcludedUrl = (candidate: string) => {
+      const host = new URL(candidate).hostname.toLowerCase();
+      return isTwitterUrl(candidate) || host === new URL(env.NITTER_HOST).hostname.toLowerCase() ||
+        /^(?:www\.)?archive\.(is|today|ph|li|md|vn|fo|org)$/.test(host) || host === 'web.archive.org';
+    };
+    try {
+      if (!usedJsonLdBodyRescue && ![url, expandedUrl, targetUrl, page.url()].some(anchorExcludedUrl)) {
+        const anchorStarted = Date.now();
+        const snapshot = await withTimeout(page.evaluate((privacyTerms: string[]) => {
+          const started = performance.now();
+          const container = document.querySelector('article') || document.querySelector('main') || document.body;
+          const sourceText = container?.innerText || '';
+          // A pathological DOM should skip the audit, never add an unbounded
+          // text transfer/scan to an otherwise successful capture.
+          if (sourceText.length > 2_000_000) throw new Error('anchor text budget');
+          const paragraphs: string[] = [];
+          const selector = 'p, li, blockquote, h2, h3';
+          for (const el of container.querySelectorAll<HTMLElement>(selector)) {
+            if (performance.now() - started > 2500) throw new Error('anchor DOM budget');
+            // Leaf blocks avoid counting a blockquote and its paragraphs twice.
+            // Visibility is layout-based, not viewport-based: clipped/offscreen
+            // article prose is precisely what this audit needs to remember.
+            if (el.querySelector(selector) || el.closest('nav, aside, footer, [role="navigation"]')) continue;
+            if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) continue;
+            const text = el.innerText;
+            // This runs before the privacy scrub; never persist its terms in
+            // hidden metadata even though the printed page will remove them.
+            if (privacyTerms.some(term => text.toLowerCase().includes(term))) continue;
+            if (text.trim()) paragraphs.push(text);
+          }
+          const scripts = Array.from(document.querySelectorAll('script[type="application/ld+json"]'))
+            .map(s => s.textContent || '');
+          if (scripts.reduce((n, s) => n + s.length, 0) > 2_000_000) throw new Error('anchor JSON-LD budget');
+          return { sourceText, paragraphs, scripts };
+        }, getPrivacyFilterTerms()), 3000, 'Content anchors');
+        const anchors = pickAnchors(snapshot.paragraphs, snapshot.sourceText);
+        sourceTextChars = snapshot.sourceText.replace(/\s+/g, ' ').trim().length;
+        sourceWordCount = extractJsonLdWordCount(snapshot.scripts);
+        if (anchors.length === 3) contentAnchors = JSON.stringify(anchors);
+        if (Date.now() - anchorStarted > 3000) throw new Error('anchor budget');
+      }
+    } catch {
+      sourceTextChars = undefined;
+      sourceWordCount = undefined;
+      contentAnchors = undefined;
+      console.log(JSON.stringify({ event: 'anchors_skipped', url, timestamp: new Date().toISOString() }));
+    }
 
     // Embedded-PDF viewers print as blank sheets: Chromium's print path
     // rasterizes neither the native <embed>/<iframe> PDF plugin nor PDF.js
@@ -2206,6 +2262,9 @@ export async function convertUrlToPDF(
       tweetVisual,
       embeddedPdfUrl,
       markdownExtraction,
+      sourceTextChars,
+      sourceWordCount,
+      contentAnchors,
     };
 
   } finally {

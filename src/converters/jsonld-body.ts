@@ -47,6 +47,35 @@ function collectBodies(node: unknown, out: string[], depth = 0): void {
   }
 }
 
+/** Use the same type/container rules as the body rescue, without visiting related stories. */
+export function extractJsonLdWordCount(scriptContents: string[]): number | undefined {
+  function scan(node: unknown, depth = 0): number | undefined {
+    if (depth > 6 || node === null || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        const count = scan(item, depth + 1);
+        if (count !== undefined) return count;
+      }
+      return;
+    }
+    const obj = node as Record<string, unknown>;
+    const count = typeof obj.wordCount === 'number' ? obj.wordCount
+      : typeof obj.wordCount === 'string' && /^\d+$/.test(obj.wordCount.trim()) ? Number(obj.wordCount) : NaN;
+    if (isArticleType(obj['@type']) && Number.isSafeInteger(count) && count > 0) return count;
+    for (const key of ['@graph', 'mainEntity', 'mainEntityOfPage', 'itemListElement', 'item']) {
+      const nested = scan(obj[key], depth + 1);
+      if (nested !== undefined) return nested;
+    }
+  }
+  for (const raw of scriptContents) {
+    if (!raw || raw.length > 2_000_000) continue;
+    try {
+      const count = scan(JSON.parse(raw));
+      if (count !== undefined) return count;
+    } catch { /* malformed JSON-LD cannot prevent a capture */ }
+  }
+}
+
 /**
  * Given the raw text of every `<script type="application/ld+json">` on a page,
  * return the longest Article/NewsArticle `articleBody`, or null if none found.
