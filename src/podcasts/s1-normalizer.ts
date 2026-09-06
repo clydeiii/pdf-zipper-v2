@@ -46,6 +46,8 @@ export const MIN_OUTPUT_RATIO = 0.55;
 export const MAX_OUTPUT_RATIO = 1.15;
 
 const CHUNK_TIMEOUT_MS = 180_000;
+/** ~3,500-char chunks ≈ 850 tokens in + out; one runner size for warm-up and chunks. */
+const NUM_CTX = 4096;
 
 /**
  * Cold-loading s1-mini takes ~30s idle but can exceed the chunk timeout when
@@ -58,19 +60,35 @@ const CHUNK_TIMEOUT_MS = 180_000;
 const WARMUP_TIMEOUT_MS = 300_000;
 const KEEP_ALIVE = '2h';
 
-async function warmUpModel(): Promise<void> {
+/**
+ * Returns true only when Ollama confirms the model is loaded. When it can't
+ * be loaded inside the budget (2026-09-06: e4b pinned resident and Ollama
+ * refusing a second model, so a bare load request hung indefinitely), the
+ * whole stage is skipped — otherwise every chunk would burn two 180s
+ * timeouts and a 5-chunk transcript spent 35 minutes producing raw text.
+ */
+async function warmUpModel(): Promise<boolean> {
   try {
-    await fetch(`${env.OLLAMA_HOST}/api/generate`, {
+    const res = await fetch(`${env.OLLAMA_HOST}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: env.TRANSCRIPT_NORMALIZE_MODEL,
         keep_alive: KEEP_ALIVE,
+        // Must match the chunk calls: a request without num_ctx takes the
+        // server default (mac.mini runs OLLAMA_CONTEXT_LENGTH=65536), which
+        // sizes a KV cache that can't fit beside the resident e4b — the load
+        // then waits for memory that never frees — and even when it fits,
+        // a differently-sized runner is thrown away on the first chunk.
+        options: { num_ctx: NUM_CTX },
       }),
       signal: AbortSignal.timeout(WARMUP_TIMEOUT_MS),
     });
+    if (!res.ok) return false;
+    const data = (await res.json().catch(() => ({}))) as { done?: boolean; error?: string };
+    return data.done === true && !data.error;
   } catch {
-    // Best effort — the chunk loop has its own per-chunk fallback.
+    return false;
   }
 }
 
@@ -144,7 +162,7 @@ async function normalizeChunk(chunk: string): Promise<string | null> {
         options: {
           temperature: 0,
           num_predict: numPredict,
-          num_ctx: 4096,
+          num_ctx: NUM_CTX,
           stop: ['<|im_end|>'],
         },
       }),
@@ -175,7 +193,17 @@ export async function normalizeTranscript(
   const out: string[] = [];
   let fallbacks = 0;
 
-  await warmUpModel();
+  if (!(await warmUpModel())) {
+    console.log(JSON.stringify({
+      event: 'transcript_normalize_skipped',
+      reason: 'model_unavailable',
+      model: env.TRANSCRIPT_NORMALIZE_MODEL,
+      chunks: chunks.length,
+      elapsedMs: Date.now() - start,
+      timestamp: new Date().toISOString(),
+    }));
+    return { text, chunks: chunks.length, fallbacks: chunks.length, elapsedMs: Date.now() - start };
+  }
 
   for (const chunk of chunks) {
     // One retry on transport failure only — a timeout during an Ollama burst

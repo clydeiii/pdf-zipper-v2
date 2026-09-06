@@ -48,3 +48,29 @@ test('prompt uses the exact documented system prompt and primed think block', ()
   assert.ok(p.includes('[Styling: semi-formal] [Structure: prose] [Context: general]\nhello there'));
   assert.ok(p.endsWith('<|im_start|>assistant\n<think>\n\n</think>\n\n'), 'must prime empty think block');
 });
+
+test('an unloadable model skips the stage fast instead of timing out every chunk', async () => {
+  // env is captured at import; set the field on the live object rather than
+  // process.env so the stage is enabled for this test only.
+  const { env } = await import('../dist/config/env.js');
+  const savedModel = env.TRANSCRIPT_NORMALIZE_MODEL;
+  env.TRANSCRIPT_NORMALIZE_MODEL = 'test-normalizer';
+  const { normalizeTranscript } = await import('../dist/podcasts/s1-normalizer.js');
+  const calls = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    calls.push(JSON.parse(init.body));
+    return { ok: true, json: async () => ({ error: 'model requires more system memory' }) };
+  };
+  try {
+    const text = ('Sentence one. Sentence two. '.repeat(40) + '\n\n').repeat(3).trim();
+    const result = await normalizeTranscript(text);
+    assert.equal(result.text, text, 'raw text kept');
+    assert.equal(result.fallbacks, result.chunks, 'every chunk counted as a fallback');
+    assert.equal(calls.length, 1, 'only the warm-up was attempted — no per-chunk calls');
+    assert.equal(calls[0].options?.num_ctx, 4096, 'warm-up requests the same context size as chunks');
+  } finally {
+    globalThis.fetch = realFetch;
+    env.TRANSCRIPT_NORMALIZE_MODEL = savedModel;
+  }
+});
