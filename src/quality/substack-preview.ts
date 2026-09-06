@@ -34,8 +34,22 @@ const PAID_MIN_RATIO = 0.9;
 /** Free posts: only a gross shortfall is evidence of a preview, not extraction loss. */
 const FREE_MIN_RATIO = 0.5;
 
+/**
+ * CJK scripts don't space-separate words, so whitespace splitting counts a
+ * Chinese post at ~1/7 of Substack's figure and the gate rejects a complete
+ * free post as a preview (2026-09-06: funeralai.substack.com/p/manus —
+ * 298 whitespace tokens vs a declared 2,088). Calibrated on that post:
+ * Substack's counter comes out near one word per 1.6 CJK characters
+ * (3,048 chars + 457 Latin words → 2,362 vs 2,088). Slight overcounting is
+ * the safe direction — a real preview is a fraction of the body either way.
+ */
+const CJK_CHARS = /[㐀-䶿一-鿿豈-﫿぀-ヿ가-힯]/g;
+const CJK_CHARS_PER_WORD = 1.6;
+
 export function countWords(text: string): number {
-  return text.split(/\s+/).filter(Boolean).length;
+  const cjkChars = (text.match(CJK_CHARS) || []).length;
+  const latinWords = text.replace(CJK_CHARS, ' ').split(/\s+/).filter(Boolean).length;
+  return latinWords + Math.round(cjkChars / CJK_CHARS_PER_WORD);
 }
 
 /**

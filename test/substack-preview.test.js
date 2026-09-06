@@ -23,3 +23,14 @@ test('unusable facts are never a verdict', () => {
   assert.equal(substackPreviewShortfall(words(5), 'only_paid', Number.NaN), null);
   assert.equal(countWords('  a\n b\tc  '), 3);
 });
+
+test('CJK posts are counted like Substack does, so a complete Chinese free post passes', async () => {
+  const { countWords, substackPreviewShortfall } = await import('../dist/quality/substack-preview.js');
+  // ~1,600 CJK characters with a few Latin tokens ≈ Substack's 1,000 words
+  const cjk = '模型测试的一点微小经验，团队在评测中发现了很多有趣的现象。'.repeat(60);
+  const text = cjk + ' Manus team notes on evals.';
+  assert.ok(countWords(text) >= 1000, `CJK-aware count ${countWords(text)} should approach the declared wordcount`);
+  assert.equal(substackPreviewShortfall(text, 'everyone', 1000), null, 'complete CJK post is not a preview');
+  // A genuine preview (first ~20%) still fails
+  assert.match(substackPreviewShortfall(cjk.slice(0, Math.floor(cjk.length * 0.2)), 'everyone', 1000) ?? '', /preview only/);
+});
