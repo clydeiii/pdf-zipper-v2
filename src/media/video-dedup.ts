@@ -10,11 +10,23 @@
  * Design constraint: NO state beyond the files already on disk. Identity is
  * derived by probing the library at download time:
  *
- *   candidate match = duration within 50ms          (survives re-encode)
+ *   candidate match = VIDEO STREAM duration within 500ms (survives re-encode
+ *                     and a cross-platform re-upload that trims a frame or two)
  *                   + aspect ratio within 1%        (survives downscale)
  *                   + same has-audio bit
- *   confirmed by    = perceptual frame hash          (8x8 grayscale frame
- *                     sampled at the same timestamp, hamming distance ≤ 12/64)
+ *   confirmed by    = perceptual frame hashes        (8x8 grayscale frames
+ *                     sampled at three shared timestamps; ≥2 of 3 within a
+ *                     hamming distance of 12/64)
+ *
+ * Why the VIDEO stream and not the container: the container duration is the
+ * longest track. The audio track of a re-upload differs by tens of ms, and
+ * `enrichVideo` embeds a subtitle track whose last cue can end SECONDS after
+ * the picture — so a library file that has already been enriched reports a
+ * longer duration than the identical fresh download. Observed 2026-09-06:
+ * the same 12:38 talk bookmarked from YouTube and from a tweet had
+ * byte-identical video streams (757.880s, 18,947 frames) but container
+ * durations of 758.001s and 763.401s, and the 50ms container gate stored
+ * both copies. Three hashes instead of one keep the wider gate honest.
  *
  * On a confirmed duplicate the caller keeps the EXISTING file as canonical,
  * appends the new bookmark's URL to its `also_bookmarked_as` metadata tag,
@@ -36,7 +48,10 @@ import { enrichVideoFile } from '../metadata/video-tags.js';
 
 const execFileAsync = promisify(execFile);
 
-const DURATION_TOLERANCE_MS = 50;
+const DURATION_TOLERANCE_MS = 500;
+/** Sample points as fractions of the duration (the first is capped at 5s). */
+const HASH_SAMPLE_FRACTIONS = [0.5, 0.4, 0.8];
+const HASH_MIN_MATCHES = 2;
 const ASPECT_TOLERANCE = 0.01;
 const FRAME_HASH_MAX_DISTANCE = 12; // of 64 bits
 /** Videos shorter than this are too likely to collide on duration alone. */
@@ -53,14 +68,16 @@ async function probeVideo(filePath: string): Promise<VideoProbe | null> {
   try {
     const { stdout } = await execFileAsync('ffprobe', [
       '-v', 'error',
-      '-show_entries', 'stream=codec_type,width,height',
+      '-show_entries', 'stream=codec_type,width,height,duration',
       '-show_entries', 'format=duration',
       '-of', 'json',
       filePath,
     ], { timeout: 30000 });
     const json = JSON.parse(stdout);
     const video = (json.streams || []).find((s: any) => s.codec_type === 'video');
-    const durationSec = parseFloat(json.format?.duration);
+    // The picture's own duration; the container's only as a fallback (see header).
+    const streamSec = parseFloat(video?.duration);
+    const durationSec = Number.isFinite(streamSec) && streamSec > 0 ? streamSec : parseFloat(json.format?.duration);
     if (!video || !Number.isFinite(durationSec)) return null;
     return {
       durationMs: Math.round(durationSec * 1000),
@@ -104,7 +121,27 @@ async function frameHash(filePath: string, atSec: number): Promise<bigint | null
   }
 }
 
-function hammingDistance(a: bigint, b: bigint): number {
+/** Pure candidate gate on probes; exported for tests. */
+export function isDurationCandidate(newDurationMs: number, libDurationMs: number): boolean {
+  return Math.abs(libDurationMs - newDurationMs) <= DURATION_TOLERANCE_MS;
+}
+
+/** Timestamps (seconds) at which frames are compared. Distinct, inside the video. */
+export function hashSampleTimes(durationMs: number): number[] {
+  const sec = durationMs / 1000;
+  const times = HASH_SAMPLE_FRACTIONS.map((f, i) => (i === 0 ? Math.min(5, sec * f) : sec * f));
+  return [...new Set(times.map((t) => Math.round(t * 10) / 10))].filter((t) => t >= 0 && t < sec);
+}
+
+/** Pure confirmation rule on per-sample hamming distances (null = frame unavailable); exported for tests. */
+export function confirmsDuplicate(distances: (number | null)[]): boolean {
+  const measured = distances.filter((d): d is number => d !== null);
+  if (measured.length === 0) return false;
+  const matches = measured.filter((d) => d <= FRAME_HASH_MAX_DISTANCE).length;
+  return matches >= Math.min(HASH_MIN_MATCHES, measured.length) && matches * 2 > measured.length;
+}
+
+export function hammingDistance(a: bigint, b: bigint): number {
   let x = a ^ b;
   let count = 0;
   while (x > 0n) { count += Number(x & 1n); x >>= 1n; }
@@ -154,7 +191,7 @@ export async function findDuplicateVideo(newFilePath: string): Promise<Duplicate
   for (const libPath of await listLibraryVideos(newFilePath)) {
     const libProbe = await probeVideo(libPath);
     if (!libProbe || !libProbe.width || !libProbe.height) continue;
-    if (Math.abs(libProbe.durationMs - newProbe.durationMs) > DURATION_TOLERANCE_MS) continue;
+    if (!isDurationCandidate(newProbe.durationMs, libProbe.durationMs)) continue;
     const libAspect = libProbe.width / libProbe.height;
     if (Math.abs(libAspect - newAspect) / newAspect > ASPECT_TOLERANCE) continue;
     if (libProbe.hasAudio !== newProbe.hasAudio) continue;
@@ -162,15 +199,21 @@ export async function findDuplicateVideo(newFilePath: string): Promise<Duplicate
   }
   if (candidates.length === 0) return null;
 
-  // Confirm with a perceptual frame comparison at a shared timestamp.
-  const sampleAt = Math.min(5, (newProbe.durationMs / 1000) / 2);
-  const newHash = await frameHash(newFilePath, sampleAt);
-  if (newHash === null) return null;
+  // Confirm with perceptual frame comparisons at shared timestamps.
+  const sampleTimes = hashSampleTimes(newProbe.durationMs);
+  const newHashes = await Promise.all(sampleTimes.map((t) => frameHash(newFilePath, t)));
+  if (newHashes.every((h) => h === null)) return null;
 
   for (const candidate of candidates) {
-    const candidateHash = await frameHash(candidate, sampleAt);
-    if (candidateHash === null) continue;
-    if (hammingDistance(newHash, candidateHash) <= FRAME_HASH_MAX_DISTANCE) {
+    const distances: (number | null)[] = [];
+    for (let i = 0; i < sampleTimes.length; i++) {
+      const mine = newHashes[i];
+      if (mine === null) { distances.push(null); continue; }
+      const theirs = await frameHash(candidate, sampleTimes[i]);
+      distances.push(theirs === null ? null : hammingDistance(mine, theirs));
+    }
+    if (confirmsDuplicate(distances)) {
+      console.log(JSON.stringify({ event: 'video_dedup_confirmed', candidate, distances, timestamp: new Date().toISOString() }));
       return { existingPath: candidate };
     }
   }
