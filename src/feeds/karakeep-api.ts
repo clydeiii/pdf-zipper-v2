@@ -56,3 +56,58 @@ export async function createKarakeepBookmark(
     alreadyExists: json.alreadyExists === true,
   };
 }
+
+/**
+ * Find bookmark ids whose link URL matches `url` (normalized equality). The
+ * API has no URL lookup and its search indexes titles, so this walks the
+ * newest pages; dead-URL pruning is rare enough that a few pages is fine.
+ * Returns [] when the API isn't configured.
+ */
+export async function findKarakeepBookmarkIdsByUrl(
+  url: string,
+  maxPages = 15
+): Promise<string[]> {
+  if (!KARAKEEP_API_BASE || !KARAKEEP_API_TOKEN) return [];
+  const { normalizeBookmarkUrl } = await import('../urls/normalizer.js');
+  const target = normalizeBookmarkUrl(url);
+  const ids: string[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < maxPages; page++) {
+    const endpoint = new URL('/api/v1/bookmarks', KARAKEEP_API_BASE);
+    endpoint.searchParams.set('limit', '100');
+    if (cursor) endpoint.searchParams.set('cursor', cursor);
+    const res = await fetch(endpoint.toString(), {
+      headers: { Authorization: `Bearer ${KARAKEEP_API_TOKEN}`, Accept: 'application/json' },
+    });
+    if (!res.ok) throw new Error(`Karakeep list failed: HTTP ${res.status}`);
+    const data = (await res.json()) as { bookmarks?: Array<{ id: string; content?: { url?: string } }>; nextCursor?: string };
+    for (const b of data.bookmarks ?? []) {
+      const u = b.content?.url;
+      if (u && normalizeBookmarkUrl(u) === target) ids.push(b.id);
+    }
+    cursor = data.nextCursor;
+    if (!cursor) break;
+  }
+  return ids;
+}
+
+/** Delete one Karakeep bookmark by id. Throws on HTTP/network errors. */
+export async function deleteKarakeepBookmark(id: string): Promise<void> {
+  if (!KARAKEEP_API_BASE || !KARAKEEP_API_TOKEN) return;
+  const endpoint = new URL(`/api/v1/bookmarks/${encodeURIComponent(id)}`, KARAKEEP_API_BASE);
+  const res = await fetch(endpoint.toString(), {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${KARAKEEP_API_TOKEN}` },
+  });
+  if (!res.ok && res.status !== 404) throw new Error(`Karakeep delete failed: HTTP ${res.status}`);
+}
+
+/** Delete every Karakeep bookmark for a URL; returns how many were removed. */
+export async function deleteKarakeepBookmarksByUrl(url: string): Promise<number> {
+  const ids = await findKarakeepBookmarkIdsByUrl(url);
+  for (const id of ids) {
+    await deleteKarakeepBookmark(id);
+    console.log(`[karakeep] Deleted bookmark ${id} for dead URL ${url}`);
+  }
+  return ids.length;
+}

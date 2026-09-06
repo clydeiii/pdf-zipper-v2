@@ -37,6 +37,7 @@ import { notifyJobComplete, notifyJobFailed, isDiscordEnabled } from '../notific
 import { addPendingFixes } from '../fix/pending.js';
 import { BookmarkDeduplicator } from '../urls/deduplicator.js';
 import { canonicalizeSubstackUrl } from '../urls/substack-canonical.js';
+import { probeOriginStatus, pruneDeadUrl } from '../utils/dead-url.js';
 import { classifyFailureMessage, isTransientNetworkMessage } from '../fix/failure.js';
 import { shouldAutoTriggerFix } from '../fix/trigger-policy.js';
 import { updateFixOutcome } from '../fix/ledger.js';
@@ -1000,21 +1001,36 @@ function createConversionWorker(): Worker<ConversionJobData, ConversionJobResult
       });
 
       const reasonMatch = error.message.match(/^(\w+):/);
-      const reason = reasonMatch ? reasonMatch[1] : undefined;
+      let reason = reasonMatch ? reasonMatch[1] : undefined;
+
+      // Dead at origin (404/410, or a tweet Nitter reports 404): a 404 page
+      // renders as a ~100-char shell and reads as "truncated", which would
+      // queue it for AI self-healing and then replay it every 12h as a
+      // "verification" — forever. Prune it instead: pending fix items and the
+      // Karakeep bookmark behind it. Bot walls/outages probe as 'unknown' and
+      // keep the normal path.
+      const failedUrl = job.data.originalUrl || job.data.url;
+      const dead = (await probeOriginStatus(failedUrl).catch(() => 'unknown')) === 'dead';
+      if (dead) {
+        reason = 'not_found';
+        await pruneDeadUrl(failedUrl, { jobId: job.id }).catch(() => { /* logged inside */ });
+      }
 
       await notifyJobFailed({
         jobId: job.id!,
-        url: job.data.originalUrl || job.data.url,
-        error: error.message,
+        url: failedUrl,
+        error: dead ? `not_found: origin returned 404/410 — pruned (${error.message.slice(0, 120)})` : error.message,
         reason,
         attemptsMade: job.attemptsMade,
         maxAttempts: job.opts?.attempts ?? 3,
       });
 
-      try {
-        await maybeQueueAutoFix(job, error);
-      } catch (autoFixError) {
-        console.error('[Fix] Failed to auto-queue diagnosis:', autoFixError);
+      if (!dead) {
+        try {
+          await maybeQueueAutoFix(job, error);
+        } catch (autoFixError) {
+          console.error('[Fix] Failed to auto-queue diagnosis:', autoFixError);
+        }
       }
     }
   });
