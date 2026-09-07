@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PDF Zipper Capture",
-  "version": "3.3.6",
+  "version": "3.3.7",
   "description": "Capture the current page as PDF + Markdown and send it to your own pdf-zipper-v2 server. Alt+Shift+Z; select text to capture part.",
   "permissions": [
     "activeTab",
@@ -12,22 +12,6 @@
   ],
   "host_permissions": [
     "https://pdf.clydeplex.com/*"
-  ],
-  "content_scripts": [
-    {
-      "matches": [
-        "*://*/*"
-      ],
-      "js": [
-        "vendor/Readability.js",
-        "vendor/turndown.js",
-        "content.js"
-      ],
-      "css": [
-        "print.css"
-      ],
-      "run_at": "document_end"
-    }
   ],
   "icons": {
     "16": "icons/icon16.png",

@@ -1,8 +1,10 @@
 /**
  * Content script for PDF Zipper Capture.
  *
- * Runs on every page. Responds to messages from the background service
- * worker to (a) extract page metadata before capture, (b) mark floating
+ * Injected on demand by the background worker (chrome.scripting under
+ * activeTab) when the user triggers a capture — never declared as an
+ * always-on content script, which the Web Store counts as broad host
+ * access. Responds to messages from the background service worker to (a) extract page metadata before capture, (b) mark floating
  * elements for hiding via CSS classes, and (c) restore the page after.
  *
  * This script does NOT print. The background worker drives
