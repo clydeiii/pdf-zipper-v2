@@ -1,17 +1,31 @@
 {
   "manifest_version": 3,
   "name": "PDF Zipper Capture",
-  "version": "3.3.5",
-  "description": "Capture current page as PDF + Markdown, sent to pdf-zipper-v2 with Karpathy metadata enrichment. Shortcut: Alt+Shift+Z (or click toolbar icon, or right-click → Capture). Select text first to capture only that portion.",
-  "permissions": ["activeTab", "scripting", "debugger", "notifications", "contextMenus"],
+  "version": "3.3.6",
+  "description": "Capture the current page as PDF + Markdown and send it to your own pdf-zipper-v2 server. Alt+Shift+Z; select text to capture part.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "debugger",
+    "notifications",
+    "contextMenus"
+  ],
   "host_permissions": [
     "https://pdf.clydeplex.com/*"
   ],
   "content_scripts": [
     {
-      "matches": ["*://*/*"],
-      "js": ["vendor/Readability.js", "vendor/turndown.js", "content.js"],
-      "css": ["print.css"],
+      "matches": [
+        "*://*/*"
+      ],
+      "js": [
+        "vendor/Readability.js",
+        "vendor/turndown.js",
+        "content.js"
+      ],
+      "css": [
+        "print.css"
+      ],
       "run_at": "document_end"
     }
   ],
