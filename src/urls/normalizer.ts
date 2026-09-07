@@ -71,12 +71,36 @@ export function stripTwitterShareParams(rawUrl: string): string {
 }
 
 /**
+ * FT gift/share links: `accessToken=…&sharetype=gift&token=…&syn-…=1` are
+ * minted per share (observed 2026-09-06: a gift link re-bookmarked after the
+ * article had been manually captured computed a different key, so the
+ * manual-source guard never fired and the pipeline re-ran a wall it can't
+ * pass). Article identity is `/content/<uuid>`. Host-gated to ft.com.
+ * Exported for testing.
+ */
+export function stripFtShareParams(rawUrl: string): string {
+  try {
+    const url = new URL(rawUrl);
+    const host = url.hostname.toLowerCase().replace(/^www\./, '');
+    if (host !== 'ft.com') return rawUrl;
+    for (const key of [...url.searchParams.keys()]) {
+      if (/^(accessToken|token|sharetype|shareType|segmentId|desktop|syn-.*)$/i.test(key)) {
+        url.searchParams.delete(key);
+      }
+    }
+    return url.toString().replace(/\?$/, '');
+  } catch {
+    return rawUrl;
+  }
+}
+
+/**
  * Normalize URL to canonical form for deduplication (BOOK-03)
  */
 export function normalizeBookmarkUrl(rawUrl: string): string {
   const youtube = canonicalizeYouTubeUrl(rawUrl);
   if (youtube) return youtube;
-  return normalizeUrl(stripTwitterShareParams(rawUrl), {
+  return normalizeUrl(stripFtShareParams(stripTwitterShareParams(rawUrl)), {
     stripWWW: true,
     removeQueryParameters: [
       /^utm_\w+/i,     // UTM tracking

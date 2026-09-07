@@ -33,3 +33,12 @@ test('other x.com query params survive', () => {
     'https://x.com/search?q=hello'
   );
 });
+
+test('FT gift-link params never reach the dedup key', async () => {
+  const { stripFtShareParams } = await import('../dist/urls/normalizer.js');
+  const gift = 'https://www.ft.com/content/f100c90b-c138-4125-aaa7-853b77690db9?accessToken=zwAAAaBMm1&sharetype=gift&token=0062664e-51e4&syn-25a6b1a6=1';
+  assert.equal(stripFtShareParams(gift), 'https://www.ft.com/content/f100c90b-c138-4125-aaa7-853b77690db9');
+  assert.equal(normalizeBookmarkUrl(gift), normalizeBookmarkUrl('https://www.ft.com/content/f100c90b-c138-4125-aaa7-853b77690db9'));
+  // token/accessToken on other hosts are untouched
+  assert.equal(stripFtShareParams('https://example.com/x?token=keep'), 'https://example.com/x?token=keep');
+});
