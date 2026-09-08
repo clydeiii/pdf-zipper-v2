@@ -140,7 +140,14 @@ export function buildYtDlpArgs(url: string, stageDir: string, opts: { maxShortSi
     // Largest rendition whose SHORTER side ≤ cap, smaller file preferred.
     // `res` in yt-dlp's sort is the smaller dimension, i.e. the compressor's rule.
     '-f', 'bv*+ba/b',
-    '-S', `res:${opts.maxShortSide},+size`,
+    // `lang` (yt-dlp's language preference: the original track ranks above
+    // every dub) MUST come before `+size`. YouTube now attaches 15+ AI-dubbed
+    // audio tracks to popular videos, and with size first the smallest track
+    // won: 2026-09-08, a week of captures came through with Malayalam/other
+    // dubs (xOi5nDH0lu0 → 249-20 "Malayalam, low" instead of 139-20
+    // "English (US) original (default)"). The container tags still said
+    // `eng`, so tags can't be trusted to detect it.
+    '-S', `res:${opts.maxShortSide},lang,+size`,
     '--merge-output-format', 'mp4',
     '--remux-video', 'mp4',
     '--abort-on-unavailable-fragments',

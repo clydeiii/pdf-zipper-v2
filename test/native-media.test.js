@@ -68,7 +68,9 @@ test('terminal outcomes are named, and "there was no video" is never inferred fr
 test('one format policy: shorter-side cap via -S res, no /best escape, fragments abort, size cap, staging output', () => {
   const args = buildYtDlpArgs('https://youtu.be/x', '/tmp/stage', { maxShortSide: 480, maxFileMb: 5000 });
   const joined = args.join(' ');
-  assert.match(joined, /-S res:480,\+size/);
+  // `lang` before `+size`: the original audio track must outrank YouTube's
+  // AI dubs, which are often the smallest track (2026-09-08 dubbed-capture incident).
+  assert.match(joined, /-S res:480,lang,\+size/);
   assert.match(joined, /-f bv\*\+ba\/b(?! |$)?/);
   assert.ok(!/\/best(\s|$)/.test(joined.replace('bv*+ba/b', '')), 'no unbounded /best fallback');
   assert.match(joined, /--abort-on-unavailable-fragments/);
