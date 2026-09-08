@@ -234,6 +234,7 @@ async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Pro
           }
           const pdfPath = await savePdfToWeeklyBin(smry.pdfBuffer, {
             url: target,
+            oldFilePath,
             title: jobTitle || smry.title || enrichedMetadata?.title,
             bookmarkedAt,
             originalUrl: target,
@@ -303,6 +304,7 @@ async function processJob(job: Job<ConversionJobData, ConversionJobResult>): Pro
     } catch { /* non-fatal */ }
     const pdfPath = await savePdfToWeeklyBin(arch.pdfBuffer, {
       url: target,
+      oldFilePath,
       title: jobTitle || enrichedMetadata?.title,
       bookmarkedAt,
       originalUrl: target,
@@ -354,6 +356,7 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
       await job.updateProgress(80);
       const filePath = await savePdfToWeeklyBin(shareResult.pdfBuffer, {
         url,
+        oldFilePath,
         title,
         bookmarkedAt,
         originalUrl,
@@ -413,6 +416,7 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
     // Save to weekly bin with enriched metadata
     const filePath = await savePdfToWeeklyBin(passthroughResult.pdfBuffer, {
       url,
+      oldFilePath,
       title,
       bookmarkedAt,
       originalUrl,
@@ -661,6 +665,7 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
 
         const filePath = await savePdfToWeeklyBin(passthroughResult.pdfBuffer, {
           url,
+          oldFilePath,
           title,
           bookmarkedAt,
           originalUrl,
@@ -751,6 +756,7 @@ async function runPrimaryCapture(job: Job<ConversionJobData, ConversionJobResult
   // Only save PDF after quality check passes
   const pdfPath = await savePdfToWeeklyBin(result.pdfBuffer, {
     url: filenameUrl,
+    oldFilePath,
     title,
     bookmarkedAt,
     originalUrl,

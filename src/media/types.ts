@@ -32,6 +32,14 @@ export interface MediaItem {
   // Optional metadata
   title?: string;
   bookmarkedAt?: string; // ISO date
+  /**
+   * Basenames of earlier library files this capture supersedes (same source,
+   * different filename). Set only when the predecessor is known — a rerun or
+   * a batch recapture — and written to the MP4 `replaces` tag and the
+   * transcript PDF's `Replaces` field so the KB consumer can drop the old
+   * files. Omitted when unknown; the source URL remains the stable identity.
+   */
+  replaces?: string[];
 }
 
 /**

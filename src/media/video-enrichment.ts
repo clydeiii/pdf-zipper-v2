@@ -26,7 +26,7 @@ import { transcribeWithRetry } from '../utils/whisper-host.js';
 import { createMultipartFileBody } from '../utils/multipart.js';
 import { sendDiscordNotification } from '../notifications/discord.js';
 import { fetchYouTubeMetadata } from './youtube-metadata.js';
-import { isTwitterUrl } from '../utils/save-pdf.js';
+import { isTwitterUrl, stampInfoDictFields } from '../utils/save-pdf.js';
 import { isPatreonPostUrl } from './patreon.js';
 import { env } from '../config/env.js';
 import type { MediaItem } from './types.js';
@@ -333,6 +333,13 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
     }
   }
 
+  // A recapture that lands under its predecessor's exact name replaced it by
+  // overwriting; only names that actually differ are worth telling the KB.
+  if (item.replaces?.length) {
+    const self = path.basename(mp4Path);
+    item.replaces = item.replaces.filter((b) => b !== self);
+  }
+
   // Skip transcription for very long videos. Gate on audio DURATION (the real
   // driver of ASR cost), not mp4 size: a short high-bitrate clip should still
   // get a transcript, while a multi-hour talk can be skipped. ffprobe the local
@@ -352,6 +359,7 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
         doc_type: 'video',
         source_url: item.url,
         bookmarked_at: item.bookmarkedAt || '',
+        ...(item.replaces?.length ? { replaces: item.replaces.join('; ') } : {}),
       },
     });
     return result;
@@ -372,6 +380,7 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
         doc_type: 'video',
         source_url: item.url,
         bookmarked_at: item.bookmarkedAt || '',
+        ...(item.replaces?.length ? { replaces: item.replaces.join('; ') } : {}),
         ...(ytMeta?.channel ? { channel: ytMeta.channel } : {}),
         ...(ytMeta?.uploadDate ? { upload_date: ytMeta.uploadDate } : {}),
       },
@@ -432,6 +441,7 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
         tags: (tags || []).join(', '),
         source_url: item.url,
         bookmarked_at: item.bookmarkedAt || '',
+        ...(item.replaces?.length ? { replaces: item.replaces.join('; ') } : {}),
         transcript_chars: '0',
         silent_video: 'true',
         ...(ytMeta?.channel ? { channel: ytMeta.channel } : {}),
@@ -585,6 +595,7 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
         tags: (tags || []).join(', '),
         source_url: item.url,
         bookmarked_at: item.bookmarkedAt || '',
+        ...(item.replaces?.length ? { replaces: item.replaces.join('; ') } : {}),
         transcript_chars: String(text.length),
         ...(ytMeta?.channel ? { channel: ytMeta.channel } : {}),
         ...(ytMeta?.uploadDate ? { upload_date: ytMeta.uploadDate } : {}),
@@ -612,7 +623,12 @@ export async function enrichVideo(initialMp4Path: string, item: MediaItem): Prom
       thumbnail: ytMeta?.thumbnail,
       transcriptText: formattedTranscript,
     });
-    await writeFile(transcriptPdfPath, pdfBuffer);
+    // A recapture/rerun names its predecessors so the KB consumer can drop
+    // the superseded transcript along with the superseded video.
+    const stampedPdf = item.replaces?.length
+      ? await stampInfoDictFields(pdfBuffer, { Replaces: item.replaces.map((b) => b.replace(/\.mp4$/i, '.transcript.pdf')).join('; ') })
+      : pdfBuffer;
+    await writeFile(transcriptPdfPath, stampedPdf);
     result.transcriptPath = transcriptPdfPath;
     console.log(`Transcript PDF saved: ${transcriptPdfPath} (${pdfBuffer.length} bytes)`);
 

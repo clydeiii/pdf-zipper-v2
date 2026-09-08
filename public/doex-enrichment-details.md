@@ -39,6 +39,7 @@ Read with any PDF metadata reader (`pdfinfo`, pypdf, pdf-lib). Custom fields:
 | `PublishDate` | Publication date. For tweets this is the **exact** timestamp lifted from the rendered DOM (ISO 8601) and overrides any LLM guess |
 | `Creator` | Which pipeline made this: `pdf-zipper v2` (Playwright), `pdf-zipper-v2-archive` (archive.today snapshot), `pdf-zipper-v2-smry` (smry.ai reader-view rescue), `pdf-zipper-v2-chrome-plugin-vX.Y.Z` (manual browser capture) |
 | `ViaArchive` | Present when content came via an archive.today snapshot (value = snapshot URL) or an archive wrapper the user captured manually |
+| `Replaces` | `; `-separated **basenames of earlier files this capture supersedes** — same source, different filename (a rerun that migrated to a canonical name, or a batch recapture such as the 2026-09-08 re-download of videos that had come through with AI-dubbed audio). Treat it as an authoritative delete hint: drop the named files. Present only when the pipeline knew the predecessor; **the source URL (`Subject` here, `source_url` on MP4s) is the stable identity**, so when two files share a source, prefer the newer capture whether or not `Replaces` is set |
 | `ViaSmry` | Present when content came via smry.ai's reader-view extraction (value = smry reader URL). These PDFs are a **clean re-rendering of the extracted article text** — full body text with title/byline/date header, but the original page layout and most images are not preserved. `Author`/`Publication`/`PublishDate` on these captures come from smry's source-page extraction (not the LLM), so they carry stronger provenance than usual |
 | `QuotedTweet` | Tweet captures only: canonical `https://x.com/{user}/status/{id}` URL of the status this tweet quotes. **Authoritative graph edge** — prefer it over parsing the rendered text |
 | `InReplyTo` | Tweet captures only: canonical URL of the parent status this tweet replies to |
@@ -144,6 +145,7 @@ Read with `ffprobe -show_entries format_tags`. Written with
 | Tag | Meaning |
 |---|---|
 | `source_url` | The tweet/page the video was bookmarked from. **Authoritative.** |
+| `replaces` | `; `-separated basenames of earlier library files this video supersedes (same `source_url`, different filename — e.g. the 2026-09-08 recapture of videos whose first download had an AI-dubbed audio track). The matching `.transcript.pdf` carries the same list in its `Replaces` field. Authoritative delete hint when present; absent when the predecessor wasn't known, in which case group by `source_url` and keep the newest |
 | `also_bookmarked_as` | `; `-separated URLs of OTHER tweets that embed this same video (e.g. a quote-tweet of the original). The capture system detects duplicate video content at download time and stores only one copy — `source_url` + `also_bookmarked_as` together are the complete set of tweets referencing this video. Filename attribution follows whichever tweet was bookmarked first; **the tags are authoritative, not the filename** |
 | `title`, `artist` (creator), `album` (publisher/channel) | Standard tags |
 | `summary`, `tags` | LLM enrichment (from the transcript, or from the post text for silent videos) |
