@@ -595,3 +595,19 @@ test('a price paired with a subscription ask is still a paywall', async () => {
   assert.equal(result.passed, false);
   assert.match(result.reason, /Paywall detected/);
 });
+
+test('prose about a subscription product is not a paywall', async () => {
+  // Second false positive on the same Axios article (2026-09-09): the noun
+  // "subscription" near a price is how product coverage reads.
+  const body = 'Meta debuts Muse, its long-planned personal AI agent. ' + filler(700) +
+    ' Meta is offering two subscription options, at $20 per month and $100 per month, plus a free tier. ' + filler(700);
+  const result = await analyzePdfContent(await createPdfWithText(body), 'https://www.axios.com/2026/09/08/meta-debuts-muse-personal-ai-agent');
+  assert.equal(result.passed, true, `subscription-product prose should pass; got: ${result.reason}`);
+});
+
+test('an imperative gate with a price is still a paywall', async () => {
+  for (const gate of ['Subscribe now for $20 per month to continue reading.', 'Sign in to read the full story or become a member for just $5.', 'Unlock unlimited access starting at $9.99.']) {
+    const result = await analyzePdfContent(await createPdfWithText(filler(900) + ' ' + gate + ' ' + filler(300)), 'https://example.com/2026/09/08/some-story');
+    assert.equal(result.passed, false, `gate should fail: ${gate}`);
+  }
+});
