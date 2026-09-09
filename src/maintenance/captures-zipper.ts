@@ -43,7 +43,23 @@ const RETENTION_DAYS = parseInt(process.env.CAPTURES_ZIP_RETENTION_DAYS || '7', 
  * benchmarks harvester (host cron, also midnight). Container TZ is pinned in
  * docker-compose (TZ=America/New_York) so "midnight" matches the host.
  */
-const RUN_HOUR = parseInt(process.env.CAPTURES_ZIP_HOUR || '0', 10);
+/**
+ * Local hours at which a bundle is built. Two by default: midnight for the
+ * 01:00 ship, and 03:00 for the redundant 04:00 ship — before this, anything
+ * captured after midnight waited ~25h for the next day's bundle. Both builds
+ * use the full window, so the 03:00 bundle is a complete standalone fallback
+ * (overwriting the day's dated file and -latest); each day's final bundle
+ * therefore covers 03:00→03:00 and consecutive days tile without gaps.
+ * `CAPTURES_ZIP_HOURS="0,3"` (a lone `CAPTURES_ZIP_HOUR` still works).
+ * Exported for testing.
+ */
+export function parseRunHours(hours: string | undefined, singleHour: string | undefined): number[] {
+  const raw = hours ?? (singleHour !== undefined ? singleHour : '0,3');
+  const parsed = raw.split(',').map((h) => parseInt(h.trim(), 10)).filter((h) => Number.isInteger(h) && h >= 0 && h <= 23);
+  const unique = [...new Set(parsed)].sort((a, b) => a - b);
+  return unique.length > 0 ? unique : [0, 3];
+}
+const RUN_HOURS = parseRunHours(process.env.CAPTURES_ZIP_HOURS, process.env.CAPTURES_ZIP_HOUR);
 /** Set CAPTURES_ZIP_ENABLED=false to disable. */
 const ENABLED = process.env.CAPTURES_ZIP_ENABLED !== 'false';
 /**
@@ -80,8 +96,8 @@ const TWITTER_IMAGE_WINDOW_HOURS = parseTwitterImageWindowHours(
  */
 const ZLIB_LEVEL = 1;
 
-let runTimer: NodeJS.Timeout | null = null;
-let startupTimer: NodeJS.Timeout | null = null;
+const runTimers: NodeJS.Timeout[] = [];
+const startupTimers: NodeJS.Timeout[] = [];
 let bundleBuildInFlight = false;
 let temporaryFileCounter = 0;
 
@@ -488,19 +504,24 @@ export function startCapturesZipper(): void {
     return;
   }
 
-  const delay = msUntilHour(RUN_HOUR);
-  startupTimer = setTimeout(() => {
-    void runWithNotify();
-    runTimer = setInterval(() => { void runWithNotify(); }, ONE_DAY_MS);
-  }, delay);
+  const delays = RUN_HOURS.map((hour) => {
+    const delay = msUntilHour(hour);
+    startupTimers.push(setTimeout(() => {
+      void runWithNotify();
+      runTimers.push(setInterval(() => { void runWithNotify(); }, ONE_DAY_MS));
+    }, delay));
+    return `${String(hour).padStart(2, '0')}:00 (in ${(delay / ONE_HOUR_MS).toFixed(1)}h)`;
+  });
 
   console.log(
-    `Captures zipper scheduled: daily at ${String(RUN_HOUR).padStart(2, '0')}:00 ` +
-    `(first run in ${(delay / ONE_HOUR_MS).toFixed(1)}h), window ${WINDOW_HOURS}h, retain ${RETENTION_DAYS} bundles`
+    `Captures zipper scheduled: daily at ${delays.join(', ')}, ` +
+    `window ${WINDOW_HOURS}h, retain ${RETENTION_DAYS} bundles`
   );
 }
 
 export function stopCapturesZipper(): void {
-  if (startupTimer) { clearTimeout(startupTimer); startupTimer = null; }
-  if (runTimer) { clearInterval(runTimer); runTimer = null; }
+  for (const t of startupTimers) clearTimeout(t);
+  for (const t of runTimers) clearInterval(t);
+  startupTimers.length = 0;
+  runTimers.length = 0;
 }
