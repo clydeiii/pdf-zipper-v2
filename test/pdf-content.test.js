@@ -579,3 +579,19 @@ test('a self-declared short read with the same density still passes', async () =
   const result = await analyzePdfContent(pdf, 'https://example.com/brief-announcement');
   assert.equal(result.passed, true, `read-time badge should exempt; got: ${result.reason}`);
 });
+
+test('a price mentioned in short article prose is not a paywall', async () => {
+  // Real case 2026-09-09: Axios on Meta's Muse agent, "$20 per month" in the body of a
+  // complete free article (4,657 chars — inside the soft-pattern tier).
+  const body = 'Meta debuts Muse, its long-planned personal AI agent. ' + filler(700) +
+    ' Muse will cost $20 per month for consumers, Meta said, with a free tier for basic tasks. ' + filler(700);
+  const result = await analyzePdfContent(await createPdfWithText(body), 'https://www.axios.com/2026/09/08/meta-debuts-muse-personal-ai-agent');
+  assert.equal(result.passed, true, `price in prose should pass; got: ${result.reason}`);
+});
+
+test('a price paired with a subscription ask is still a paywall', async () => {
+  const body = filler(900) + ' Subscribe now for just $20 per month to continue reading this story. ' + filler(300);
+  const result = await analyzePdfContent(await createPdfWithText(body), 'https://example.com/2026/09/08/some-story');
+  assert.equal(result.passed, false);
+  assert.match(result.reason, /Paywall detected/);
+});

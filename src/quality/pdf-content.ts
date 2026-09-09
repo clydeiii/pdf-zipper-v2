@@ -377,10 +377,16 @@ const SOFT_PAYWALL_PATTERNS = [
   /premium\s+(content|article|story)/i,
   /member(\s+|-)?exclusive/i,
 
-  // Price-based prompts
-  /\$\d+\.?\d*\s+(per|a|your|\/)\s*(week|month|year|first)/i,
-  /for\s+just\s+\$\d+\.?\d*/i,
-  /starting\s+at\s+\$\d+\.?\d*/i,
+  // Price-based prompts — only when a subscription cue sits in the same
+  // sentence. A bare price is article prose far more often than a gate:
+  // Axios (whose pieces are short enough for the soft tier) reported Meta's
+  // Muse agent at "$20 per month" and the complete free article was rejected
+  // as paywalled (2026-09-09). Widgets always pair the price with the ask.
+  /(subscri|member|unlock|sign\s+up|join|full\s+access|get\s+access|continue\s+reading|keep\s+reading)[^.!?]{0,80}\$\d+\.?\d*\s*(per|a|your|\/)\s*(week|month|year|first)/i,
+  /\$\d+\.?\d*\s*(per|a|your|\/)\s*(week|month|year|first)[^.!?]{0,80}(subscri|member|unlock|sign\s+up|to\s+(continue|keep)\s+reading|full\s+access)/i,
+  /(subscri|member|unlock|sign\s+up|join|access)[^.!?]{0,60}for\s+just\s+\$\d+\.?\d*/i,
+  /for\s+just\s+\$\d+\.?\d*[^.!?]{0,60}(subscri|member|unlock|sign\s+up|to\s+(continue|keep)\s+reading|access)/i,
+  /(subscri|member|plans?|pricing|unlock|sign\s+up)[^.!?]{0,60}starting\s+at\s+\$\d+\.?\d*/i,
 
   // Bloomberg
   /bloomberg\s+(terminal|professional)/i,
